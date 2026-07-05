@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+<title>bb. — моя смена</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Montserrat:ital,wght@0,700;0,800;0,900;1,900&display=swap" rel="stylesheet">
+<style>
+  /* ============ Фирменные токены bb. ============ */
+  :root{
+    --green:#35D33A;
+    --green-deep:#16A02A;
+    --ink:#0E1A10;          /* тёмная карточка + текст */
+    --panel:#F1F4EA;        /* светлая панель */
+    --tile:#FFFFFF;         /* плитки счётчиков */
+    --line:#E2E7DA;
+    --muted:#6E7B70;
+    --orange:#F5A623;
+    --money:#33E24A;        /* цифра денег на тёмном */
+    --shadow:0 18px 40px rgba(0,0,0,.35);
+    --r:22px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:'Inter',system-ui,-apple-system,sans-serif;
+    background:#0A100C;
+    color:var(--ink);
+    min-height:100vh;
+    padding:14px 12px calc(24px + env(safe-area-inset-bottom));
+    /* лёгкий диагональный «электрический» паттерн bb. на фоне */
+    background-image:
+      repeating-linear-gradient(125deg, rgba(53,211,58,.06) 0 2px, transparent 2px 13px),
+      repeating-linear-gradient(55deg, rgba(53,211,58,.05) 0 2px, transparent 2px 15px);
+  }
+  .num{font-family:'Montserrat',sans-serif;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+
+  /* ============ Панель-«карточка» смены ============ */
+  .panel{
+    max-width:460px;margin:0 auto;background:var(--panel);
+    border-radius:28px;padding:18px;box-shadow:var(--shadow);
+  }
+
+  /* Шапка: аватар + имя + звание */
+  .head{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+  .ava{
+    width:64px;height:64px;border-radius:18px;flex:none;position:relative;overflow:hidden;
+    background:var(--green);display:grid;place-items:center;
+    box-shadow:0 6px 16px rgba(22,160,42,.4);
+  }
+  .ava::before{content:"";position:absolute;inset:0;
+    background:repeating-linear-gradient(120deg, rgba(0,0,0,.10) 0 3px, transparent 3px 9px)}
+  .ava b{position:relative;font-family:'Montserrat';font-style:italic;font-weight:900;font-size:30px;color:#0B140E;letter-spacing:-.05em}
+  .ava b i{color:#fff;font-style:italic}
+  .head .who{min-width:0}
+  .head .name{font-family:'Montserrat';font-weight:800;font-size:21px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .head .role{color:var(--green-deep);font-weight:700;font-size:13.5px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .head .role b{color:var(--ink)}
+
+  /* Уровень */
+  .level{background:#fff;border:1px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:12px}
+  .level .top{display:flex;align-items:baseline;justify-content:space-between;font-size:14px}
+  .level .top .lbl{color:var(--muted);font-weight:600}
+  .level .top .lvl{font-family:'Montserrat';font-weight:800}
+  .level .top .xp{color:var(--muted);font-weight:700;font-size:13px}
+  .level .top .xp b{color:var(--ink)}
+  .bar{height:12px;background:#E6EBDD;border-radius:99px;margin-top:9px;overflow:hidden}
+  .bar span{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--green-deep));border-radius:99px;transition:width .5s ease}
+
+  /* Заработок — тёмная карточка (главный элемент) */
+  .earn{background:var(--ink);border-radius:20px;padding:20px;margin-bottom:12px;position:relative;overflow:hidden}
+  .earn::after{content:"";position:absolute;right:-30px;top:-30px;width:150px;height:150px;
+    background:repeating-linear-gradient(130deg, rgba(51,226,74,.10) 0 3px, transparent 3px 12px);border-radius:50%}
+  .earn .lbl{color:#9fb0a2;font-weight:600;font-size:15px;max-width:52%;line-height:1.25}
+  .earn .row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .earn .val{font-family:'Montserrat';font-weight:900;font-size:46px;line-height:.95;color:var(--money);text-align:right}
+  .earn .cur{font-family:'Montserrat';font-weight:900;font-size:30px;color:var(--money);text-align:right;margin-top:2px}
+  .earn .sub{color:#7f9083;font-size:12.5px;margin-top:10px}
+
+  /* Плитки счётчиков */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+  .tile{background:var(--tile);border:1px solid var(--line);border-radius:16px;padding:14px 16px}
+  .tile .n{font-family:'Montserrat';font-weight:800;font-size:30px;line-height:1}
+  .tile .t{color:var(--muted);font-weight:700;font-size:11px;letter-spacing:.06em;text-transform:uppercase;margin-top:6px}
+  .tile.g .n{color:var(--green-deep)}
+  .tile.o .n{color:var(--orange)}
+
+  /* Футер смены */
+  .foot{display:flex;justify-content:space-between;align-items:center;font-size:14px;color:var(--muted);padding:2px 4px}
+  .foot b{color:var(--ink);font-family:'Montserrat';font-weight:800;margin-left:5px}
+
+  /* Кнопки действий */
+  .actions{max-width:460px;margin:14px auto 0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .btn{border:0;border-radius:16px;padding:15px;font-family:'Inter';font-weight:700;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+  .btn.dark{background:var(--ink);color:#fff}
+  .btn.light{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .btn:active{transform:scale(.98)}
+
+  /* Пустое состояние (смена не открыта) */
+  .empty{text-align:center;padding:14px 6px 4px}
+  .empty .big{font-family:'Montserrat';font-weight:900;font-size:22px}
+  .empty .sm{color:var(--muted);font-size:14px;margin-top:8px;line-height:1.4}
+  .lastcard{background:#fff;border:1px dashed var(--line);border-radius:16px;padding:14px;margin-top:14px;display:flex;justify-content:space-between;align-items:center}
+  .lastcard .l{color:var(--muted);font-size:13px;font-weight:600}
+  .lastcard .r{font-family:'Montserrat';font-weight:800;font-size:20px;color:var(--green-deep)}
+
+  /* ============ Модалки ============ */
+  .sheet{position:fixed;inset:0;background:rgba(6,12,8,.55);display:none;align-items:flex-end;justify-content:center;z-index:50}
+  .sheet.open{display:flex}
+  .sheet .card{background:var(--panel);width:100%;max-width:480px;border-radius:26px 26px 0 0;padding:20px 18px calc(22px + env(safe-area-inset-bottom));max-height:88vh;overflow:auto;animation:up .28s ease}
+  @keyframes up{from{transform:translateY(30px);opacity:.6}to{transform:none;opacity:1}}
+  .sheet h2{font-family:'Montserrat';font-weight:800;font-size:20px;margin:2px 0 4px;display:flex;justify-content:space-between;align-items:center}
+  .sheet h2 .x{width:32px;height:32px;border-radius:50%;background:#fff;border:1px solid var(--line);font-size:18px;line-height:1;display:grid;place-items:center;cursor:pointer;color:var(--muted)}
+  .hint{color:var(--muted);font-size:13px;line-height:1.45;margin:0 0 16px}
+
+  .field{margin-bottom:16px}
+  .field > label{display:block;font-weight:700;font-size:13px;color:var(--ink);margin-bottom:8px}
+  .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;background:#E7ECDE;border-radius:14px;padding:5px}
+  .seg.two{grid-template-columns:1fr 1fr}
+  .seg button{border:0;background:transparent;padding:11px 6px;border-radius:10px;font-family:'Inter';font-weight:700;font-size:13.5px;color:var(--muted);cursor:pointer}
+  .seg button.on{background:#fff;color:var(--ink);box-shadow:0 2px 6px rgba(0,0,0,.08)}
+  .amount{display:flex;align-items:center;background:#fff;border:1px solid var(--line);border-radius:14px;padding:0 14px}
+  .amount input{border:0;outline:0;font-family:'Montserrat';font-weight:800;font-size:26px;padding:13px 0;width:100%;background:transparent;color:var(--ink)}
+  .amount .suf{color:var(--muted);font-weight:700;font-size:14px;white-space:nowrap;padding-left:8px}
+  .tinput{width:100%;border:1px solid var(--line);border-radius:14px;padding:13px 14px;font-family:'Inter';font-weight:600;font-size:15px;outline:0;background:#fff}
+  .save{width:100%;border:0;border-radius:16px;padding:16px;background:var(--green);color:#08130B;font-family:'Montserrat';font-weight:800;font-size:16px;cursor:pointer;margin-top:4px}
+  .save:active{transform:scale(.99)}
+
+  /* История */
+  .htotal{background:var(--ink);border-radius:16px;padding:14px 16px;color:#fff;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .htotal .l{color:#9fb0a2;font-size:13px;font-weight:600}
+  .htotal .r{font-family:'Montserrat';font-weight:900;font-size:24px;color:var(--money)}
+  .hrow{display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid var(--line)}
+  .hrow:last-child{border-bottom:0}
+  .hrow .d{font-weight:700;font-size:15px}
+  .hrow .meta{color:var(--muted);font-size:12.5px;margin-top:3px;display:flex;gap:8px;align-items:center}
+  .badge{font-size:11px;font-weight:700;padding:2px 7px;border-radius:99px;background:#E7ECDE;color:var(--green-deep)}
+  .hrow .e{font-family:'Montserrat';font-weight:800;font-size:19px;color:var(--green-deep)}
+  .hempty{text-align:center;color:var(--muted);padding:30px 10px;font-size:14px}
+
+  /* Загрузка / ошибка */
+  .center{max-width:460px;margin:60px auto 0;text-align:center;color:#dfeee2}
+  .center .big{font-family:'Montserrat';font-weight:900;font-size:22px;color:#fff}
+  .center .sm{color:#9fb0a2;font-size:14px;margin-top:10px;line-height:1.5}
+  .spin{width:34px;height:34px;border:4px solid rgba(255,255,255,.2);border-top-color:var(--green);border-radius:50%;margin:0 auto 16px;animation:sp 1s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+
+  <!-- Загрузка -->
+  <div id="loading" class="center">
+    <div class="spin"></div>
+    <div class="sm">Загружаю смену…</div>
+  </div>
+
+  <!-- Ошибка авторизации -->
+  <div id="autherr" class="center hidden">
+    <div class="big">Откройте через бота</div>
+    <div class="sm">Это приложение работает только внутри Telegram —<br>по кнопке «Моя зарплата» под отчётом<br>или через меню бота.</div>
+  </div>
+
+  <!-- Основной экран -->
+  <div id="app" class="hidden">
+    <div class="panel">
+      <div class="head">
+        <div class="ava"><b>b<i>b</i>.</b></div>
+        <div class="who">
+          <div class="name" id="uName">—</div>
+          <div class="role" id="uRole">—</div>
+        </div>
+      </div>
+
+      <div class="level">
+        <div class="top">
+          <span><span class="lbl">Уровень</span> <span class="lvl" id="lvl">1</span></span>
+          <span class="xp"><b id="xp">0</b> / <span id="need">100</span> XP</span>
+        </div>
+        <div class="bar"><span id="xpbar" style="width:0%"></span></div>
+      </div>
+
+      <!-- Активная смена -->
+      <div id="activeBlock">
+        <div class="earn">
+          <div class="row">
+            <div class="lbl" id="earnLbl">Заработок за смену</div>
+            <div>
+              <div class="val" id="money">0</div>
+              <div class="cur">₽</div>
+            </div>
+          </div>
+          <div class="sub" id="earnSub"></div>
+        </div>
+
+        <div class="grid">
+          <div class="tile"><div class="n" id="cMove">0</div><div class="t">Перемещения</div></div>
+          <div class="tile"><div class="n" id="cFix">0</div><div class="t">Поправки</div></div>
+          <div class="tile g"><div class="n" id="cBat">0</div><div class="t">Замены АКБ</div></div>
+          <div class="tile o"><div class="n" id="cRep">0</div><div class="t">Ремонт</div></div>
+        </div>
+
+        <div class="foot">
+          <span>Время <b id="fTime">0:00</b></span>
+          <span>Район <b id="fDist">—</b></span>
+        </div>
+      </div>
+
+      <!-- Нет активной смены -->
+      <div id="idleBlock" class="hidden">
+        <div class="empty">
+          <div class="big">Смена не открыта</div>
+          <div class="sm">Открой смену в чате командой со временем<br>(например <b>/09:00 фмр</b>) — счётчики и деньги<br>начнут расти здесь вживую.</div>
+        </div>
+        <div class="lastcard" id="lastCard">
+          <div class="l">Прошлая смена<br><span id="lastDate">—</span></div>
+          <div class="r" id="lastEarned">0 ₽</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn light" id="openSettings">⚙️ Настройки</button>
+      <button class="btn dark" id="openHistory">🧾 История</button>
+    </div>
+  </div>
+
+  <!-- ===== Настройки ===== -->
+  <div class="sheet" id="settingsSheet">
+    <div class="card">
+      <h2>Настройки <span class="x" data-close="settingsSheet">✕</span></h2>
+      <p class="hint">Выбери, как тебе платят. Сумму меняешь сам — на будущие смены. Уже закрытые смены не пересчитываются.</p>
+
+      <div class="field">
+        <label>Как считать оплату</label>
+        <div class="seg" id="payTypeSeg">
+          <button data-pt="hourly">Почасовая</button>
+          <button data-pt="salary">Оклад</button>
+          <button data-pt="piece">Сделка</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label id="amtLabel">Ставка</label>
+        <div class="amount">
+          <input id="amtInput" type="number" inputmode="decimal" min="0" step="10" value="350" />
+          <span class="suf" id="amtSuf">₽ / час</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Имя (Фамилия И.О.)</label>
+        <input class="tinput" id="nameInput" placeholder="Понамарев К.А." />
+      </div>
+
+      <div class="field">
+        <label>Роль</label>
+        <div class="seg" id="roleSeg">
+          <button data-role="скаут">Скаут</button>
+          <button data-role="водитель">Водитель</button>
+          <button data-role="чарджер">Чарджер</button>
+        </div>
+      </div>
+
+      <button class="save" id="saveSettings">Сохранить</button>
+    </div>
+  </div>
+
+  <!-- ===== История ===== -->
+  <div class="sheet" id="historySheet">
+    <div class="card">
+      <h2>История смен <span class="x" data-close="historySheet">✕</span></h2>
+      <div class="htotal"><span class="l">Всего заработано</span><span class="r" id="hTotal">0 ₽</span></div>
+      <div id="hList"><div class="hempty">Загружаю…</div></div>
+    </div>
+  </div>
+
+<script>
+/* ============================================================
+   Адрес API. По умолчанию пусто — значит запросы идут на тот же
+   адрес, с которого открыта страница (бот сам её и отдаёт).
+   Менять ничего не нужно. При желании можно переопределить: ?api=https://...
+   ============================================================ */
+const API_BASE = new URLSearchParams(location.search).get('api') || "";
+
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+const initData = tg ? tg.initData : "";
+
+const PAY = {
+  hourly: { label:"Ставка",                 suf:"₽ / час",   earnLbl:"Заработок за смену" },
+  salary: { label:"Оклад за смену",         suf:"₽ / смену", earnLbl:"Оклад за смену" },
+  piece:  { label:"Оплата за одну замену",  suf:"₽ / АКБ",   earnLbl:"Заработок (сделка)" },
+};
+
+let STATE = null;
+let selPayType = "hourly";
+let selRole = "";
+let tick = null;
+
+/* ---------- утилиты ---------- */
+const $ = id => document.getElementById(id);
+const rub = n => Math.round(n).toLocaleString('ru-RU');
+function elapsedMin(hm){
+  if(!hm) return 0;
+  const [h,m] = hm.split(':').map(Number);
+  const now = new Date();
+  let cur = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
+  let d = cur - (h*60+m);
+  if(d < 0) d += 24*60;
+  return d;
+}
+function hm(mins){
+  const h = Math.floor(mins/60), m = Math.floor(mins%60);
+  return h + ':' + String(m).padStart(2,'0');
+}
+
+async function api(path, opts={}){
+  const res = await fetch(API_BASE + path, {
+    ...opts,
+    headers: { 'Authorization':'tma '+initData, 'Content-Type':'application/json', ...(opts.headers||{}) }
+  });
+  if(res.status === 401) throw new Error('auth');
+  if(!res.ok) throw new Error('http '+res.status);
+  return res.json();
+}
+
+/* ---------- расчёт заработка ---------- */
+function earnedNow(){
+  if(!STATE || !STATE.active || !STATE.shift) return STATE && STATE.last ? STATE.last.earned : 0;
+  const amt = STATE.user.pay_amount || 0;
+  const pt  = STATE.user.pay_type;
+  const st  = STATE.shift.stats || {};
+  if(pt === 'salary') return amt;
+  if(pt === 'piece')  return amt * (st.battery || 0);
+  return amt * elapsedMin(STATE.shift.start_time) / 60;   // hourly
+}
+
+/* ---------- рендер ---------- */
+function render(){
+  const u = STATE.user, lv = STATE.level;
+  $('uName').textContent = u.name || 'Без имени';
+  const title = lv.title ? ' · «'+lv.title+'»' : '';
+  $('uRole').innerHTML = (u.role ? '<b>'+u.role+'</b>' : 'Роль не указана') + title;
+
+  $('lvl').textContent = lv.level;
+  $('xp').textContent = lv.xp;
+  $('need').textContent = lv.need;
+  $('xpbar').style.width = Math.min(100, (lv.xp/lv.need)*100) + '%';
+
+  $('earnLbl').textContent = PAY[u.pay_type].earnLbl;
+
+  if(STATE.active && STATE.shift){
+    $('activeBlock').classList.remove('hidden');
+    $('idleBlock').classList.add('hidden');
+    const s = STATE.shift.stats || {};
+    $('cMove').textContent = s.move || 0;
+    $('cFix').textContent  = s.fix || 0;
+    $('cBat').textContent  = s.battery || 0;
+    $('cRep').textContent  = s.repair || 0;
+    $('fDist').textContent = STATE.shift.district || '—';
+    // подпись под деньгами
+    if(u.pay_type === 'hourly') $('earnSub').textContent = rub(u.pay_amount)+' ₽/час · капает по времени';
+    else if(u.pay_type === 'piece') $('earnSub').textContent = rub(u.pay_amount)+' ₽ за замену АКБ';
+    else $('earnSub').textContent = 'Фикс за выход';
+    paintMoney();
+  } else {
+    $('activeBlock').classList.add('hidden');
+    $('idleBlock').classList.remove('hidden');
+    if(STATE.last){
+      $('lastDate').textContent = STATE.last.date + ' · ' + STATE.last.worked;
+      $('lastEarned').textContent = rub(STATE.last.earned)+' ₽';
+      $('lastCard').classList.remove('hidden');
+    } else $('lastCard').classList.add('hidden');
+  }
+}
+
+function paintMoney(){
+  $('money').textContent = rub(earnedNow());
+  if(STATE.active && STATE.shift){
+    $('fTime').textContent = hm(elapsedMin(STATE.shift.start_time));
+  }
+}
+
+/* тикаем деньги каждую секунду только для почасовой активной смены */
+function startTick(){
+  clearInterval(tick);
+  if(STATE && STATE.active && STATE.user.pay_type === 'hourly'){
+    tick = setInterval(paintMoney, 1000);
+  }
+}
+
+/* ---------- загрузка состояния ---------- */
+async function load(){
+  try{
+    STATE = await api('/api/state');
+    $('loading').classList.add('hidden');
+    $('autherr').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    render();
+    startTick();
+  }catch(e){
+    clearInterval(tick);
+    $('loading').classList.add('hidden');
+    $('app').classList.add('hidden');
+    $('autherr').classList.remove('hidden');
+  }
+}
+
+/* ---------- настройки ---------- */
+function openSettings(){
+  const u = STATE.user;
+  selPayType = u.pay_type; selRole = (u.role||'').toLowerCase();
+  syncPayType(); syncRole();
+  $('amtInput').value = u.pay_amount || 0;
+  $('nameInput').value = u.name || '';
+  $('settingsSheet').classList.add('open');
+}
+function syncPayType(){
+  document.querySelectorAll('#payTypeSeg button').forEach(b=>b.classList.toggle('on', b.dataset.pt===selPayType));
+  $('amtLabel').textContent = PAY[selPayType].label;
+  $('amtSuf').textContent = PAY[selPayType].suf;
+}
+function syncRole(){
+  document.querySelectorAll('#roleSeg button').forEach(b=>b.classList.toggle('on', b.dataset.role===selRole));
+}
+document.querySelectorAll('#payTypeSeg button').forEach(b=>{
+  b.onclick = ()=>{ selPayType=b.dataset.pt; syncPayType(); };
+});
+document.querySelectorAll('#roleSeg button').forEach(b=>{
+  b.onclick = ()=>{ selRole=b.dataset.role; syncRole(); };
+});
+$('saveSettings').onclick = async ()=>{
+  const btn = $('saveSettings'); btn.disabled = true; btn.textContent='Сохраняю…';
+  try{
+    await api('/api/settings', { method:'POST', body: JSON.stringify({
+      pay_type: selPayType,
+      pay_amount: parseFloat($('amtInput').value)||0,
+      name: $('nameInput').value.trim(),
+      role: selRole,
+    })});
+    if(tg) tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success');
+    $('settingsSheet').classList.remove('open');
+    await load();
+  }catch(e){
+    alert('Не удалось сохранить. Проверь связь и попробуй ещё раз.');
+  }finally{
+    btn.disabled=false; btn.textContent='Сохранить';
+  }
+};
+
+/* ---------- история ---------- */
+async function openHistory(){
+  $('historySheet').classList.add('open');
+  $('hList').innerHTML = '<div class="hempty">Загружаю…</div>';
+  try{
+    const data = await api('/api/history');
+    let total = 0;
+    if(!data.items.length){
+      $('hList').innerHTML = '<div class="hempty">Пока нет закрытых смен.<br>Закрой первую смену — она появится здесь.</div>';
+    } else {
+      $('hList').innerHTML = data.items.map(it=>{
+        total += it.earned;
+        const ptName = {hourly:'почасовая',salary:'оклад',piece:'сделка'}[it.pay_type]||'';
+        const dist = it.district ? ' · '+it.district : '';
+        return `<div class="hrow">
+          <div><div class="d">${it.date}</div>
+          <div class="meta"><span class="badge">${ptName}</span> ${it.worked}${dist}</div></div>
+          <div class="e">${rub(it.earned)} ₽</div></div>`;
+      }).join('');
+    }
+    $('hTotal').textContent = rub(STATE && STATE.total_earned!=null ? STATE.total_earned : total)+' ₽';
+  }catch(e){
+    $('hList').innerHTML = '<div class="hempty">Не удалось загрузить историю.</div>';
+  }
+}
+
+$('openSettings').onclick = openSettings;
+$('openHistory').onclick = openHistory;
+document.querySelectorAll('[data-close]').forEach(x=>{
+  x.onclick = ()=> $(x.dataset.close).classList.remove('open');
+});
+document.querySelectorAll('.sheet').forEach(s=>{
+  s.addEventListener('click', e=>{ if(e.target===s) s.classList.remove('open'); });
+});
+
+/* ---------- старт ---------- */
+if(tg){
+  tg.ready(); tg.expand();
+  try{ tg.setHeaderColor('#0A100C'); tg.setBackgroundColor('#0A100C'); }catch(e){}
+}
+load();
+// периодически обновляем счётчики (перемещения/АКБ и т.п.)
+setInterval(()=>{ if(!document.hidden && STATE) load(); }, 20000);
+</script>
+</body>
+</html>
