@@ -1,3 +1,0 @@
-aiogram>=3.4
-aiosqlite>=0.19
-aiohttp>=3.9
