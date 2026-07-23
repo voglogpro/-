@@ -1,0 +1,12 @@
+meta:
+  environment: python
+  toolchain:
+    name: pip
+    version: "3.11"
+build:
+  requirementsPath: requirements.txt
+  useCache: true
+run:
+  scriptName: bibitasks.py
+  persistenceMount: /data
+  containerPort: 3000
