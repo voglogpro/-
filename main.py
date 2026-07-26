@@ -9,6 +9,8 @@
 # Стек тот же: Aiogram 3 + aiohttp + SQLite. Данные — в DATA_DIR.
 # ============================================================
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -29,7 +31,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.3.0 (светлая и тёмная тема)"
+BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.4.0 (анкета, теги, шаблоны и фото)"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -212,6 +214,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bibitasks.db")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 LOGO_PATH = os.path.join(BASE_DIR, "logo.jpg")
+TASK_PHOTO_DIR = os.path.join(DATA_DIR, "task_photos")
+os.makedirs(TASK_PHOTO_DIR, exist_ok=True)
 
 print("=" * 60, flush=True)
 print(f"== {BUILD_VERSION}", flush=True)
@@ -251,6 +255,47 @@ TASK_TYPES = {
     "photo_check": {"title": "Фото-проверка", "emoji": "📷",
                     "desc": "Проверить точку и отправить фото"},
 }
+
+# Готовые заготовки экономят ответственному время и оставляют место для
+# конкретного адреса, города и фотографии текущей точки.
+TASK_TEMPLATES = [
+    {
+        "key": "parking",
+        "title": "Поправить парковку байков",
+        "type": "fix_zone",
+        "task_title": "Поправить парковку байков",
+        "details": "Аккуратно выровнять байки, освободить проход и отправить результат в чат.",
+        "reward": 80,
+        "mode": "open",
+    },
+    {
+        "key": "parking_photo",
+        "title": "Проверить парковку и сделать фото",
+        "type": "photo_check",
+        "task_title": "Фото-проверка парковки",
+        "details": "Проверить состояние парковки и отправить понятное фото результата.",
+        "reward": 50,
+        "mode": "all",
+    },
+    {
+        "key": "relocate",
+        "title": "Переставить байки",
+        "type": "relocate",
+        "task_title": "Переставить байки на точке",
+        "details": "Переместить байки по указанному адресу и убедиться, что они не мешают проходу.",
+        "reward": 100,
+        "mode": "open",
+    },
+    {
+        "key": "charge",
+        "title": "Заменить батареи",
+        "type": "charge",
+        "task_title": "Заменить батареи в байках",
+        "details": "Заменить разряженные батареи и проверить, что байки снова доступны для поездки.",
+        "reward": 120,
+        "mode": "open",
+    },
+]
 
 # Уровни доверия: (ключ, название, эмодзи, порог выполненных задач)
 TRUST_LEVELS = [
@@ -332,6 +377,8 @@ async def init_db():
                 help_type   TEXT,
                 transport   TEXT,
                 availability TEXT,
+                about       TEXT,
+                tags        TEXT,
                 application_note TEXT,
                 role        TEXT NOT NULL DEFAULT 'candidate',  -- candidate|applicant|helper|employee|admin
                 status      TEXT NOT NULL DEFAULT 'pending',    -- pending|approved|blocked
@@ -366,7 +413,8 @@ async def init_db():
                 assigned_to INTEGER,
                 slot_start  TEXT,
                 slot_end    TEXT,
-                repeatable  INTEGER NOT NULL DEFAULT 0
+                repeatable  INTEGER NOT NULL DEFAULT 0,
+                photo_file  TEXT
             )
         """)
         await db.execute("""
@@ -499,7 +547,10 @@ async def init_db():
         if "applied_at" not in member_columns:
             await db.execute("ALTER TABLE members ADD COLUMN applied_at TEXT")
             member_columns.add("applied_at")
-        for name in ("city", "help_type", "transport", "availability", "application_note"):
+        for name in (
+            "city", "help_type", "transport", "availability",
+            "about", "tags", "application_note",
+        ):
             if name not in member_columns:
                 await db.execute(f"ALTER TABLE members ADD COLUMN {name} TEXT")
                 member_columns.add(name)
@@ -515,6 +566,7 @@ async def init_db():
             ("repeatable", "INTEGER NOT NULL DEFAULT 0"),
             ("city", "TEXT"),
             ("review_note", "TEXT"),
+            ("photo_file", "TEXT"),
         ):
             if name not in task_columns:
                 await db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")
@@ -583,6 +635,57 @@ async def init_db():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _tags_list(value):
+    """Нормализует теги для поиска: без #, дублей и слишком длинных значений."""
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value or "").replace(";", ",").split(",")
+    result = []
+    seen = set()
+    for item in raw:
+        tag = " ".join(str(item).strip().lstrip("#").split())[:30]
+        key = tag.casefold()
+        if tag and key not in seen:
+            result.append(tag)
+            seen.add(key)
+        if len(result) >= 12:
+            break
+    return result
+
+
+async def _save_task_photo(data_url):
+    """Проверяет data URL от администратора и сохраняет безопасное изображение."""
+    if not data_url:
+        return None
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+        raise ValueError("Не удалось прочитать фотографию.")
+    try:
+        header, encoded = data_url.split(",", 1)
+        if ";base64" not in header:
+            raise ValueError
+        payload = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("Фотография повреждена. Выбери файл ещё раз.")
+    if len(payload) > 2_500_000:
+        raise ValueError("Фотография слишком большая. Максимум — 2,5 МБ.")
+    if payload.startswith(b"\xff\xd8\xff"):
+        ext = "jpg"
+    elif payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext = "png"
+    elif len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        ext = "webp"
+    else:
+        raise ValueError("Поддерживаются фотографии JPG, PNG и WebP.")
+    filename = f"{secrets.token_hex(16)}.{ext}"
+    path = os.path.join(TASK_PHOTO_DIR, filename)
+    def write_photo():
+        with open(path, "wb") as output:
+            output.write(payload)
+    await asyncio.to_thread(write_photo)
+    return filename
 
 
 def parse_slot_iso(value):
@@ -910,36 +1013,22 @@ async def api_state(request):
 
 
 async def api_apply(request):
-    """Заявка «Хочу помогать»: данные для ручного отбора и связи."""
+    """Короткая заявка: имя, город и чем человек может быть полезен."""
     tg = await _auth_user(request)
     if not tg:
         return _json({"error": "auth"}, status=401)
     body = await _body(request)
     name = (body.get("name") or "").strip()[:80]
-    phone = (body.get("phone") or "").strip()[:32]
     city = (body.get("city") or "").strip()[:80]
-    help_type = (body.get("help_type") or "").strip()[:120]
-    transport = (body.get("transport") or "").strip()[:120]
-    availability = (body.get("availability") or "").strip()[:160]
-    consent = body.get("consent") is True
+    about = (body.get("about") or "").strip()[:600]
     if len(name) < 2:
         return _json({"error": "name", "message": "Укажите имя."}, status=400)
-    phone_digits = "".join(ch for ch in phone if ch.isdigit())
-    if not 10 <= len(phone_digits) <= 15:
-        return _json({
-            "error": "phone",
-            "message": "Укажите номер телефона для связи с ответственным.",
-        }, status=400)
     if len(city) < 2:
         return _json({"error": "city", "message": "Укажите город."}, status=400)
-    if not help_type:
-        return _json({"error": "help_type", "message": "Выберите, чем готовы помогать."}, status=400)
-    if not transport:
-        return _json({"error": "transport", "message": "Выберите способ передвижения."}, status=400)
-    if not consent:
+    if len(about) < 5:
         return _json({
-            "error": "consent",
-            "message": "Подтвердите согласие на связь по заявке и заданиям.",
+            "error": "about",
+            "message": "Коротко напишите, что сможете выполнять и чем будете полезны.",
         }, status=400)
     uid = tg["id"]
     m = await get_member(uid)
@@ -948,8 +1037,7 @@ async def api_apply(request):
     if m and (m.get("applied_at") or m.get("role") == "applicant"):
         return _json({"ok": True, "already": True})
     await upsert_member(
-        uid, full_name=name, phone=phone, city=city,
-        help_type=help_type, transport=transport, availability=availability,
+        uid, full_name=name, city=city, about=about,
         application_note="",
         username=tg.get("username", ""),
         role="applicant", status="pending", applied_at=now_iso())
@@ -957,11 +1045,8 @@ async def api_apply(request):
     _notify_admins(
         f"🆕 Новая заявка на помощь\n"
         f"Имя: {name}\n"
-        f"Телефон: {phone or '—'}\n"
         f"Город: {city}\n"
-        f"Готов помогать: {help_type}\n"
-        f"Передвижение: {transport}\n"
-        f"Когда удобно: {availability or 'не указано'}\n"
+        f"Чем полезен: {about}\n"
         f"Ник: @{tg.get('username','') or '—'}\n"
         f"ID: {uid}\n\n"
         f"Открой приложение → Модерация, чтобы одобрить."
@@ -1044,6 +1129,9 @@ def _task_public(t):
         "slot_end": t.get("slot_end"),
         "repeatable": bool(t.get("repeatable")),
         "city": t.get("city") or "",
+        "photo_url": (
+            f"/task-photo/{t.get('photo_file')}" if t.get("photo_file") else ""
+        ),
         "assignment_id": t.get("assignment_id"),
         "claimed_name": t.get("claimed_name") or "",
         "proof_note": (
@@ -1368,13 +1456,12 @@ async def api_admin_overview(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         pending = await (await db.execute(
-            "SELECT user_id, full_name, phone, username, city, help_type, transport, "
-            "availability, created_at FROM members "
+            "SELECT user_id, full_name, username, city, about, created_at FROM members "
             "WHERE status='pending' AND (applied_at IS NOT NULL OR role='applicant') "
             "ORDER BY applied_at DESC, created_at DESC")).fetchall()
         rejected = await (await db.execute(
-            "SELECT user_id, full_name, phone, username, city, help_type, transport, "
-            "availability, application_note, created_at FROM members "
+            "SELECT user_id, full_name, username, city, about, "
+            "application_note, created_at FROM members "
             "WHERE status='blocked' AND (applied_at IS NOT NULL OR role='applicant') "
             "ORDER BY applied_at DESC, created_at DESC LIMIT 50")).fetchall()
         review = await (await db.execute(
@@ -1398,9 +1485,10 @@ async def api_admin_overview(request):
             "WHERE t.status IN ('open','claimed') "
             "ORDER BY t.created_at DESC LIMIT 100")).fetchall()
         team = await (await db.execute(
-            "SELECT user_id, full_name, role, bonus, done_count, chat_xp FROM members "
+            "SELECT user_id, full_name, username, city, about, tags, role, bonus, "
+            "done_count, chat_xp, created_at FROM members "
             "WHERE status='approved' ORDER BY done_count DESC, chat_xp DESC "
-            "LIMIT 100")).fetchall()
+            "LIMIT 500")).fetchall()
         withdrawals = await (await db.execute(
             "SELECT w.id, w.user_id, w.amount, w.status, w.created_at, "
             "w.decided_at, w.note, m.full_name, m.username "
@@ -1432,12 +1520,16 @@ async def api_admin_overview(request):
             "user_id": r["user_id"], "name": r["full_name"], "role": r["role"],
             "bonus": r["bonus"], "done_count": r["done_count"],
             "chat_xp": r["chat_xp"] or 0,
+            "city": r["city"] or "", "username": r["username"] or "",
+            "about": r["about"] or "", "tags": _tags_list(r["tags"]),
+            "created_at": r["created_at"],
             "trust_name": trust_for(trust_score(r["done_count"], r["chat_xp"]))[1],
             "trust_emoji": trust_for(trust_score(r["done_count"], r["chat_xp"]))[2],
         } for r in team],
         "withdrawals": [dict(r) for r in withdrawals],
         "awards": [_award_public(dict(r)) for r in awards],
         "granted": [dict(r) for r in granted],
+        "task_templates": TASK_TEMPLATES,
     })
 
 
@@ -1617,17 +1709,30 @@ async def api_admin_task_create(request):
         }, status=400)
     lat = body.get("lat")
     lng = body.get("lng")
-    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
-        cur = await db.execute(
-            "INSERT INTO tasks (type, title, details, lat, lng, address, city, reward, "
-            "status, created_by, created_at, assigned_to, slot_start, slot_end, repeatable) "
-            "VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?)",
-            (
-                ttype, title, details, lat, lng, address, city, reward, admin_id,
-                now_iso(), assigned_to, slot_start, slot_end, int(repeatable),
-            ))
-        await db.commit()
-        tid = cur.lastrowid
+    try:
+        photo_file = await _save_task_photo(body.get("photo_data"))
+    except ValueError as e:
+        return _json({"error": "photo", "message": str(e)}, status=400)
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            cur = await db.execute(
+                "INSERT INTO tasks (type, title, details, lat, lng, address, city, reward, "
+                "status, created_by, created_at, assigned_to, slot_start, slot_end, "
+                "repeatable, photo_file) "
+                "VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ttype, title, details, lat, lng, address, city, reward, admin_id,
+                    now_iso(), assigned_to, slot_start, slot_end, int(repeatable), photo_file,
+                ))
+            await db.commit()
+            tid = cur.lastrowid
+    except Exception:
+        if photo_file:
+            try:
+                os.remove(os.path.join(TASK_PHOTO_DIR, photo_file))
+            except OSError:
+                pass
+        raise
     if assigned_to:
         parts = [
             "📌 Тебе назначено новое задание",
@@ -1635,6 +1740,8 @@ async def api_admin_task_create(request):
         ]
         if details:
             parts.append(details)
+        if photo_file:
+            parts.append("📷 К заданию прикреплена фотография — открой карточку в приложении.")
         parts.append(f"📍 {city} · {address}")
         if slot_start:
             parts.append(f"🕒 {slot_text(slot_start, slot_end)}")
@@ -1653,6 +1760,8 @@ async def api_admin_task_create(request):
             ]
             if details:
                 lines.append(_html(details))
+            if photo_file:
+                lines.append("📷 Фотография точки прикреплена в приложении.")
             lines.append(f"📍 {_html(city)} · {_html(address)}")
             if slot_start:
                 lines.append(f"🕒 {_html(slot_text(slot_start, slot_end))}")
@@ -1673,6 +1782,7 @@ async def api_admin_task_create(request):
         "task_id": tid,
         "personal": bool(assigned_to),
         "repeatable": repeatable,
+        "has_photo": bool(photo_file),
         "announced": announced,
         "announce_error": announce_error,
     })
@@ -2061,6 +2171,27 @@ async def api_admin_set_role(request):
     return _json({"ok": True, "role": role})
 
 
+async def api_admin_member_tags(request):
+    """Сохраняет короткие теги, по которым ответственный ищет людей."""
+    admin_id, err = await _require_admin(request)
+    if err is not None:
+        return err
+    body = await _body(request)
+    uid = _as_int(body.get("user_id"))
+    if uid is None:
+        return _json({"error": "bad_user"}, status=400)
+    tags = _tags_list(body.get("tags"))
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        cur = await db.execute(
+            "UPDATE members SET tags=? WHERE user_id=? AND status='approved'",
+            (", ".join(tags), uid),
+        )
+        await db.commit()
+    if cur.rowcount != 1:
+        return _json({"error": "not_found"}, status=404)
+    return _json({"ok": True, "tags": tags, "updated_by": admin_id})
+
+
 # ============================================================
 # НАГРАДЫ
 # ============================================================
@@ -2301,6 +2432,20 @@ async def serve_logo(request):
     return web.Response(text="logo.jpg не найден", status=404)
 
 
+async def serve_task_photo(request):
+    filename = request.match_info.get("filename", "")
+    if (
+        not filename
+        or os.path.basename(filename) != filename
+        or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for ch in filename.lower())
+    ):
+        raise web.HTTPNotFound()
+    path = os.path.join(TASK_PHOTO_DIR, filename)
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def api_health(request):
     return _json({
         "ok": True, "version": BUILD_VERSION,
@@ -2331,7 +2476,10 @@ async def error_middleware(request, handler):
 
 async def start_api_server():
     try:
-        app = web.Application(middlewares=[error_middleware])
+        app = web.Application(
+            middlewares=[error_middleware],
+            client_max_size=5 * 1024 * 1024,
+        )
         app.router.add_route("OPTIONS", "/{tail:.*}", _options)
         app.router.add_get("/api/state", api_state)
         app.router.add_post("/api/apply", api_apply)
@@ -2349,12 +2497,14 @@ async def start_api_server():
         app.router.add_post("/api/admin/withdraw/decide", api_admin_withdraw_decide)
         app.router.add_post("/api/referral/verify", api_referral_verify)
         app.router.add_post("/api/admin/role", api_admin_set_role)
+        app.router.add_post("/api/admin/member/tags", api_admin_member_tags)
         app.router.add_get("/api/awards", api_awards)
         app.router.add_post("/api/admin/award/save", api_admin_award_save)
         app.router.add_post("/api/admin/award/grant", api_admin_award_grant)
         app.router.add_post("/api/admin/award/revoke", api_admin_award_revoke)
         app.router.add_get("/health", api_health)
         app.router.add_get("/logo.jpg", serve_logo)
+        app.router.add_get("/task-photo/{filename}", serve_task_photo)
         app.router.add_get("/index.html", serve_index)
         app.router.add_get("/", serve_index)
         runner = web.AppRunner(app)
@@ -3344,9 +3494,9 @@ async def group_watch(message: Message):
 WORK_INSTRUCTION = (
     "🚲 <b>Как помогать Бибибайку и получать бибибонусы</b>\n\n"
     "<b>1. Подай заявку</b>\n"
-    "Открой приложение и укажи имя, телефон, город, чем готов помогать, "
-    "как передвигаешься и когда обычно свободен. Телефон видят ответственные — "
-    "он нужен только для связи по заявке и заданиям. Доступ выдаётся вручную, "
+    "Открой приложение и укажи имя, город и коротко напиши, что сможешь "
+    "выполнять и чем будешь полезен компании. Номер телефона не требуется. "
+    "Доступ выдаётся вручную, "
     "чтобы команда не набирала больше людей, чем может обеспечить задачами.\n\n"
     "<b>2. Возьми задание</b>\n"
     "После одобрения открой вкладку «Задания». Проверь город, адрес, время и "
