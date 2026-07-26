@@ -435,11 +435,11 @@ select.tinput{appearance:none;background-image:
     <!-- подписка на канал -->
     <div id="subBox" class="card warm hidden">
       <div class="eyebrow"><b></b>Подписка</div>
-      <h2 class="big">Подпишись на канал</h2>
-      <p class="sub">Ты пришёл по ссылке друга. Подпишись — и другу засчитается
+      <h2 class="big">Вступи в сообщество</h2>
+      <p class="sub">Ты пришёл по ссылке друга. Вступи — и другу засчитается
         приглашение, а ты первым увидишь новые задания и акции.</p>
       <div class="acts">
-        <button class="btn btn-volt sm" id="subOpen">Открыть канал</button>
+        <button class="btn btn-volt sm" id="subOpen">Открыть сообщество</button>
         <button class="mini" id="subCheck">Я подписался</button>
       </div>
     </div>
@@ -450,11 +450,37 @@ select.tinput{appearance:none;background-image:
       <div id="participantRegister">
         <h2 class="big">Помогай Бибибайку — забирай бибибонусы</h2>
         <p class="sub" style="margin-bottom:14px">Развоз байков, обслуживание зон,
-          подзарядка. Каждое подтверждённое задание — молнии на бесплатные поездки.</p>
+          подзарядка. 1 бибибонус заменяет 1 ₽ при оплате минут поездки.</p>
         <div class="field"><label>Имя и фамилия</label>
           <input class="tinput" id="apName" placeholder="Кирилл Понамарев" inputmode="text"></div>
         <div class="field"><label>Телефон</label>
           <input class="tinput" id="apPhone" placeholder="+7 900 000-00-00" inputmode="tel"></div>
+        <div class="hint" style="margin:-5px 0 12px">Телефон увидят только ответственные.
+          Он нужен для связи по заявке и заданиям.</div>
+        <div class="field"><label>Город</label>
+          <input class="tinput" id="apCity" placeholder="Краснодар" inputmode="text"></div>
+        <div class="field"><label>Чем готов помогать</label>
+          <select class="tinput" id="apHelp">
+            <option value="">Выбери вариант</option>
+            <option>Готов к разным заданиям</option>
+            <option>Развозить и переставлять байки</option>
+            <option>Заряжать и менять батареи</option>
+            <option>Проверять точки и делать фото</option>
+            <option>Помогать сообществу и новичкам</option>
+          </select></div>
+        <div class="field"><label>Как передвигаешься</label>
+          <select class="tinput" id="apTransport">
+            <option value="">Выбери вариант</option>
+            <option>Есть личный автомобиль</option>
+            <option>Велосипед или самокат</option>
+            <option>Общественный транспорт или пешком</option>
+            <option>Зависит от задания</option>
+          </select></div>
+        <div class="field"><label>Когда обычно удобно</label>
+          <input class="tinput" id="apAvailability" placeholder="Будни после 18:00, выходные"></div>
+        <div class="check" id="apConsent"><div class="bx">✓</div>
+          <div class="tx">Разрешаю связаться со мной
+            <small>Только по заявке, заданиям и переводу бибибонусов</small></div></div>
         <button class="btn btn-volt" id="apSend">Отправить заявку</button>
       </div>
     </div>
@@ -464,17 +490,17 @@ select.tinput{appearance:none;background-image:
       <div class="eyebrow"><b></b>Статус заявки</div>
       <h2 class="big">⏳ Заявка на рассмотрении</h2>
       <p class="sub">Ответственный одобрит её — и задания появятся здесь.
-        Уведомление придёт в чат с ботом.</p>
+        Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.</p>
       <div class="charge warm" style="margin-top:13px"><i style="width:55%"></i></div>
-
+      <button class="btn btn-ghost hidden" id="waitContact" style="margin-top:13px">Задать вопрос ответственному</button>
     </div>
 
     <!-- заблокирован -->
     <div id="blockedBox" class="card hidden">
       <div class="eyebrow"><b></b>Статус заявки</div>
       <h2 class="big">Заявка отклонена</h2>
-      <p class="sub">Если это ошибка — напиши ответственному, он вернёт доступ
-        одной кнопкой.</p>
+      <p class="sub" id="blockedReason">Причину можно уточнить у ответственного.</p>
+      <button class="btn btn-ghost hidden" id="blockedContact" style="margin-top:13px">Написать ответственному</button>
     </div>
 
     <!-- рабочее -->
@@ -499,16 +525,18 @@ select.tinput{appearance:none;background-image:
     <div class="card solid">
       <div class="eyebrow"><b></b>Баланс</div>
       <div class="bigmoney"><span class="num" id="wBonus">0</span><small>⚡</small></div>
-      <p class="sub" style="margin-top:9px">Меняются на настоящие бонусы приложения
-        Бибибайк. После заявки сумма резервируется до решения ответственного.</p>
+      <p class="sub" style="margin-top:9px">Переводятся в приложение Бибибайк
+        и расходуются вместо рублей на минуты поездки.</p>
+      <p class="sub" style="margin-top:7px;font-weight:700" id="wRate">1⚡ = 1 ₽ · минута — 8,5 ₽</p>
+      <p class="sub" style="margin-top:7px">После заявки сумма резервируется до решения ответственного.</p>
       <div class="charge" style="margin-top:14px"><i id="wBar" style="width:0%"></i></div>
-      <div class="hint" id="wWithdrawHint">Минимум для обмена — 1000.</div>
-      <div class="field" style="margin-top:14px"><label>Сколько обменять</label>
+      <div class="hint" id="wWithdrawHint">Минимум для перевода — 1000.</div>
+      <div class="field" style="margin-top:14px"><label>Сколько перевести</label>
         <input class="tinput num" id="wWithdrawAmount" inputmode="numeric" placeholder="1000"></div>
-      <button class="btn btn-volt" id="wWithdraw">Запросить обмен</button>
+      <button class="btn btn-volt" id="wWithdraw">Запросить перевод</button>
     </div>
     <div class="card hidden" id="wRequestsCard">
-      <div class="eyebrow"><b></b>Заявки на обмен</div>
+      <div class="eyebrow"><b></b>Заявки на перевод</div>
       <div id="wRequests"></div>
     </div>
     <div class="card">
@@ -532,8 +560,7 @@ select.tinput{appearance:none;background-image:
       <div class="charge"><i id="pBar" style="width:0%"></i></div>
       <div class="ty" id="pSource" style="margin-top:9px">—</div>
       <p class="sub" style="margin-top:9px">Уровень растёт за подтверждённые задания
-        и за живое участие в беседе группы. Выше уровень — крупнее задания
-        и меньше проверок.</p>
+        и за живое участие в беседе группы. Он показывает твой опыт в сообществе.</p>
     </div>
 
     <div class="card warm" id="pAwardsCard">
@@ -544,7 +571,7 @@ select.tinput{appearance:none;background-image:
     <div class="card">
       <div class="eyebrow"><b></b>Реферальный прогресс</div>
       <div class="rowsplit">
-        <div><span class="num" style="font-size:30px;font-weight:900;color:var(--volt)"
+        <div><span class="num" style="font-size:30px;font-weight:900;color:var(--brand-ink)"
                    id="pRefCount">0</span>
           <span class="ty" style="margin-left:5px">друзей</span></div>
         <div class="ty" id="pRefNext">—</div>
@@ -556,14 +583,14 @@ select.tinput{appearance:none;background-image:
     <div class="card">
       <div class="eyebrow"><b></b>Пригласить друга</div>
       <p class="sub" style="margin-bottom:13px" id="pRefRule">Друг заходит по твоей
-        ссылке и подписывается на канал — прогресс сразу +1. Награда за ступень
+        ссылке и вступает в сообщество — прогресс сразу +1. Награда за ступень
         приходит в тот же момент.</p>
       <button class="btn btn-dark" id="pRef">📨 Поделиться ссылкой</button>
     </div>
 
     <div class="card">
       <div class="eyebrow"><b></b>Как это работает</div>
-      <p class="sub">Берёшь задание на карте → выполняешь → жмёшь «Готово» →
+      <p class="sub">Выбираешь задание → проверяешь город, адрес и время → выполняешь → жмёшь «Готово» →
         ответственный подтверждает → молнии падают в кошелёк. За особые дела
         ответственный выдаёт награды с бонусом сверху.</p>
     </div>
@@ -577,12 +604,14 @@ select.tinput{appearance:none;background-image:
       <button data-asub="adSubCreate">Задание</button>
       <button data-asub="adSubAwards">Награды</button>
       <button data-asub="adSubTeam">Команда</button>
-      <button data-asub="adSubWithdraw">Обмены</button>
+      <button data-asub="adSubWithdraw">Переводы</button>
     </div></div>
 
     <div id="adSubQueue" style="display:flex;flex-direction:column;gap:12px">
       <div class="card"><div class="eyebrow"><b></b>Заявки в команду<span class="cnt" id="adPendingCnt"></span></div>
         <div id="adPending"><div class="empty">Загружаю…</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Отклонённые заявки<span class="cnt" id="adRejectedCnt"></span></div>
+        <div id="adRejected"><div class="empty">Загружаю…</div></div></div>
       <div class="card lit"><div class="eyebrow"><b></b>На проверке<span class="cnt" id="adReviewCnt"></span></div>
         <div id="adReview"><div class="empty">Загружаю…</div></div></div>
       <div class="card"><div class="eyebrow"><b></b>Активные задания<span class="cnt" id="adOpenCnt"></span></div>
@@ -591,6 +620,8 @@ select.tinput{appearance:none;background-image:
 
     <div id="adSubCreate" class="card hidden">
       <div class="eyebrow"><b></b>Новое задание</div>
+      <p class="sub" style="margin-bottom:14px">Заполни город, адрес, награду и режим.
+        Для общего задания можно сразу отправить объявление в тему «Работа».</p>
       <div class="two">
         <div class="field"><label>Тип</label><select class="tinput" id="ntType"></select></div>
         <div class="field"><label>Награда ⚡</label>
@@ -608,15 +639,23 @@ select.tinput{appearance:none;background-image:
         <input class="tinput" id="ntTitle" placeholder="Развезти 10 байков из СЦ"></div>
       <div class="field"><label>Что сделать</label>
         <input class="tinput" id="ntDetails" placeholder="Забрать с сервиса, расставить у ТЦ"></div>
-      <div class="field"><label>Адрес</label>
-        <input class="tinput" id="ntAddr" placeholder="ФМР, ул. Красная"></div>
+      <div class="two">
+        <div class="field"><label>Город</label>
+          <input class="tinput" id="ntCity" placeholder="Краснодар"></div>
+        <div class="field"><label>Адрес или ориентир</label>
+          <input class="tinput" id="ntAddr" placeholder="ФМР, ул. Красная"></div>
+      </div>
       <div class="two">
         <div class="field"><label>Начало слота</label>
           <input class="tinput" id="ntSlotStart" type="datetime-local"></div>
         <div class="field"><label>Конец слота</label>
           <input class="tinput" id="ntSlotEnd" type="datetime-local"></div>
       </div>
-      <button class="btn btn-volt" id="ntCreate">Опубликовать задание</button>
+      <div class="check on" id="ntAnnounce"><div class="bx">✓</div>
+        <div class="tx">Объявить в теме «Работа»
+          <small>Участники увидят карточку задания и кнопку приложения</small></div></div>
+      <div class="hint" id="ntRewardHint" style="margin:0 0 12px">Укажи награду — покажу эквивалент в минутах.</div>
+      <button class="btn btn-volt" id="ntCreate">Проверить и опубликовать</button>
       <div class="hint">Слот можно не заполнять — тогда задание бессрочное.</div>
     </div>
 
@@ -640,7 +679,7 @@ select.tinput{appearance:none;background-image:
     </div>
 
     <div id="adSubWithdraw" class="card hidden">
-      <div class="eyebrow"><b></b>Заявки на обмен</div>
+      <div class="eyebrow"><b></b>Заявки на перевод</div>
       <div id="adWithdrawals"><div class="empty">Загружаю…</div></div>
     </div>
   </div>
@@ -919,6 +958,14 @@ async function load(){
   $('hRole').textContent = roleLabel(me);
   setBonus(me.bonus);
   $('pVersion').textContent = STATE.build_version || '';
+  if(!$('apName').value) $('apName').value = me.name || '';
+  if(!$('apCity').value) $('apCity').value = me.city || '';
+  if(!$('ntCity').value){
+    try{ $('ntCity').value = localStorage.getItem('bibitasks_task_city') || me.city || ''; }
+    catch(e){ $('ntCity').value = me.city || ''; }
+  }
+  const support = STATE.support_username || '';
+  ['waitContact','blockedContact'].forEach(id=>$(id).classList.toggle('hidden', !support));
 
   $('pBadge').textContent = me.trust_emoji;
   $('pLevel').textContent = me.trust_name;
@@ -940,7 +987,7 @@ async function load(){
     : me.done_count + ' ' + plural(me.done_count,'задание','задания','заданий');
   renderReferral(STATE.referral || {count:0, milestones:[]});
   $('pRefRule').textContent = (STATE.referral_gate && STATE.referral_gate.required)
-    ? 'Друг заходит по твоей ссылке и подписывается на канал — прогресс сразу +1. Награда за ступень приходит в тот же момент.'
+    ? 'Друг заходит по твоей ссылке и вступает в сообщество — прогресс сразу +1. Награда за ступень приходит в тот же момент.'
     : 'Друг заходит по твоей ссылке и проходит одобрение в команду. Награда за ступень приходит сразу.';
   renderAwardShelf();
 
@@ -1010,9 +1057,21 @@ function renderTasksTab(){
   $('applyBox').classList.toggle('hidden', !fresh);
   $('waitBox').classList.toggle('hidden', !waiting);
   $('blockedBox').classList.toggle('hidden', !blocked);
+  $('blockedReason').textContent = me.application_note
+    ? 'Причина: ' + me.application_note
+    : 'Причину можно уточнить у ответственного.';
   $('worksBox').classList.toggle('hidden', !canWork);
   if(canWork) loadTasks();
 }
+function openSupport(){
+  const u = STATE && STATE.support_username;
+  if(!u){ toast('Контакт ответственного не настроен'); return; }
+  const url = 'https://t.me/'+u;
+  try{ tg && tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url,'_blank'); }
+  catch(e){ toast('@'+u); }
+}
+$('waitContact').onclick = openSupport;
+$('blockedContact').onclick = openSupport;
 
 function renderReferral(ref){
   const count = Number(ref.count||0);
@@ -1097,11 +1156,13 @@ function taskBody(t){
     '<div class="ty">'+esc(t.type_title)+'</div></div>'+
     '<span class="rw">+'+Number(t.reward||0)+'⚡</span></div>'+
     (t.details?'<div class="dt">'+esc(t.details)+'</div>':'')+
-    (t.address?'<div class="addr">📍 '+esc(t.address)+'</div>':'')+
+    ((t.city||t.address)?'<div class="addr">📍 '+
+      esc([t.city,t.address].filter(Boolean).join(' · '))+'</div>':'')+
     (pills.length?'<div class="meta">'+pills.join('')+'</div>':'');
 }
 function taskCardOpen(t){
   return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
+    (t.review_note?'<div class="dt">↩️ Доработать: '+esc(t.review_note)+'</div>':'')+
     '<div class="acts"><button class="btn btn-volt sm" data-claim="'+t.id+'">'+
     'Взять задание</button></div></div>';
 }
@@ -1149,21 +1210,24 @@ async function loadWallet(){
     const d = await api('/api/wallet');
     const min = Number(d.withdraw_min||1000);
     const bonus = Number(d.bonus||0);
+    const rate = Number(d.ride_rub_per_min||8.5);
     $('wBonus').textContent = bonus;
     setBonus(bonus);
     $('wBar').style.width = pct(bonus, min) + '%';
+    $('wRate').textContent = '1⚡ = 1 ₽ · минута — '+
+      rate.toLocaleString('ru-RU')+' ₽ · баланс ≈ '+Math.round(bonus/rate)+' мин';
     const enough = bonus >= min;
     $('wWithdraw').disabled = !enough;
     $('wWithdrawHint').textContent = enough
-      ? 'Можно обменять. Минимум — ' + min + '.'
+      ? 'Можно перевести. Минимум — ' + min + '.'
       : 'Нужно ещё ' + (min-bonus) + ' ' + plural(min-bonus,'молния','молнии','молний') +
-        ' до обмена. Минимум — ' + min + '.';
+        ' до перевода. Минимум — ' + min + '.';
     $('wWithdrawHint').classList.toggle('bad', false);
     if(!$('wWithdrawAmount').value) $('wWithdrawAmount').placeholder = String(min);
 
     const reqs = d.withdrawals || [];
     $('wRequestsCard').classList.toggle('hidden', !reqs.length);
-    const label = {pending:'⏳ На рассмотрении', approved:'✅ Обменяно', rejected:'↩️ Отклонено'};
+    const label = {pending:'⏳ На рассмотрении', approved:'✅ Переведено', rejected:'↩️ Не выполнено'};
     $('wRequests').innerHTML = reqs.map(r=>
       '<div class="ledger"><div><div class="rs">'+(label[r.status]||esc(r.status))+'</div>'+
       '<div class="dtm">'+fmtDate(r.created_at)+(r.note?' · '+esc(r.note):'')+'</div></div>'+
@@ -1180,7 +1244,7 @@ async function loadWallet(){
 }
 $('wWithdraw').onclick = ()=>{
   const amount = Number(($('wWithdrawAmount').value||'').replace(/\D/g,''));
-  if(!amount){ toast('Укажи сумму обмена'); return; }
+  if(!amount){ toast('Укажи сумму перевода'); return; }
   press($('wWithdraw'),'Отправляю…', async ()=>{
     const d = await api('/api/withdraw/request',{method:'POST',
       body:JSON.stringify({amount:amount})});
@@ -1190,7 +1254,7 @@ $('wWithdraw').onclick = ()=>{
     await loadWallet();
     if(d.contact){
       const text = encodeURIComponent(
-        'Привет! Заявка на обмен #'+d.request_id+' на '+d.amount+' бибибонусов.');
+        'Привет! Заявка на перевод #'+d.request_id+' на '+d.amount+' бибибонусов в приложение Бибибайк.');
       const url = 'https://t.me/'+d.contact+'?text='+text;
       try{ tg && tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url,'_blank'); }
       catch(err){}
@@ -1201,10 +1265,21 @@ $('wWithdraw').onclick = ()=>{
 /* ── регистрация и вход ────────────────────────────────────── */
 $('apSend').onclick = ()=>{
   const name = $('apName').value.trim();
+  const phone = $('apPhone').value.trim();
+  const city = $('apCity').value.trim();
   if(name.length < 2){ toast('Укажи имя — ответственный должен понимать, кто это'); return; }
+  if(phone.replace(/\D/g,'').length < 10){ toast('Укажи телефон для связи по заявке'); return; }
+  if(city.length < 2){ toast('Укажи город'); return; }
+  if(!$('apHelp').value){ toast('Выбери, чем готов помогать'); return; }
+  if(!$('apTransport').value){ toast('Выбери способ передвижения'); return; }
+  if(!$('apConsent').classList.contains('on')){ toast('Подтверди согласие на связь'); return; }
   press($('apSend'),'Отправляю…', async ()=>{
     await api('/api/apply',{method:'POST', body:JSON.stringify({
-      name:name, phone:$('apPhone').value.trim()})});
+      name:name, phone:phone, city:city,
+      help_type:$('apHelp').value,
+      transport:$('apTransport').value,
+      availability:$('apAvailability').value.trim(),
+      consent:true})});
     buzz('ok'); toast('Заявка отправлена!');
     await load();
   });
@@ -1223,9 +1298,13 @@ $('pRef').onclick = ()=>{
 };
 
 /* ── модерация ─────────────────────────────────────────────── */
-$('ntMode').onchange = ()=>{
-  $('ntAssigneeField').classList.toggle('hidden', $('ntMode').value!=='personal');
-};
+function updateTaskMode(){
+  const personal = $('ntMode').value==='personal';
+  $('ntAssigneeField').classList.toggle('hidden', !personal);
+  $('ntAnnounce').classList.toggle('hidden', personal);
+  $('ntCreate').textContent = personal ? 'Проверить и назначить' : 'Проверить и опубликовать';
+}
+$('ntMode').onchange = updateTaskMode;
 
 async function loadAdmin(){
   if(!STATE || !STATE.is_admin) return;
@@ -1237,10 +1316,23 @@ async function loadAdmin(){
     $('adPending').innerHTML = pend.length ? pend.map(p=>
       '<div class="task"><div class="row1"><div class="tico">🙋</div>'+
       '<div><div class="tt">'+esc(p.full_name||'Без имени')+'</div>'+
-      '<div class="ty">'+esc(p.phone||'—')+' · @'+esc(p.username||'—')+'</div></div></div>'+
+      '<div class="ty">📍 '+esc(p.city||'город не указан')+' · '+esc(p.phone||'—')+'</div></div></div>'+
+      '<div class="dt">'+esc(p.help_type||'Тип помощи не указан')+' · '+
+      esc(p.transport||'транспорт не указан')+
+      (p.availability?' · '+esc(p.availability):'')+'</div>'+
       '<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить</button>'+
       '<button class="mini warn" data-rej="'+p.user_id+'">Отклонить</button></div></div>').join('')
       : '<div class="empty">Новых заявок нет.</div>';
+
+    const rejected = d.rejected || [];
+    $('adRejectedCnt').textContent = rejected.length || '';
+    $('adRejected').innerHTML = rejected.length ? rejected.map(p=>
+      '<div class="task"><div class="row1"><div class="tico">↩️</div>'+
+      '<div><div class="tt">'+esc(p.full_name||'Без имени')+'</div>'+
+      '<div class="ty">📍 '+esc(p.city||'город не указан')+' · '+esc(p.phone||'—')+'</div></div></div>'+
+      (p.application_note?'<div class="dt">Причина: '+esc(p.application_note)+'</div>':'')+
+      '<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить сейчас</button></div></div>').join('')
+      : '<div class="empty">Отклонённых заявок нет.</div>';
 
     const rev = d.review || [];
     $('adReviewCnt').textContent = rev.length || '';
@@ -1277,7 +1369,7 @@ async function loadAdmin(){
       : '<div class="empty">В команде пока никого. Одобри первую заявку.</div>';
 
     const ws = d.withdrawals || [];
-    const label = {pending:'⏳ На рассмотрении', approved:'✅ Обменяно', rejected:'↩️ Отклонено'};
+    const label = {pending:'⏳ На рассмотрении', approved:'✅ Переведено', rejected:'↩️ Не выполнено'};
     $('adWithdrawals').innerHTML = ws.length ? ws.map(w=>
       '<div class="task"><div class="row1"><div class="tico">⚡</div>'+
       '<div><div class="tt">'+esc(w.full_name||('ID '+w.user_id))+'</div>'+
@@ -1289,7 +1381,7 @@ async function loadAdmin(){
         ? '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Обменял</button>'+
           '<button class="mini warn" data-wno="'+w.id+'">Отклонить</button></div>'
         : '')+'</div>').join('')
-      : '<div class="empty">Заявок на обмен нет.</div>';
+      : '<div class="empty">Заявок на перевод нет.</div>';
 
     // список сотрудников для персонального задания
     const workers = team.filter(m=>m.role==='helper'||m.role==='employee');
@@ -1311,11 +1403,19 @@ function bindAdmin(){
     });
   });
   document.querySelectorAll('[data-rej]').forEach(b=>{
-    b.onclick = ()=>press(b,'…', async ()=>{
-      await api('/api/admin/decide',{method:'POST',
-        body:JSON.stringify({user_id:Number(b.dataset.rej), decision:'reject'})});
-      toast('Отклонено. Вернуть можно кнопкой «Одобрить» позже.'); await loadAdmin();
-    });
+    b.onclick = async ()=>{
+      const note = await askText({
+        title:'Отклонить заявку',
+        lead:'Человек увидит эту причину и сможет написать ответственному.',
+        placeholder:'Пока нет заданий в вашем городе',
+        okLabel:'Отклонить заявку'});
+      if(note === null) return;
+      press(b,'…', async ()=>{
+        await api('/api/admin/decide',{method:'POST', body:JSON.stringify({
+          user_id:Number(b.dataset.rej), decision:'reject', note:note})});
+        toast('Отклонено. Причина отправлена участнику.'); await loadAdmin();
+      });
+    };
   });
   document.querySelectorAll('[data-tok]').forEach(b=>{
     b.onclick = ()=>press(b,'…', async ()=>{
@@ -1327,28 +1427,36 @@ function bindAdmin(){
     });
   });
   document.querySelectorAll('[data-tno]').forEach(b=>{
-    b.onclick = ()=>press(b,'…', async ()=>{
-      await api('/api/admin/task/approve',{method:'POST', body:JSON.stringify({
-        task_id:Number(b.dataset.tno),
-        assignment_id: b.dataset.as ? Number(b.dataset.as) : null,
-        approve:false})});
-      toast('Вернули на доработку.'); await loadAdmin();
-    });
+    b.onclick = async ()=>{
+      const note = await askText({
+        title:'Вернуть на доработку',
+        lead:'Задание останется у исполнителя. Напиши, что именно нужно исправить.',
+        placeholder:'Добавь фото второй точки',
+        okLabel:'Вернуть исполнителю'});
+      if(note === null) return;
+      press(b,'…', async ()=>{
+        await api('/api/admin/task/approve',{method:'POST', body:JSON.stringify({
+          task_id:Number(b.dataset.tno),
+          assignment_id: b.dataset.as ? Number(b.dataset.as) : null,
+          approve:false, note:note})});
+        toast('Вернули на доработку с комментарием.'); await loadAdmin();
+      });
+    };
   });
   document.querySelectorAll('[data-wok]').forEach(b=>{
     b.onclick = ()=>press(b,'…', async ()=>{
       await api('/api/admin/withdraw/decide',{method:'POST',
         body:JSON.stringify({request_id:Number(b.dataset.wok), decision:'approve'})});
-      buzz('ok'); toast('Обмен закрыт.'); await loadAdmin();
+      buzz('ok'); toast('Перевод отмечен выполненным.'); await loadAdmin();
     });
   });
   document.querySelectorAll('[data-wno]').forEach(b=>{
     b.onclick = async ()=>{
       const note = await askText({
-        title:'Отклонить обмен',
+        title:'Не выполнять перевод',
         lead:'Причину увидит участник. Бонусы вернутся ему на баланс.',
         placeholder:'Обменяю в следующий вторник',
-        okLabel:'Отклонить обмен'});
+        okLabel:'Вернуть бибибонусы'});
       if(note === null) return;
       press(b,'…', async ()=>{
         await api('/api/admin/withdraw/decide',{method:'POST', body:JSON.stringify({
@@ -1434,20 +1542,36 @@ $('ntCreate').onclick = ()=>{
     type: $('ntType').value,
     title: $('ntTitle').value.trim(),
     details: $('ntDetails').value.trim(),
+    city: $('ntCity').value.trim(),
     address: $('ntAddr').value.trim(),
     reward: Number(($('ntReward').value||'').replace(/\D/g,'')) || 0,
     repeatable: mode==='all',
+    announce: mode!=='personal' && $('ntAnnounce').classList.contains('on'),
     assigned_to: mode==='personal' ? ($('ntAssignee').value||null) : null,
     slot_start: $('ntSlotStart').value ? new Date($('ntSlotStart').value).toISOString() : null,
     slot_end:   $('ntSlotEnd').value   ? new Date($('ntSlotEnd').value).toISOString()   : null
   };
+  if(body.title.length < 3){ toast('Укажи понятный заголовок'); return; }
+  if(body.city.length < 2){ toast('Укажи город задания'); return; }
+  if(body.address.length < 3){ toast('Укажи адрес или ориентир'); return; }
+  if(body.reward <= 0){ toast('Укажи награду больше нуля'); return; }
   if(mode==='personal' && !body.assigned_to){ toast('Выбери сотрудника'); return; }
-  press($('ntCreate'),'Публикую…', async ()=>{
-    await api('/api/admin/task/create',{method:'POST', body:JSON.stringify(body)});
+  if(Boolean(body.slot_start)!==Boolean(body.slot_end)){
+    toast('Укажи и начало, и конец временного слота'); return;
+  }
+  press($('ntCreate'),mode==='personal'?'Назначаю…':'Публикую…', async ()=>{
+    const d = await api('/api/admin/task/create',{method:'POST', body:JSON.stringify(body)});
     buzz('ok');
+    try{ localStorage.setItem('bibitasks_task_city', body.city); }catch(e){}
     ['ntTitle','ntDetails','ntAddr','ntReward','ntSlotStart','ntSlotEnd']
       .forEach(id=>$(id).value='');
-    toast(mode==='personal' ? 'Задание отправлено сотруднику.' : 'Задание опубликовано.');
+    $('ntRewardHint').textContent = 'Укажи награду — покажу эквивалент в минутах.';
+    if(body.announce && !d.announced){
+      toast('Задание создано, но объявление в группе не отправилось.');
+    }else{
+      toast(mode==='personal' ? 'Задание назначено и отправлено сотруднику.' :
+        (d.announced ? 'Задание опубликовано и объявлено в теме «Работа».' : 'Задание опубликовано.'));
+    }
     document.querySelector('[data-asub="adSubQueue"]').click();
     await loadAdmin();
   });
@@ -1531,6 +1655,16 @@ function renderGrantedList(list){
 let awardEditId = null;
 function toggleCheck(el){ el.onclick = ()=>{ el.classList.toggle('on'); buzz('tap'); }; }
 toggleCheck($('awRepeat')); toggleCheck($('awActive'));
+toggleCheck($('apConsent')); toggleCheck($('ntAnnounce'));
+updateTaskMode();
+$('ntReward').oninput = ()=>{
+  const reward = Number(($('ntReward').value||'').replace(/\D/g,'')) || 0;
+  const rate = Number((STATE && STATE.ride_rub_per_min)||8.5);
+  $('ntRewardHint').textContent = reward
+    ? reward+'⚡ ≈ '+Math.round(reward/rate)+' минут поездки по тарифу '+
+      rate.toLocaleString('ru-RU')+' ₽/мин.'
+    : 'Укажи награду — покажу эквивалент в минутах.';
+};
 
 $('awEmojiRow').innerHTML = EMOJI_SET.map(e=>'<button data-e="'+e+'">'+e+'</button>').join('');
 $('awEmojiRow').querySelectorAll('[data-e]').forEach(b=>{

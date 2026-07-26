@@ -2,7 +2,7 @@
 # ============================================================
 # БибиЗадачи — бот и мини-приложение для заданий и бибибонусов.
 # Отдельный бот: НЕ трекер смен. Здесь пользователи из группы
-# регистрируются, берут задания на карте, выполняют и получают
+# регистрируются, берут задания по городу и адресу, выполняют и получают
 # бибибонусы (внутренняя валюта на бесплатные поездки).
 #
 # Дизайн и концепт взяты из рабочего трекера смен, механика — новая.
@@ -29,7 +29,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.1.0 (пост в подтему — один раз)"
+BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.2.0 (регистрация и публикация заданий)"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,6 +123,17 @@ INIT_DATA_MAX_AGE_SEC = int(os.getenv("INIT_DATA_MAX_AGE_SEC", "86400"))
 COMMUNITY_CHAT_ID = int(os.getenv("COMMUNITY_CHAT_ID", "0") or "0")
 WITHDRAW_MIN = max(1, int(os.getenv("WITHDRAW_MIN", "1000") or "1000"))
 WITHDRAW_CONTACT = os.getenv("WITHDRAW_CONTACT", "KiriLegenda").strip().lstrip("@")
+try:
+    RIDE_RUB_PER_MIN = max(
+        0.01, float((os.getenv("RIDE_RUB_PER_MIN", "8.5") or "8.5").replace(",", "."))
+    )
+except (TypeError, ValueError):
+    RIDE_RUB_PER_MIN = 8.5
+
+
+def ride_minutes_for(bonus):
+    """Примерное число минут поездки: 1 бибибонус заменяет 1 рубль."""
+    return max(0, round(float(bonus or 0) / RIDE_RUB_PER_MIN))
 
 # Кто может модерировать заявки и подтверждать задания (Telegram user_id
 # через запятую). На старте — вручную; позже свяжем с ролями в БД.
@@ -315,6 +326,11 @@ async def init_db():
                 full_name   TEXT,
                 username    TEXT,
                 phone       TEXT,
+                city        TEXT,
+                help_type   TEXT,
+                transport   TEXT,
+                availability TEXT,
+                application_note TEXT,
                 role        TEXT NOT NULL DEFAULT 'candidate',  -- candidate|applicant|helper|employee|admin
                 status      TEXT NOT NULL DEFAULT 'pending',    -- pending|approved|blocked
                 bonus       INTEGER NOT NULL DEFAULT 0,
@@ -335,6 +351,7 @@ async def init_db():
                 lat         REAL,
                 lng         REAL,
                 address     TEXT,
+                city        TEXT,
                 reward      INTEGER NOT NULL DEFAULT 0,
                 status      TEXT NOT NULL DEFAULT 'open',   -- open|claimed|review|done|cancelled
                 created_by  INTEGER,
@@ -343,6 +360,7 @@ async def init_db():
                 claimed_at  TEXT,
                 done_at     TEXT,
                 proof_note  TEXT,
+                review_note TEXT,
                 assigned_to INTEGER,
                 slot_start  TEXT,
                 slot_end    TEXT,
@@ -386,6 +404,7 @@ async def init_db():
                 claimed_at  TEXT NOT NULL,
                 done_at     TEXT,
                 proof_note  TEXT,
+                review_note TEXT,
                 UNIQUE(task_id, user_id)
             )
         """)
@@ -477,6 +496,11 @@ async def init_db():
             member_columns.add("ref_confirmed")
         if "applied_at" not in member_columns:
             await db.execute("ALTER TABLE members ADD COLUMN applied_at TEXT")
+            member_columns.add("applied_at")
+        for name in ("city", "help_type", "transport", "availability", "application_note"):
+            if name not in member_columns:
+                await db.execute(f"ALTER TABLE members ADD COLUMN {name} TEXT")
+                member_columns.add(name)
         task_columns = {
             row[1] for row in await (
                 await db.execute("PRAGMA table_info(tasks)")
@@ -487,9 +511,19 @@ async def init_db():
             ("slot_start", "TEXT"),
             ("slot_end", "TEXT"),
             ("repeatable", "INTEGER NOT NULL DEFAULT 0"),
+            ("city", "TEXT"),
+            ("review_note", "TEXT"),
         ):
             if name not in task_columns:
                 await db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}")
+        assignment_columns = {
+            row[1] for row in await (
+                await db.execute("PRAGMA table_info(task_assignments)")
+            ).fetchall()
+        }
+        if "review_note" not in assignment_columns:
+            await db.execute(
+                "ALTER TABLE task_assignments ADD COLUMN review_note TEXT")
         # Заявки из предыдущей версии, где был указан телефон, не должны снова
         # превращаться в пустую форму после миграции.
         await db.execute(
@@ -819,6 +853,8 @@ def _member_public(m):
         "next_trust_name": (nxt[1] if nxt else None),
         "next_trust_at": (nxt[3] if nxt else None),
         "applied": bool(m.get("applied_at") or m.get("role") == "applicant"),
+        "city": m.get("city") or "",
+        "application_note": m.get("application_note") or "",
     }
 
 
@@ -858,6 +894,9 @@ async def api_state(request):
         "referral": referral,
         "my_awards": await _my_awards(uid),
         "withdraw_min": WITHDRAW_MIN,
+        "ride_rub_per_min": RIDE_RUB_PER_MIN,
+        "withdraw_min_minutes": ride_minutes_for(WITHDRAW_MIN),
+        "support_username": WITHDRAW_CONTACT,
         "roles": [{"key": k, "title": v} for k, v in ROLE_TITLES.items()],
         "referral_gate": {
             "required": bool(_required_chat_id()),
@@ -869,15 +908,37 @@ async def api_state(request):
 
 
 async def api_apply(request):
-    """Заявка «Хочу помогать»: кандидат отправляет имя и телефон."""
+    """Заявка «Хочу помогать»: данные для ручного отбора и связи."""
     tg = await _auth_user(request)
     if not tg:
         return _json({"error": "auth"}, status=401)
     body = await _body(request)
     name = (body.get("name") or "").strip()[:80]
     phone = (body.get("phone") or "").strip()[:32]
+    city = (body.get("city") or "").strip()[:80]
+    help_type = (body.get("help_type") or "").strip()[:120]
+    transport = (body.get("transport") or "").strip()[:120]
+    availability = (body.get("availability") or "").strip()[:160]
+    consent = body.get("consent") is True
     if len(name) < 2:
         return _json({"error": "name", "message": "Укажите имя."}, status=400)
+    phone_digits = "".join(ch for ch in phone if ch.isdigit())
+    if not 10 <= len(phone_digits) <= 15:
+        return _json({
+            "error": "phone",
+            "message": "Укажите номер телефона для связи с ответственным.",
+        }, status=400)
+    if len(city) < 2:
+        return _json({"error": "city", "message": "Укажите город."}, status=400)
+    if not help_type:
+        return _json({"error": "help_type", "message": "Выберите, чем готовы помогать."}, status=400)
+    if not transport:
+        return _json({"error": "transport", "message": "Выберите способ передвижения."}, status=400)
+    if not consent:
+        return _json({
+            "error": "consent",
+            "message": "Подтвердите согласие на связь по заявке и заданиям.",
+        }, status=400)
     uid = tg["id"]
     m = await get_member(uid)
     if m and m["status"] == "approved":
@@ -885,7 +946,9 @@ async def api_apply(request):
     if m and (m.get("applied_at") or m.get("role") == "applicant"):
         return _json({"ok": True, "already": True})
     await upsert_member(
-        uid, full_name=name, phone=phone,
+        uid, full_name=name, phone=phone, city=city,
+        help_type=help_type, transport=transport, availability=availability,
+        application_note="",
         username=tg.get("username", ""),
         role="applicant", status="pending", applied_at=now_iso())
     # Уведомляем админов о новой заявке.
@@ -893,6 +956,10 @@ async def api_apply(request):
         f"🆕 Новая заявка на помощь\n"
         f"Имя: {name}\n"
         f"Телефон: {phone or '—'}\n"
+        f"Город: {city}\n"
+        f"Готов помогать: {help_type}\n"
+        f"Передвижение: {transport}\n"
+        f"Когда удобно: {availability or 'не указано'}\n"
         f"Ник: @{tg.get('username','') or '—'}\n"
         f"ID: {uid}\n\n"
         f"Открой приложение → Модерация, чтобы одобрить."
@@ -938,7 +1005,8 @@ async def api_tasks_available(request):
             "a.status AS assignment_status, a.user_id AS assignment_user_id, "
             "a.claimed_at AS assignment_claimed_at, "
             "a.done_at AS assignment_done_at, "
-            "a.proof_note AS assignment_proof_note "
+            "a.proof_note AS assignment_proof_note, "
+            "a.review_note AS assignment_review_note "
             "FROM task_assignments a JOIN tasks t ON t.id=a.task_id "
             "WHERE a.user_id=? AND a.status IN ('claimed','review') "
             "ORDER BY a.claimed_at DESC",
@@ -973,11 +1041,16 @@ def _task_public(t):
         "slot_start": t.get("slot_start"),
         "slot_end": t.get("slot_end"),
         "repeatable": bool(t.get("repeatable")),
+        "city": t.get("city") or "",
         "assignment_id": t.get("assignment_id"),
         "claimed_name": t.get("claimed_name") or "",
         "proof_note": (
             t.get("assignment_proof_note")
             if t.get("assignment_id") else t.get("proof_note")
+        ) or "",
+        "review_note": (
+            t.get("assignment_review_note")
+            if t.get("assignment_id") else t.get("review_note")
         ) or "",
     }
 
@@ -1072,7 +1145,8 @@ async def api_task_complete(request):
             return _json({"error": "not_found"}, status=404)
         if row["repeatable"]:
             cur = await db.execute(
-                "UPDATE task_assignments SET status='review', done_at=?, proof_note=? "
+                "UPDATE task_assignments SET status='review', done_at=?, proof_note=?, "
+                "review_note=NULL "
                 "WHERE task_id=? AND user_id=? AND status='claimed'",
                 (now_iso(), note, tid, uid),
             )
@@ -1084,7 +1158,7 @@ async def api_task_complete(request):
             return _json({"error": "not_yours"}, status=403)
         else:
             cur = await db.execute(
-                "UPDATE tasks SET status='review', done_at=?, proof_note=? "
+                "UPDATE tasks SET status='review', done_at=?, proof_note=?, review_note=NULL "
                 "WHERE id=? AND claimed_by=? AND status='claimed'",
                 (now_iso(), note, tid, uid))
             if cur.rowcount != 1:
@@ -1122,6 +1196,8 @@ async def api_wallet(request):
         "history": [dict(r) for r in rows],
         "withdraw_min": WITHDRAW_MIN,
         "withdraw_contact": WITHDRAW_CONTACT,
+        "ride_rub_per_min": RIDE_RUB_PER_MIN,
+        "withdraw_min_minutes": ride_minutes_for(WITHDRAW_MIN),
         "withdrawals": [dict(r) for r in withdrawals],
     })
 
@@ -1135,11 +1211,11 @@ async def api_withdraw_request(request):
     try:
         amount = int(body.get("amount"))
     except (TypeError, ValueError):
-        return _json({"error": "amount", "message": "Укажи сумму вывода."}, status=400)
+        return _json({"error": "amount", "message": "Укажи сумму перевода."}, status=400)
     if amount < WITHDRAW_MIN:
         return _json({
             "error": "minimum",
-            "message": f"Минимальная сумма вывода — {WITHDRAW_MIN} бонусов.",
+            "message": f"Минимальная сумма перевода — {WITHDRAW_MIN} бонусов.",
         }, status=400)
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
@@ -1187,12 +1263,12 @@ async def api_withdraw_request(request):
             "(user_id, amount, reason, task_id, created_by, created_at) "
             "VALUES (?, ?, ?, NULL, ?, ?)",
             (
-                uid, -amount, f"Резерв на вывод #{request_id}", uid, now_iso(),
+                uid, -amount, f"Резерв на перевод #{request_id}", uid, now_iso(),
             ),
         )
         await db.commit()
     _notify_admins(
-        f"💸 Новая заявка на вывод #{request_id}\n"
+        f"💸 Новая заявка на перевод в приложение #{request_id}\n"
         f"Участник: {member['full_name'] or '—'}\n"
         f"Сумма: {amount} бибибонусов\n"
         f"Открой приложение → Модерация → Выводы."
@@ -1290,9 +1366,15 @@ async def api_admin_overview(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         pending = await (await db.execute(
-            "SELECT user_id, full_name, phone, username, created_at FROM members "
+            "SELECT user_id, full_name, phone, username, city, help_type, transport, "
+            "availability, created_at FROM members "
             "WHERE status='pending' AND (applied_at IS NOT NULL OR role='applicant') "
             "ORDER BY applied_at DESC, created_at DESC")).fetchall()
+        rejected = await (await db.execute(
+            "SELECT user_id, full_name, phone, username, city, help_type, transport, "
+            "availability, application_note, created_at FROM members "
+            "WHERE status='blocked' AND (applied_at IS NOT NULL OR role='applicant') "
+            "ORDER BY applied_at DESC, created_at DESC LIMIT 50")).fetchall()
         review = await (await db.execute(
             "SELECT t.*, m.full_name AS assigned_name FROM tasks t "
             "LEFT JOIN members m ON m.user_id=t.assigned_to "
@@ -1301,6 +1383,7 @@ async def api_admin_overview(request):
             "SELECT t.*, NULL AS assigned_name, "
             "a.id AS assignment_id, a.status AS assignment_status, "
             "a.user_id AS assignment_user_id, a.proof_note AS assignment_proof_note, "
+            "a.review_note AS assignment_review_note, "
             "u.full_name AS claimed_name "
             "FROM task_assignments a "
             "JOIN tasks t ON t.id=a.task_id "
@@ -1338,6 +1421,7 @@ async def api_admin_overview(request):
     return _json({
         "ok": True,
         "pending": [dict(r) for r in pending],
+        "rejected": [dict(r) for r in rejected],
         "review": [
             _task_public(dict(r)) for r in [*review, *repeat_review]
         ],
@@ -1363,6 +1447,7 @@ async def api_admin_decide(request):
     body = await _body(request)
     uid = body.get("user_id")
     decision = body.get("decision")   # approve | reject
+    note = (body.get("note") or "").strip()[:300]
     try:
         uid = int(uid)
     except (TypeError, ValueError):
@@ -1395,16 +1480,22 @@ async def api_admin_decide(request):
             # Одобрить можно и ранее отклонённого — иначе человека
             # невозможно вернуть в команду без правки базы.
             cur = await db.execute(
-                "UPDATE members SET status='approved', role='helper', "
+                "UPDATE members SET status='approved', role='helper', application_note='', "
                 "approved_at=?, approved_by=? "
                 "WHERE user_id=? AND status IN ('pending','blocked')",
                 (now_iso(), admin_id, uid),
             )
         elif decision == "reject":
+            if len(note) < 3:
+                await db.rollback()
+                return _json({
+                    "error": "note",
+                    "message": "Коротко укажи причину отклонения.",
+                }, status=400)
             cur = await db.execute(
-                "UPDATE members SET status='blocked' "
+                "UPDATE members SET status='blocked', application_note=? "
                 "WHERE user_id=? AND status='pending'",
-                (uid,),
+                (note, uid),
             )
         else:
             await db.rollback()
@@ -1453,7 +1544,7 @@ async def api_admin_decide(request):
             uid, "🎉 Заявка одобрена! Открой приложение — задания уже доступны.",
             _open_app_kb())
     elif decision == "reject":
-        _notify(uid, "К сожалению, заявка отклонена.")
+        _notify(uid, f"Заявка пока не одобрена.\nПричина: {note}")
     return _json({"ok": True})
 
 
@@ -1465,13 +1556,26 @@ async def api_admin_task_create(request):
     ttype = body.get("type")
     if ttype not in TASK_TYPES:
         return _json({"error": "type"}, status=400)
-    title = (body.get("title") or TASK_TYPES[ttype]["title"]).strip()[:120]
+    title = (body.get("title") or "").strip()[:120]
     details = (body.get("details") or "").strip()[:500]
     address = (body.get("address") or "").strip()[:200]
+    city = (body.get("city") or "").strip()[:80]
+    announce = body.get("announce") is True
+    if len(title) < 3:
+        return _json({"error": "title", "message": "Укажи понятный заголовок задания."}, status=400)
+    if len(city) < 2:
+        return _json({"error": "city", "message": "Укажи город задания."}, status=400)
+    if len(address) < 3:
+        return _json({"error": "address", "message": "Укажи адрес или ориентир."}, status=400)
     try:
         reward = max(0, int(body.get("reward") or 0))
     except (TypeError, ValueError):
         reward = 0
+    if reward <= 0:
+        return _json({
+            "error": "reward",
+            "message": "Награда должна быть больше нуля.",
+        }, status=400)
     assigned_to = body.get("assigned_to")
     if assigned_to in ("", None):
         assigned_to = None
@@ -1513,11 +1617,11 @@ async def api_admin_task_create(request):
     lng = body.get("lng")
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         cur = await db.execute(
-            "INSERT INTO tasks (type, title, details, lat, lng, address, reward, "
+            "INSERT INTO tasks (type, title, details, lat, lng, address, city, reward, "
             "status, created_by, created_at, assigned_to, slot_start, slot_end, repeatable) "
-            "VALUES (?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?)",
+            "VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?)",
             (
-                ttype, title, details, lat, lng, address, reward, admin_id,
+                ttype, title, details, lat, lng, address, city, reward, admin_id,
                 now_iso(), assigned_to, slot_start, slot_end, int(repeatable),
             ))
         await db.commit()
@@ -1529,17 +1633,46 @@ async def api_admin_task_create(request):
         ]
         if details:
             parts.append(details)
-        if address:
-            parts.append(f"📍 {address}")
+        parts.append(f"📍 {city} · {address}")
         if slot_start:
             parts.append(f"🕒 {slot_text(slot_start, slot_end)}")
         parts.append(f"Награда: {reward} бибибонусов")
         _notify(assigned_to, "\n".join(parts), _open_app_kb())
+    announced = False
+    announce_error = ""
+    if announce and not assigned_to:
+        target = GROUP_ID or (f"@{GROUP_USERNAME}" if GROUP_USERNAME else None)
+        if target:
+            task_kind = "Для каждого участника" if repeatable else "Забирает первый"
+            lines = [
+                "📌 <b>Новое задание</b>",
+                f"<b>{_html(title)}</b>",
+                f"{_html(TASK_TYPES[ttype]['title'])} · {_html(task_kind)}",
+            ]
+            if details:
+                lines.append(_html(details))
+            lines.append(f"📍 {_html(city)} · {_html(address)}")
+            if slot_start:
+                lines.append(f"🕒 {_html(slot_text(slot_start, slot_end))}")
+            lines.append(f"⚡ Награда: <b>{reward} бибибонусов</b>")
+            try:
+                await _send_to_topic(
+                    target, "\n".join(lines), TOPIC_WORK,
+                    parse_mode="HTML", reply_markup=_open_app_kb(),
+                    disable_web_page_preview=True)
+                announced = True
+            except Exception as e:
+                announce_error = str(e)[:200]
+                logger.warning("Не удалось объявить задание #%s в теме Работа: %s", tid, e)
+        else:
+            announce_error = "Группа не настроена"
     return _json({
         "ok": True,
         "task_id": tid,
         "personal": bool(assigned_to),
         "repeatable": repeatable,
+        "announced": announced,
+        "announce_error": announce_error,
     })
 
 
@@ -1556,6 +1689,12 @@ async def api_admin_task_approve(request):
     if assignment_id in ("", None):
         assignment_id = None
     ok = body.get("approve", True)
+    note = (body.get("note") or "").strip()[:300]
+    if not ok and len(note) < 3:
+        return _json({
+            "error": "note",
+            "message": "Укажи, что именно нужно доработать.",
+        }, status=400)
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
@@ -1591,9 +1730,9 @@ async def api_admin_task_approve(request):
             else:
                 cur = await db.execute(
                     "UPDATE task_assignments SET status='claimed', "
-                    "done_at=NULL, proof_note=NULL "
+                    "done_at=NULL, proof_note=NULL, review_note=? "
                     "WHERE id=? AND status='review'",
-                    (assignment_id,),
+                    (note, assignment_id),
                 )
         else:
             if t["status"] != "review" or not t.get("claimed_by") or t["repeatable"]:
@@ -1610,9 +1749,9 @@ async def api_admin_task_approve(request):
                 )
             else:
                 cur = await db.execute(
-                    "UPDATE tasks SET status='open', claimed_by=NULL, claimed_at=NULL, "
-                    "done_at=NULL, proof_note=NULL WHERE id=? AND status='review'",
-                    (tid,),
+                    "UPDATE tasks SET status='claimed', done_at=NULL, proof_note=NULL, "
+                    "review_note=? WHERE id=? AND status='review'",
+                    (note, tid),
                 )
         if cur.rowcount != 1:
             await db.rollback()
@@ -1640,7 +1779,8 @@ async def api_admin_task_approve(request):
             f"✅ Задание подтверждено! +{t.get('reward',0)} бибибонусов.")
     else:
         _notify(
-            claimed_by, "Задание вернули на доработку — посмотри детали.")
+            claimed_by, f"Задание вернули на доработку.\nЧто исправить: {note}",
+            _open_app_kb())
     return _json({"ok": True})
 
 
@@ -1680,7 +1820,7 @@ async def api_admin_grant(request):
 
 
 async def api_admin_withdraw_decide(request):
-    """Подтверждает вывод либо возвращает зарезервированные бонусы."""
+    """Подтверждает перевод либо возвращает зарезервированные бонусы."""
     admin_id, err = await _require_admin(request)
     if err is not None:
         return err
@@ -1729,7 +1869,7 @@ async def api_admin_withdraw_decide(request):
                 "VALUES (?, ?, ?, NULL, ?, ?)",
                 (
                     item["user_id"], item["amount"],
-                    f"Возврат по заявке на вывод #{request_id}",
+                    f"Возврат по заявке на перевод #{request_id}",
                     admin_id, now_iso(),
                 ),
             )
@@ -1740,12 +1880,12 @@ async def api_admin_withdraw_decide(request):
         await db.commit()
     if decision == "approve":
         message = (
-            f"✅ Заявка на вывод #{request_id} одобрена.\n"
+            f"✅ Перевод бибибонусов #{request_id} выполнен.\n"
             f"Сумма: {item['amount']} бибибонусов."
         )
     else:
         message = (
-            f"↩️ Заявка на вывод #{request_id} отклонена.\n"
+            f"↩️ Перевод бибибонусов #{request_id} пока не выполнен.\n"
             f"{item['amount']} бонусов возвращены на баланс."
         )
     if note:
@@ -2236,15 +2376,15 @@ def _open_app_kb():
 
 
 WELCOME = (
-    "Привет! Это <b>БибиЗадачи</b> — здесь можно помогать Бибибайку и "
-    "получать <b>бибибонусы</b> на бесплатные поездки. 🚲\n\n"
-    "Как это работает:\n"
-    "1️⃣ Открываешь приложение и подаёшь заявку\n"
-    "2️⃣ Ответственный её одобряет\n"
-    "3️⃣ Берёшь задания на карте — развоз байков, обслуживание зон, подзарядка\n"
-    "4️⃣ Выполняешь и получаешь бибибонусы\n\n"
-    "Чем больше и честнее помогаешь — тем выше уровень доверия и доступнее "
-    "крупные задания. Жми кнопку ниже 👇"
+    "Привет! Это <b>БибиЗадачи</b> 🚲\n\n"
+    "Здесь участники помогают Бибибайку: развозят байки, проверяют точки, "
+    "подзаряжают технику — и получают <b>бибибонусы</b>.\n\n"
+    "<b>1 бибибонус заменяет 1 ₽</b> при оплате поездки. "
+    f"При цене {RIDE_RUB_PER_MIN:g} ₽/мин 1000 бибибонусов — это примерно "
+    f"{ride_minutes_for(1000)} минут.\n\n"
+    "Сначала заполни короткую заявку. Ответственный проверит город и возможности, "
+    "после одобрения откроются задания. Так мы не перегружаем команду и выдаём "
+    "задачи тем, кто действительно готов помочь."
 )
 
 ALREADY_APPROVED = (
@@ -2258,7 +2398,7 @@ def _subscribe_kb():
     rows = []
     url = _required_chat_url()
     if url:
-        rows.append([InlineKeyboardButton(text="📣 Подписаться на канал", url=url)])
+        rows.append([InlineKeyboardButton(text="📣 Вступить в сообщество", url=url)])
     rows.append([InlineKeyboardButton(
         text="✅ Я подписался", callback_data="ref_check")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2266,7 +2406,7 @@ def _subscribe_kb():
 
 SUBSCRIBE_PROMPT = (
     "Ты пришёл по ссылке друга 👋\n\n"
-    "Подпишись на канал Бибибайка — и другу засчитается приглашение, "
+    "Вступи в сообщество Бибибайка — и другу засчитается приглашение, "
     "а ты первым увидишь новые задания и акции.\n\n"
     "Подписался? Жми кнопку ниже, я проверю."
 )
@@ -2548,7 +2688,8 @@ def chat_post():
             "Себе и боту — нельзя.\n\n"
             "Засчитанное спасибо бот отмечает реакцией 🙏. О переходе "
             "на новый уровень пишет сюда же.\n\n"
-            "Чем выше уровень — тем крупнее задания доступны и меньше проверок."
+            "Уровень показывает опыт участника и помогает ответственным видеть, "
+            "кто давно и регулярно помогает."
         ),
         (
             "🤖 <b>КОМАНДЫ БОТА</b>\n\n"
@@ -2583,9 +2724,9 @@ def news_post():
             "• Изменения тарифов, акции и промокоды\n"
             "• Технические работы и всё, что влияет на поездку\n"
             "• Новости по франшизе и партнёрской программе\n\n"
-            "Если вы пришли по приглашению друга — подпишитесь на группу. "
-            "После подписки другу засчитывается приглашение, а вам "
-            "открывается доступ к заданиям и бибибонусам.\n\n"
+            "Если вы пришли по приглашению друга — вступите в группу. "
+            "Другу засчитается приглашение. Чтобы получить доступ к заданиям, "
+            "откройте приложение, заполните заявку и дождитесь одобрения.\n\n"
             "🧭 <b>Куда идти по вопросам</b>\n\n"
             + _nav_line() + "\n\n"
             "📱 <b>Приложение</b>\n\n"
@@ -2773,7 +2914,10 @@ async def post_news(message: Message):
 
 
 # ── Приветствие новичков ──────────────────────────────────────
-WELCOME_JOIN = "{name}, добро пожаловать в фан-клуб Бибибайка 🚲"
+WELCOME_JOIN = (
+    "{name}, привет! 👋 Это сообщество Бибибайка. "
+    "Задания и бибибонусы — по кнопке ниже."
+)
 
 
 @dp.message(F.new_chat_members)
@@ -2795,9 +2939,6 @@ async def greet_newcomers(message: Message):
         f'<a href="tg://user?id={u.id}">{_html(u.full_name)}</a>'
         for u in newcomers)
     text = WELCOME_JOIN.format(name=names)
-    rank_hint = _topic_link(TOPIC_CHAT)
-    text += (
-    )
     try:
         await _send_to_topic(
             message.chat.id, text, TOPIC_CHAT,
@@ -2823,12 +2964,14 @@ async def show_bonus(message: Message):
     lines = [
         f"💰 <b>{_html(message.from_user.full_name)}</b> — "
         f"<b>{bonus}</b> бибибонусов",
+        f"Это примерно {ride_minutes_for(bonus)} минут поездки по тарифу "
+        f"{RIDE_RUB_PER_MIN:g} ₽/мин.",
         f"Выполнено заданий: {done}",
     ]
     if bonus < WITHDRAW_MIN:
-        lines.append(f"До обмена не хватает {WITHDRAW_MIN - bonus}.")
+        lines.append(f"До перевода не хватает {WITHDRAW_MIN - bonus}.")
     else:
-        lines.append("Можно обменять — заявка в «Кошельке» приложения.")
+        lines.append("Можно перевести в клиентское приложение — заявка в «Кошельке».")
     await message.answer("\n".join(lines), parse_mode="HTML",
                          reply_markup=_open_app_kb())
 
@@ -3187,30 +3330,31 @@ async def group_watch(message: Message):
 
 
 WORK_INSTRUCTION = (
-    "🚲 <b>Как работать с Бибибайком и получать бибибонусы</b>\n\n"
-    "<b>1. Регистрация</b>\n"
-    "Открой приложение по кнопке ниже и заполни заявку: имя и телефон. "
-    "Ответственный её проверит — обычно в течение дня. Как только одобрит, "
-    "во вкладке «Задания» появятся доступные задачи.\n\n"
-    "<b>2. Как брать задания</b>\n"
-    "Заходишь в «Задания» → выбираешь свободное → «Взять задание». "
-    "Оно закрепляется за тобой, другие его уже не заберут. "
-    "Бывают персональные задания — они приходят лично тебе в бот.\n\n"
-    "<b>3. Как сдавать</b>\n"
-    "Выполнил — жми «Готово» и коротко опиши результат. "
-    "Ответственный подтверждает, и бибибонусы падают на баланс. "
-    "Если что-то не так — задание вернётся на доработку с комментарием.\n\n"
-    "<b>4. Бибибонусы</b>\n"
-    "Копятся в «Кошельке» и меняются на бонусы приложения Бибибайк. "
-    "Минимум для обмена указан там же. Заявку на обмен обрабатывает "
-    "ответственный вручную.\n\n"
-    "<b>5. Уровень доверия</b>\n"
-    "Растёт за подтверждённые задания и за живое участие в беседе. "
-    "Чем выше уровень — тем крупнее задания и меньше проверок.\n\n"
-    "<b>6. Приглашай друзей</b>\n"
-    "В «Профиле» есть личная ссылка. Друг переходит, подписывается на канал — "
-    "тебе +1 к прогрессу, а на ступенях начисляются бибибонусы.\n\n"
-    "Вопросы — пиши в этой подтеме, ответим."
+    "🚲 <b>Как помогать Бибибайку и получать бибибонусы</b>\n\n"
+    "<b>1. Подай заявку</b>\n"
+    "Открой приложение и укажи имя, телефон, город, чем готов помогать, "
+    "как передвигаешься и когда обычно свободен. Телефон видят ответственные — "
+    "он нужен только для связи по заявке и заданиям. Доступ выдаётся вручную, "
+    "чтобы команда не набирала больше людей, чем может обеспечить задачами.\n\n"
+    "<b>2. Возьми задание</b>\n"
+    "После одобрения открой вкладку «Задания». Проверь город, адрес, время и "
+    "награду, затем нажми «Взять задание». Персональные задания приходят "
+    "отдельным сообщением в бот.\n\n"
+    "<b>3. Отправь результат</b>\n"
+    "После выполнения нажми «Готово» и коротко опиши, что сделал. Ответственный "
+    "либо подтвердит результат, либо вернёт его на доработку и напишет причину. "
+    "При доработке задание останется закреплено за тобой.\n\n"
+    "<b>4. Потрать бибибонусы на поездки</b>\n"
+    "1 бибибонус заменяет 1 ₽ при оплате минут в приложении Бибибайк. "
+    f"Минута стоит {RIDE_RUB_PER_MIN:g} ₽: 1000 бибибонусов — это примерно "
+    f"{ride_minutes_for(1000)} минут поездки. Когда накопишь минимальную сумму, "
+    "создай заявку в «Кошельке» — ответственный переведёт бонусы в клиентское "
+    "приложение.\n\n"
+    "<b>5. Уровень и приглашения</b>\n"
+    "Уровень растёт за подтверждённые задания и полезное общение. Он показывает "
+    "опыт участника. В «Профиле» можно пригласить друга: после вступления в "
+    "сообщество приглашение засчитается, а награда придёт на достигнутой ступени.\n\n"
+    "Вопросы по работе можно задать в этой подтеме."
 )
 
 
