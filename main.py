@@ -2797,8 +2797,6 @@ async def greet_newcomers(message: Message):
     text = WELCOME_JOIN.format(name=names)
     rank_hint = _topic_link(TOPIC_CHAT)
     text += (
-        "\n\nЗдесь можно общаться, за это растёт уровень доверия. "
-        "Напиши <code>/команды</code> — покажу, что умею."
     )
     try:
         await _send_to_topic(
