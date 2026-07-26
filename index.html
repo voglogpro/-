@@ -1,0 +1,1611 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#FFFFFF">
+<title>БибиЗадачи</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+/* ============================================================
+   БибиЗадачи — светлая минималистичная тема.
+   Белый лист, светло-серые карточки, зелёный только акцентом:
+   прогресс, числа, активная вкладка, главная кнопка. Больше
+   нигде. Плоско — ни теней, ни заливок во всю плашку.
+   Один мотив: любой прогресс это шкала заряда с бегущим
+   разрядом, бибибонус измеряется молнией.
+   Ни внешних шрифтов, ни библиотек, ни картинок.
+   ============================================================ */
+:root{
+  --bg:#FFFFFF;
+  --surface:#F4F5F4;      /* карточка */
+  --surface-2:#EAECEA;    /* вложенное */
+  --line:#E4E7E4;         /* тонкие линии */
+  --ink:#0F1512;          /* текст */
+  --ink-2:#6B746F;        /* второстепенный */
+  --brand:#17C452;        /* акцент: заливки, прогресс, точки */
+  --brand-ink:#07742F;    /* акцент: зелёный текст на светлом */
+  --brand-btn:#0E9C42;    /* акцент: кнопка с белым текстом */
+  --brand-tint:#EDF9F1;   /* акцент: лёгкая подложка */
+  --danger:#C8392E;
+  --r:24px;
+  --pad:16px;
+  --disp:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--disp);
+  font-size:15px;line-height:1.45;
+  padding-bottom:calc(76px + env(safe-area-inset-bottom));
+  overscroll-behavior-y:contain;
+}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+.hidden{display:none!important}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--brand-ink);outline-offset:2px}
+
+/* ── шапка ────────────────────────────────────────────────── */
+.head{
+  position:sticky;top:0;z-index:30;
+  padding:calc(12px + env(safe-area-inset-top)) var(--pad) 14px;
+  display:flex;align-items:center;gap:12px;
+  background:var(--bg);border-bottom:1px solid var(--line);
+}
+.logo{
+  width:46px;height:46px;flex:none;border-radius:15px;
+  background:var(--brand);color:#0F1512;
+  font-weight:900;font-size:20px;letter-spacing:-.06em;
+  display:flex;align-items:center;justify-content:center;
+}
+.who{flex:1;min-width:0}
+.who .nm{font-weight:800;font-size:17px;letter-spacing:-.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who .rl{font-size:12.5px;color:var(--ink-2);font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wallet-mini{text-align:right;flex:none}
+.wallet-mini .v{
+  font-weight:900;font-size:27px;line-height:1;letter-spacing:-.04em;
+  color:var(--brand-ink);display:flex;align-items:center;gap:2px;justify-content:flex-end;
+}
+.wallet-mini .l{font-size:9px;letter-spacing:.14em;color:var(--ink-2);
+  text-transform:uppercase;margin-top:4px;font-weight:700}
+.wallet-mini.pop .v{animation:pop .5s ease-out}
+
+/* ── страницы и карточки ──────────────────────────────────── */
+.page{padding:16px var(--pad) 24px;display:flex;flex-direction:column;gap:12px}
+.card{
+  position:relative;overflow:hidden;
+  background:var(--surface);border:0;
+  border-radius:var(--r);padding:var(--pad) var(--pad) 18px;
+}
+.card.warm{background:var(--brand-tint)}
+.card.lit{background:var(--bg);box-shadow:inset 0 0 0 1.5px var(--brand)}
+.card.solid{background:var(--surface)}   /* зелёных заливок во всю плашку нет */
+.eyebrow{
+  display:flex;align-items:center;gap:8px;margin-bottom:12px;
+  font-size:10px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ink-2);
+}
+.eyebrow b{
+  width:6px;height:6px;flex:none;border-radius:2px;background:var(--brand);
+}
+.eyebrow .cnt{margin-left:auto;color:var(--brand-ink);letter-spacing:.06em}
+h2.big{margin:0 0 6px;font-size:21px;font-weight:900;letter-spacing:-.03em}
+p.sub{margin:0;color:var(--ink-2);font-size:13.5px}
+
+/* въезд карточек: без JS, задержкой по порядку */
+.tabview>*{animation:rise .34s cubic-bezier(.2,.8,.2,1) both}
+.tabview>*:nth-child(2){animation-delay:.05s}
+.tabview>*:nth-child(3){animation-delay:.1s}
+.tabview>*:nth-child(4){animation-delay:.15s}
+.tabview>*:nth-child(n+5){animation-delay:.2s}
+
+/* ── шкала заряда ─────────────────────────────────────────── */
+.charge{
+  position:relative;height:12px;border-radius:99px;overflow:hidden;
+  background:var(--surface-2);border:0;
+}
+.card.lit .charge,.task .charge{background:var(--surface-2)}
+.charge>i{
+  display:block;height:100%;border-radius:99px;position:relative;overflow:hidden;
+  background:var(--brand);
+  transition:width .7s cubic-bezier(.2,.8,.2,1);
+}
+.charge>i::after{
+  content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.8),transparent);
+  transform:translate3d(-100%,0,0);animation:sweep 2.6s linear infinite;
+}
+.charge::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(90deg,
+    transparent 0 15px,rgba(255,255,255,.95) 15px 17px);
+}
+
+/* ── кнопки ───────────────────────────────────────────────── */
+.btn{
+  width:100%;border:0;border-radius:15px;padding:15px 16px;
+  font-weight:800;font-size:15px;letter-spacing:-.01em;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:transform .09s,opacity .15s;
+}
+.btn:active{transform:scale(.975)}
+.btn:disabled{opacity:.4}
+.btn-volt{background:var(--brand-btn);color:#fff}
+.btn-dark{background:var(--ink);color:#fff}
+.btn-ghost{background:var(--bg);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line)}
+.btn-amber{background:var(--ink);color:#fff}
+.btn.sm{padding:12px 14px;font-size:14px;border-radius:13px;width:auto;flex:1}
+.mini{
+  background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
+  color:var(--ink);border-radius:13px;padding:11px 13px;font-weight:700;font-size:13px;
+}
+.mini:active{transform:scale(.97)}
+.mini.warn{color:var(--danger);box-shadow:inset 0 0 0 1px #EED6D3}
+.acts{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+
+/* ── поля ─────────────────────────────────────────────────── */
+.field{margin-bottom:12px}
+.field label{
+  display:block;font-size:10px;font-weight:800;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-2);margin-bottom:7px;
+}
+.tinput{
+  width:100%;background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
+  border-radius:14px;padding:14px;font-size:15px;
+}
+.tinput::placeholder{color:#A2ACA6}
+.tinput:focus{outline:none;box-shadow:inset 0 0 0 1.5px var(--brand)}
+textarea.tinput{resize:none;line-height:1.45}
+select.tinput{appearance:none;background-image:
+  linear-gradient(45deg,transparent 50%,var(--ink-2) 50%),
+  linear-gradient(135deg,var(--ink-2) 50%,transparent 50%);
+  background-position:calc(100% - 19px) 50%,calc(100% - 13px) 50%;
+  background-size:6px 6px,6px 6px;background-repeat:no-repeat;padding-right:38px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hint{font-size:12.5px;color:var(--ink-2);margin-top:9px}
+.hint.bad{color:var(--danger)}
+
+/* переключатель */
+.seg{display:flex;gap:4px;background:var(--surface-2);border:0;
+  border-radius:15px;padding:4px;margin-bottom:14px}
+.seg button{flex:1;background:transparent;border:0;border-radius:12px;
+  padding:11px 6px;font-weight:800;font-size:13px;color:var(--ink-2);
+  transition:background .18s,color .18s}
+.seg button.on{background:var(--brand-btn);color:#fff}
+.seg.scroll{overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;
+  margin-bottom:0}
+.seg.scroll::-webkit-scrollbar{display:none}
+.seg.scroll button{flex:0 0 auto;padding:11px 12px;font-size:12.5px;white-space:nowrap}
+.segwrap{position:relative;margin-bottom:0}
+.segwrap::after{   /* мягкий край: видно, что ряд можно листать */
+  content:"";position:absolute;top:0;bottom:0;right:0;width:26px;
+  pointer-events:none;border-radius:0 15px 15px 0;
+  background:linear-gradient(90deg,rgba(255,255,255,0),var(--bg));
+}
+
+/* ── задание ──────────────────────────────────────────────── */
+.task{
+  position:relative;overflow:hidden;
+  background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
+  border-radius:18px;padding:14px;margin-bottom:10px;
+}
+.task:last-child{margin-bottom:0}
+.task.flash::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(105deg,transparent 40%,rgba(23,196,82,.28),transparent 60%);
+  transform:translate3d(-110%,0,0);animation:flash .7s ease-out forwards;
+}
+.row1{display:flex;align-items:flex-start;gap:12px}
+.tico{
+  width:42px;height:42px;flex:none;border-radius:14px;
+  background:var(--surface);border:0;
+  display:flex;align-items:center;justify-content:center;font-size:20px;
+}
+.row1>div{flex:1;min-width:0}
+.tt{font-weight:800;font-size:15px;letter-spacing:-.015em}
+.ty{font-size:12.5px;color:var(--ink-2)}
+.rw{
+  flex:none;font-weight:900;font-size:14.5px;color:var(--brand-ink);
+  background:var(--brand-tint);border-radius:99px;padding:6px 11px;white-space:nowrap;
+}
+.dt{margin-top:10px;font-size:13.5px;color:#3F4642}
+.addr{margin-top:8px;font-size:13px;color:var(--ink-2)}
+.meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pill{
+  font-size:11px;font-weight:700;padding:5px 10px;border-radius:99px;
+  background:var(--surface);color:var(--ink-2);
+}
+.pill.on{color:var(--brand-ink);background:var(--brand-tint)}
+.pill.hot{color:var(--ink);background:var(--surface-2)}
+
+/* ── награды ──────────────────────────────────────────────── */
+.shelf{display:flex;gap:10px;overflow-x:auto;padding:2px 0 6px;
+  scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.shelf::-webkit-scrollbar{display:none}
+.medal{
+  flex:none;width:98px;padding:14px 8px;border-radius:18px;text-align:center;
+  background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);
+}
+.medal .em{font-size:27px;line-height:1;display:block;animation:spark 3.4s ease-in-out infinite}
+.medal:nth-child(2n) .em{animation-delay:.5s}
+.medal:nth-child(3n) .em{animation-delay:1s}
+.medal .nm{font-size:11px;font-weight:800;margin-top:8px;line-height:1.25}
+.medal .bn{font-size:10.5px;color:var(--brand-ink);font-weight:800;margin-top:4px}
+.award{
+  display:flex;align-items:flex-start;gap:12px;padding:14px;margin-bottom:9px;
+  background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);border-radius:18px;
+}
+.award.off{opacity:.5}
+.award .em{font-size:25px;flex:none;width:34px;text-align:center}
+.award>div{flex:1;min-width:0}
+
+/* ── ступени рефералов ────────────────────────────────────── */
+.steps{display:flex;justify-content:space-between;margin-top:13px}
+.step{flex:1;text-align:center}
+.step .dot{
+  width:11px;height:11px;margin:0 auto 7px;border-radius:50%;
+  background:var(--surface-2);border:0;
+}
+.step.done .dot{background:var(--brand)}
+.step.next .dot{background:var(--bg);box-shadow:inset 0 0 0 2px var(--brand);
+  animation:beat 1.9s ease-in-out infinite}
+.step b{display:block;font-size:13px;font-weight:900}
+.step span{display:block;font-size:10px;color:var(--brand-ink);font-weight:800}
+
+/* ── кошелёк ──────────────────────────────────────────────── */
+.bigmoney{
+  font-weight:900;font-size:52px;line-height:1;letter-spacing:-.05em;
+  color:var(--brand-ink);display:flex;align-items:center;gap:4px;
+}
+.bigmoney small{font-size:24px}
+.ledger{display:flex;align-items:center;gap:12px;padding:12px 0;
+  border-bottom:1px solid var(--line)}
+.ledger:last-child{border-bottom:0;padding-bottom:0}
+.ledger .amt{font-weight:900;font-size:15px;white-space:nowrap;margin-left:auto}
+.ledger .amt.plus{color:var(--brand-ink)}
+.ledger .amt.minus{color:var(--danger)}
+.ledger .rs{font-size:13.5px;font-weight:600}
+.ledger .dtm{font-size:11.5px;color:var(--ink-2)}
+
+/* ── прочее ───────────────────────────────────────────────── */
+.empty{
+  text-align:center;color:var(--ink-2);font-size:13px;padding:24px 14px;
+  border-radius:16px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);
+}
+.notice{
+  border-radius:16px;padding:14px;font-size:13px;line-height:1.5;
+  background:var(--brand-tint);color:#2C4A37;
+}
+.notice b{color:var(--ink)}
+.notice.bad{background:#FBEFEE;color:#7A3630}
+.rowsplit{display:flex;align-items:center;gap:12px}
+.rowsplit>*:first-child{flex:1;min-width:0}
+
+/* ── нижняя навигация ─────────────────────────────────────── */
+.tabbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:40;display:grid;
+  grid-template-columns:repeat(3,1fr);
+  padding:9px 4px calc(9px + env(safe-area-inset-bottom));
+  background:var(--bg);border-top:1px solid var(--line);
+}
+.tabbar.has-admin{grid-template-columns:repeat(4,1fr)}
+.tab{
+  background:none;border:0;padding:6px 2px;color:var(--ink-2);
+  font-size:10px;font-weight:800;letter-spacing:.02em;
+  display:flex;flex-direction:column;align-items:center;gap:4px;
+  position:relative;transition:color .18s;
+}
+.tab .i{font-size:20px;line-height:1;transition:transform .22s}
+.tab.on{color:var(--brand-ink)}
+.tab.on .i{transform:translateY(-2px)}
+.tab.on::before{
+  content:"";position:absolute;top:-1px;width:22px;height:3px;border-radius:3px;
+  background:var(--brand);
+}
+
+/* ── шторки ───────────────────────────────────────────────── */
+.sheet{
+  position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;
+  background:rgba(15,21,18,.38);animation:fade .2s both;
+}
+.sheet .inner{
+  width:100%;max-height:92vh;overflow-y:auto;
+  background:var(--bg);border-top:0;
+  border-radius:26px 26px 0 0;
+  padding:18px var(--pad) calc(22px + env(safe-area-inset-bottom));
+  animation:up .28s cubic-bezier(.2,.8,.2,1) both;
+}
+.grab{width:38px;height:4px;border-radius:9px;background:var(--surface-2);margin:0 auto 16px}
+.sheet h3{margin:0 0 4px;font-size:20px;font-weight:900;letter-spacing:-.03em}
+.sheet .lead{margin:0 0 16px;font-size:13.5px;color:var(--ink-2)}
+.emojirow{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.emojirow button{
+  width:44px;height:44px;font-size:21px;border-radius:13px;
+  background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
+}
+.emojirow button.on{box-shadow:inset 0 0 0 1.5px var(--brand);background:var(--brand-tint)}
+.check{display:flex;align-items:center;gap:12px;padding:14px;border-radius:15px;
+  background:var(--surface);border:0;margin-bottom:9px}
+.check .bx{width:23px;height:23px;flex:none;border-radius:8px;
+  background:var(--bg);box-shadow:inset 0 0 0 1.5px var(--line);
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:#fff}
+.check.on .bx{background:var(--brand);box-shadow:none}
+.check .tx{flex:1;font-size:13px;font-weight:700}
+.check .tx small{display:block;font-weight:500;color:var(--ink-2);font-size:11.5px}
+
+/* компактный участник команды */
+.member{
+  width:100%;text-align:left;display:flex;align-items:center;gap:12px;
+  padding:11px 12px;margin-bottom:8px;border:0;border-radius:16px;
+  background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);
+  transition:transform .09s;
+}
+.member:last-child{margin-bottom:0}
+.member:active{transform:scale(.985)}
+.mava{
+  width:38px;height:38px;flex:none;border-radius:12px;background:var(--surface);
+  display:flex;align-items:center;justify-content:center;font-size:18px;
+}
+.mtx{flex:1;min-width:0}
+.mtx b{display:block;font-size:14.5px;font-weight:800;letter-spacing:-.015em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mtx small{display:block;font-size:11.5px;color:var(--ink-2);font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.mbal{flex:none;font-weight:900;font-size:13.5px;color:var(--brand-ink);
+  background:var(--brand-tint);border-radius:99px;padding:5px 10px}
+.mshead{display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:14px;
+  border-radius:16px;background:var(--surface)}
+.mshead .mava{background:var(--bg)}
+.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mgrid .mini{padding:14px 10px}
+
+/* выбор роли */
+.pick{width:100%;text-align:left;display:flex;align-items:center;gap:12px;
+  padding:14px;border-radius:16px;background:var(--bg);border:0;
+  box-shadow:inset 0 0 0 1px var(--line);margin-bottom:9px;transition:transform .09s}
+.pick:active{transform:scale(.985)}
+.pick.on{box-shadow:inset 0 0 0 1.5px var(--brand);background:var(--brand-tint)}
+.pick .em{font-size:22px;flex:none}
+.pick .tx{flex:1;min-width:0;font-size:14px;font-weight:800}
+.pick .tx small{display:block;font-weight:500;color:var(--ink-2);font-size:12px}
+.pick .mark{color:var(--brand-ink);font-weight:900;font-size:16px;opacity:0}
+.pick.on .mark{opacity:1}
+
+/* ── тост ─────────────────────────────────────────────────── */
+.toast{
+  position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));
+  transform:translate3d(-50%,16px,0);opacity:0;pointer-events:none;z-index:80;
+  max-width:86%;padding:13px 18px;border-radius:15px;
+  background:var(--ink);border:0;color:#fff;
+  font-size:13px;font-weight:700;text-align:center;
+  transition:transform .26s,opacity .26s;
+}
+.toast.show{transform:translate3d(-50%,0,0);opacity:1}
+
+@keyframes pop{
+  35%{transform:scale(1.22);text-shadow:0 0 18px rgba(23,196,82,.5)}
+  100%{transform:scale(1)}
+}
+@keyframes rise{from{opacity:0;transform:translate3d(0,10px,0)}to{opacity:1;transform:none}}
+@keyframes sweep{to{transform:translate3d(100%,0,0)}}
+@keyframes flash{to{transform:translate3d(110%,0,0)}}
+@keyframes spark{0%,88%,100%{transform:translateY(0)}94%{transform:translateY(-4px)}}
+@keyframes beat{50%{transform:scale(1.32)}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes up{from{transform:translate3d(0,100%,0)}to{transform:none}}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<div id="toast" class="toast"></div>
+
+<div id="loading" class="page">
+  <div class="card"><div class="eyebrow"><b></b>Подключаюсь</div>
+    <div class="charge"><i style="width:40%"></i></div>
+    <p class="sub" style="margin-top:11px">Читаю твой профиль в депо…</p></div>
+</div>
+
+<div id="app" class="hidden">
+
+  <!-- шапка -->
+  <div class="head">
+    <div class="logo">bb.</div>
+    <div class="who">
+      <div class="nm" id="hName">—</div>
+      <div class="rl" id="hRole">—</div>
+    </div>
+    <div class="wallet-mini" id="hWallet">
+      <div class="v"><span class="num" id="hBonus">0</span>⚡</div>
+      <div class="l">бибибонусы</div>
+    </div>
+  </div>
+
+  <!-- ═══════════ ЗАДАНИЯ ═══════════ -->
+  <div id="tab-tasks" class="page tabview">
+
+    <!-- подписка на канал -->
+    <div id="subBox" class="card warm hidden">
+      <div class="eyebrow"><b></b>Подписка</div>
+      <h2 class="big">Подпишись на канал</h2>
+      <p class="sub">Ты пришёл по ссылке друга. Подпишись — и другу засчитается
+        приглашение, а ты первым увидишь новые задания и акции.</p>
+      <div class="acts">
+        <button class="btn btn-volt sm" id="subOpen">Открыть канал</button>
+        <button class="mini" id="subCheck">Я подписался</button>
+      </div>
+    </div>
+
+    <!-- регистрация -->
+    <div id="applyBox" class="card hidden">
+      <div class="eyebrow"><b></b>Вход в депо</div>
+      <div id="participantRegister">
+        <h2 class="big">Помогай Бибибайку — забирай бибибонусы</h2>
+        <p class="sub" style="margin-bottom:14px">Развоз байков, обслуживание зон,
+          подзарядка. Каждое подтверждённое задание — молнии на бесплатные поездки.</p>
+        <div class="field"><label>Имя и фамилия</label>
+          <input class="tinput" id="apName" placeholder="Кирилл Понамарев" inputmode="text"></div>
+        <div class="field"><label>Телефон</label>
+          <input class="tinput" id="apPhone" placeholder="+7 900 000-00-00" inputmode="tel"></div>
+        <button class="btn btn-volt" id="apSend">Отправить заявку</button>
+      </div>
+    </div>
+
+    <!-- ожидание -->
+    <div id="waitBox" class="card warm hidden">
+      <div class="eyebrow"><b></b>Статус заявки</div>
+      <h2 class="big">⏳ Заявка на рассмотрении</h2>
+      <p class="sub">Ответственный одобрит её — и задания появятся здесь.
+        Уведомление придёт в чат с ботом.</p>
+      <div class="charge warm" style="margin-top:13px"><i style="width:55%"></i></div>
+
+    </div>
+
+    <!-- заблокирован -->
+    <div id="blockedBox" class="card hidden">
+      <div class="eyebrow"><b></b>Статус заявки</div>
+      <h2 class="big">Заявка отклонена</h2>
+      <p class="sub">Если это ошибка — напиши ответственному, он вернёт доступ
+        одной кнопкой.</p>
+    </div>
+
+    <!-- рабочее -->
+    <div id="worksBox" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card" id="mineWrap">
+        <div class="eyebrow"><b></b>В работе<span class="cnt" id="mineCnt"></span></div>
+        <div id="mineList"></div>
+      </div>
+      <div class="card lit" id="assignedWrap">
+        <div class="eyebrow"><b></b>Назначено тебе<span class="cnt" id="assignedCnt"></span></div>
+        <div id="assignedList"></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow"><b></b>Свободные задания<span class="cnt" id="availCnt"></span></div>
+        <div id="availList"><div class="empty">Загружаю…</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ КОШЕЛЁК ═══════════ -->
+  <div id="tab-wallet" class="page tabview hidden">
+    <div class="card solid">
+      <div class="eyebrow"><b></b>Баланс</div>
+      <div class="bigmoney"><span class="num" id="wBonus">0</span><small>⚡</small></div>
+      <p class="sub" style="margin-top:9px">Меняются на настоящие бонусы приложения
+        Бибибайк. После заявки сумма резервируется до решения ответственного.</p>
+      <div class="charge" style="margin-top:14px"><i id="wBar" style="width:0%"></i></div>
+      <div class="hint" id="wWithdrawHint">Минимум для обмена — 1000.</div>
+      <div class="field" style="margin-top:14px"><label>Сколько обменять</label>
+        <input class="tinput num" id="wWithdrawAmount" inputmode="numeric" placeholder="1000"></div>
+      <button class="btn btn-volt" id="wWithdraw">Запросить обмен</button>
+    </div>
+    <div class="card hidden" id="wRequestsCard">
+      <div class="eyebrow"><b></b>Заявки на обмен</div>
+      <div id="wRequests"></div>
+    </div>
+    <div class="card">
+      <div class="eyebrow"><b></b>История</div>
+      <div id="wHistory"><div class="empty">Первое задание — и здесь появится первая строка.</div></div>
+    </div>
+  </div>
+
+  <!-- ═══════════ ПРОФИЛЬ ═══════════ -->
+  <div id="tab-profile" class="page tabview hidden">
+    <div class="card solid">
+      <div class="eyebrow"><b></b>Уровень доверия</div>
+      <div class="rowsplit" style="margin-bottom:12px">
+        <div>
+          <div style="font-size:21px;font-weight:900;letter-spacing:-.02em"
+               id="pLevel">Новичок</div>
+          <div class="ty" id="pTo">—</div>
+        </div>
+        <div style="font-size:34px" id="pBadge">🌱</div>
+      </div>
+      <div class="charge"><i id="pBar" style="width:0%"></i></div>
+      <div class="ty" id="pSource" style="margin-top:9px">—</div>
+      <p class="sub" style="margin-top:9px">Уровень растёт за подтверждённые задания
+        и за живое участие в беседе группы. Выше уровень — крупнее задания
+        и меньше проверок.</p>
+    </div>
+
+    <div class="card warm" id="pAwardsCard">
+      <div class="eyebrow"><b></b>Награды<span class="cnt" id="pAwardsCnt"></span></div>
+      <div id="pAwards"></div>
+    </div>
+
+    <div class="card">
+      <div class="eyebrow"><b></b>Реферальный прогресс</div>
+      <div class="rowsplit">
+        <div><span class="num" style="font-size:30px;font-weight:900;color:var(--volt)"
+                   id="pRefCount">0</span>
+          <span class="ty" style="margin-left:5px">друзей</span></div>
+        <div class="ty" id="pRefNext">—</div>
+      </div>
+      <div class="charge" style="margin-top:12px"><i id="pRefBar" style="width:0%"></i></div>
+      <div class="steps" id="pRefMilestones"></div>
+    </div>
+
+    <div class="card">
+      <div class="eyebrow"><b></b>Пригласить друга</div>
+      <p class="sub" style="margin-bottom:13px" id="pRefRule">Друг заходит по твоей
+        ссылке и подписывается на канал — прогресс сразу +1. Награда за ступень
+        приходит в тот же момент.</p>
+      <button class="btn btn-dark" id="pRef">📨 Поделиться ссылкой</button>
+    </div>
+
+    <div class="card">
+      <div class="eyebrow"><b></b>Как это работает</div>
+      <p class="sub">Берёшь задание на карте → выполняешь → жмёшь «Готово» →
+        ответственный подтверждает → молнии падают в кошелёк. За особые дела
+        ответственный выдаёт награды с бонусом сверху.</p>
+    </div>
+    <div class="ty" style="text-align:center" id="pVersion"></div>
+  </div>
+
+  <!-- ═══════════ МОДЕРАЦИЯ ═══════════ -->
+  <div id="tab-admin" class="page tabview hidden">
+    <div class="segwrap"><div class="seg scroll">
+      <button data-asub="adSubQueue" class="on">Очередь</button>
+      <button data-asub="adSubCreate">Задание</button>
+      <button data-asub="adSubAwards">Награды</button>
+      <button data-asub="adSubTeam">Команда</button>
+      <button data-asub="adSubWithdraw">Обмены</button>
+    </div></div>
+
+    <div id="adSubQueue" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card"><div class="eyebrow"><b></b>Заявки в команду<span class="cnt" id="adPendingCnt"></span></div>
+        <div id="adPending"><div class="empty">Загружаю…</div></div></div>
+      <div class="card lit"><div class="eyebrow"><b></b>На проверке<span class="cnt" id="adReviewCnt"></span></div>
+        <div id="adReview"><div class="empty">Загружаю…</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Активные задания<span class="cnt" id="adOpenCnt"></span></div>
+        <div id="adOpen"><div class="empty">Загружаю…</div></div></div>
+    </div>
+
+    <div id="adSubCreate" class="card hidden">
+      <div class="eyebrow"><b></b>Новое задание</div>
+      <div class="two">
+        <div class="field"><label>Тип</label><select class="tinput" id="ntType"></select></div>
+        <div class="field"><label>Награда ⚡</label>
+          <input class="tinput num" id="ntReward" inputmode="numeric" placeholder="50"></div>
+      </div>
+      <div class="field"><label>Кто может взять</label>
+        <select class="tinput" id="ntMode">
+          <option value="open">Любой из команды — забирает первый</option>
+          <option value="personal">Один сотрудник — персонально</option>
+          <option value="all">Все и каждый — по одному разу</option>
+        </select></div>
+      <div class="field hidden" id="ntAssigneeField"><label>Сотрудник</label>
+        <select class="tinput" id="ntAssignee"></select></div>
+      <div class="field"><label>Заголовок</label>
+        <input class="tinput" id="ntTitle" placeholder="Развезти 10 байков из СЦ"></div>
+      <div class="field"><label>Что сделать</label>
+        <input class="tinput" id="ntDetails" placeholder="Забрать с сервиса, расставить у ТЦ"></div>
+      <div class="field"><label>Адрес</label>
+        <input class="tinput" id="ntAddr" placeholder="ФМР, ул. Красная"></div>
+      <div class="two">
+        <div class="field"><label>Начало слота</label>
+          <input class="tinput" id="ntSlotStart" type="datetime-local"></div>
+        <div class="field"><label>Конец слота</label>
+          <input class="tinput" id="ntSlotEnd" type="datetime-local"></div>
+      </div>
+      <button class="btn btn-volt" id="ntCreate">Опубликовать задание</button>
+      <div class="hint">Слот можно не заполнять — тогда задание бессрочное.</div>
+    </div>
+
+    <div id="adSubAwards" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card warm">
+        <div class="eyebrow"><b></b>Каталог наград<span class="cnt" id="awCnt"></span></div>
+        <p class="sub" style="margin-bottom:13px">Награда — это бонус за поступок,
+          который не оформить заданием: вышел ночью, вытащил байк, помог новичку.
+          Выдаёшь вручную, бонус начисляется сразу.</p>
+        <button class="btn btn-amber" id="awNew">＋ Новая награда</button>
+      </div>
+      <div class="card"><div class="eyebrow"><b></b>Награды</div>
+        <div id="awList"><div class="empty">Загружаю…</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Последние выдачи</div>
+        <div id="awGranted"><div class="empty">Пока никого не награждали.</div></div></div>
+    </div>
+
+    <div id="adSubTeam" class="card hidden">
+      <div class="eyebrow"><b></b>Команда<span class="cnt" id="adTeamCnt"></span></div>
+      <div id="adTeam"><div class="empty">Загружаю…</div></div>
+    </div>
+
+    <div id="adSubWithdraw" class="card hidden">
+      <div class="eyebrow"><b></b>Заявки на обмен</div>
+      <div id="adWithdrawals"><div class="empty">Загружаю…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- шторка: баланс вручную -->
+<div id="balanceSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="balanceTitle">Изменить баланс</h3>
+  <p class="lead">Операция попадёт в историю участника с указанной причиной.</p>
+  <div class="field"><label>Сколько ⚡</label>
+    <input class="tinput num" id="balanceAmount" inputmode="numeric" placeholder="100"></div>
+  <div class="field"><label>Причина</label>
+    <input class="tinput" id="balanceReason" placeholder="Помощь на мероприятии"></div>
+  <div class="acts">
+    <button class="mini" id="balanceCancel" style="flex:1">Отмена</button>
+    <button class="btn btn-volt sm" id="balanceSave">Сохранить</button>
+  </div>
+</div></div>
+
+<!-- шторка: редактор награды -->
+<div id="awardSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="awardSheetTitle">Новая награда</h3>
+  <p class="lead">Участник увидит эмодзи, название и бонус в своём профиле.</p>
+  <div class="field"><label>Значок</label>
+    <input class="tinput" id="awEmoji" placeholder="🏅" maxlength="8">
+    <div class="emojirow" id="awEmojiRow"></div>
+  </div>
+  <div class="field"><label>Название</label>
+    <input class="tinput" id="awTitle" placeholder="Ночная смена"></div>
+  <div class="field"><label>За что</label>
+    <input class="tinput" id="awDesc" placeholder="Работал после полуночи"></div>
+  <div class="field"><label>Бонус ⚡</label>
+    <input class="tinput num" id="awBonus" inputmode="numeric" placeholder="120"></div>
+  <div class="check on" id="awRepeat"><div class="bx">✓</div>
+    <div class="tx">Можно выдавать много раз
+      <small>Выключи — и награда станет разовой, по одной на человека</small></div></div>
+  <div class="check on" id="awActive"><div class="bx">✓</div>
+    <div class="tx">Показывать в каталоге
+      <small>Выключенную нельзя выдать, но история выдач сохранится</small></div></div>
+  <div class="acts">
+    <button class="mini" id="awCancel" style="flex:1">Отмена</button>
+    <button class="btn btn-amber sm" id="awSave">Сохранить</button>
+  </div>
+</div></div>
+
+<!-- шторка: выдать награду -->
+<div id="grantSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="grantTitle">Выдать награду</h3>
+  <p class="lead" id="grantLead">Бонус начислится сразу, участник получит сообщение.</p>
+  <div class="field"><label>Награда</label><select class="tinput" id="grantAward"></select></div>
+  <div class="field"><label>Кому</label><select class="tinput" id="grantMember"></select></div>
+  <div class="field"><label>Комментарий (необязательно)</label>
+    <input class="tinput" id="grantNote" placeholder="За вчерашний развоз в ливень"></div>
+  <div class="acts">
+    <button class="mini" id="grantCancel" style="flex:1">Отмена</button>
+    <button class="btn btn-amber sm" id="grantSave">Выдать</button>
+  </div>
+</div></div>
+
+<!-- шторка: карточка участника -->
+<div id="memberSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <div class="mshead">
+    <span class="mava" id="msAva">🌱</span>
+    <span class="mtx"><b id="msName">—</b><small id="msMeta">—</small></span>
+    <span class="mbal" id="msBal">0⚡</span>
+  </div>
+  <div class="mgrid">
+    <button class="mini" id="msPlus">＋ Начислить</button>
+    <button class="mini" id="msMinus">− Списать</button>
+    <button class="mini" id="msAward">🏅 Награда</button>
+    <button class="mini" id="msRole">🛡️ Роль</button>
+  </div>
+  <div class="acts"><button class="mini" id="msClose" style="flex:1">Закрыть</button></div>
+</div></div>
+
+<!-- шторка: роль участника -->
+<div id="roleSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="roleTitle">Роль участника</h3>
+  <p class="lead">Роль меняется сразу, участник получит сообщение.</p>
+  <button class="pick" data-role="helper"><span class="em">🌿</span>
+    <span class="tx">Помощник<small>Берёт задания и получает бибибонусы</small></span>
+    <span class="mark">✓</span></button>
+  <button class="pick" data-role="employee"><span class="em">🚲</span>
+    <span class="tx">Сотрудник<small>То же плюс пометка «штатный» в команде</small></span>
+    <span class="mark">✓</span></button>
+  <button class="pick" data-role="admin"><span class="em">🛡️</span>
+    <span class="tx">Ответственный<small>Заявки, задания, награды и обмены</small></span>
+    <span class="mark">✓</span></button>
+  <div class="acts"><button class="mini" id="roleCancel" style="flex:1">Закрыть</button></div>
+</div></div>
+
+<!-- шторка: короткий текст (комментарий, причина) -->
+<div id="askSheet" class="sheet hidden"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="askTitle">Комментарий</h3>
+  <p class="lead" id="askLead"></p>
+  <div class="field">
+    <textarea class="tinput" id="askText" rows="3" placeholder=""></textarea>
+  </div>
+  <div class="acts">
+    <button class="mini" id="askSkip" style="flex:1">Пропустить</button>
+    <button class="btn btn-volt sm" id="askOk">Готово</button>
+  </div>
+</div></div>
+
+<div id="nav" class="tabbar hidden">
+  <button class="tab on" data-tab="tab-tasks"><span class="i">🚲</span>Задания</button>
+  <button class="tab" data-tab="tab-wallet"><span class="i">⚡</span>Кошелёк</button>
+  <button class="tab" data-tab="tab-profile"><span class="i">🌿</span>Профиль</button>
+  <button class="tab admin-only" data-tab="tab-admin"><span class="i">🛡️</span>Модерация</button>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const tg = window.Telegram && window.Telegram.WebApp;
+let initData = '';
+try{
+  if(tg){
+    tg.ready(); tg.expand();
+    initData = tg.initData || '';
+    if(tg.setHeaderColor) tg.setHeaderColor('#ffffff');
+    if(tg.setBackgroundColor) tg.setBackgroundColor('#ffffff');
+  }
+}catch(e){}
+
+let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
+
+/* ── утилиты ───────────────────────────────────────────────── */
+function esc(s){
+  return (s==null?'':String(s)).replace(/[&<>"']/g,
+    c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg){
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._t); t._t = setTimeout(()=>t.classList.remove('show'), 2600);
+}
+function buzz(kind){
+  try{
+    if(!tg || !tg.HapticFeedback) return;
+    if(kind==='ok') tg.HapticFeedback.notificationOccurred('success');
+    else if(kind==='no') tg.HapticFeedback.notificationOccurred('error');
+    else tg.HapticFeedback.impactOccurred('light');
+  }catch(e){}
+}
+function pct(a,b){ return b>0 ? Math.max(0,Math.min(100,Math.round(a/b*100))) : 100; }
+function plural(n,one,few,many){
+  const a=Math.abs(n)%100, b=a%10;
+  if(a>10&&a<20) return many;
+  if(b>1&&b<5) return few;
+  if(b===1) return one;
+  return many;
+}
+async function api(path, opts){
+  opts = opts || {};
+  const res = await fetch(path, Object.assign({}, opts, {
+    headers: Object.assign({
+      'Authorization':'tma '+initData,
+      'Content-Type':'application/json'
+    }, opts.headers||{})
+  }));
+  let data = null;
+  try{ data = await res.json(); }catch(e){}
+  if(!res.ok){
+    const err = new Error((data && data.message) || 'Не получилось. Попробуй ещё раз.');
+    err.status = res.status; err.data = data; throw err;
+  }
+  return data;
+}
+async function press(btn, label, fn){
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = label;
+  try{ await fn(); }
+  catch(e){ buzz('no'); toast(e.message); }
+  finally{ btn.disabled = false; btn.textContent = was; }
+}
+function flash(el){
+  if(!el) return;
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+}
+function fmtDate(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'}) + ', ' +
+         d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+}
+function fmtSlot(start,end){
+  if(!start || !end) return '';
+  const a = new Date(start), b = new Date(end);
+  if(Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return '';
+  const day = x => x.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit'});
+  const time = x => x.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+  return a.toDateString()===b.toDateString()
+    ? day(a)+', '+time(a)+'–'+time(b)
+    : day(a)+' '+time(a)+' — '+day(b)+' '+time(b);
+}
+
+/* Своя шторка ввода: window.prompt в Telegram WebView срабатывает
+   не на всех клиентах, а на части просто возвращает null. */
+let askResolve = null;
+function askText(opts){
+  opts = opts || {};
+  $('askTitle').textContent = opts.title || 'Комментарий';
+  $('askLead').textContent = opts.lead || '';
+  $('askLead').classList.toggle('hidden', !opts.lead);
+  $('askText').placeholder = opts.placeholder || '';
+  $('askText').value = '';
+  $('askOk').textContent = opts.okLabel || 'Готово';
+  $('askSkip').textContent = opts.skipLabel || 'Пропустить';
+  $('askSkip').classList.toggle('hidden', opts.required === true);
+  $('askSheet').classList.remove('hidden');
+  buzz('tap');
+  setTimeout(()=>{ try{ $('askText').focus(); }catch(e){} }, 120);
+  return new Promise(resolve=>{ askResolve = resolve; });
+}
+function askClose(value){
+  $('askSheet').classList.add('hidden');
+  const r = askResolve; askResolve = null;
+  if(r) r(value);
+}
+$('askOk').onclick   = ()=>askClose($('askText').value.trim());
+$('askSkip').onclick = ()=>askClose('');
+$('askSheet').onclick = e=>{ if(e.target===$('askSheet')) askClose(null); };
+
+/* ── навигация ─────────────────────────────────────────────── */
+document.querySelectorAll('#nav .tab').forEach(btn=>{
+  btn.onclick = ()=>{
+    buzz('tap');
+    document.querySelectorAll('#nav .tab').forEach(b=>b.classList.toggle('on', b===btn));
+    const id = btn.dataset.tab;
+    document.querySelectorAll('.tabview').forEach(v=>{
+      const show = v.id===id;
+      v.classList.toggle('hidden', !show);
+      if(show){ v.style.animation='none'; void v.offsetWidth; v.style.animation=''; }
+    });
+    window.scrollTo(0,0);
+    if(id==='tab-tasks' && STATE && STATE.can_work) loadTasks();
+    if(id==='tab-wallet') loadWallet();
+    if(id==='tab-profile') renderAwardShelf();
+    if(id==='tab-admin') loadAdmin();
+  };
+});
+document.querySelectorAll('[data-asub]').forEach(btn=>{
+  btn.onclick = ()=>{
+    buzz('tap');
+    document.querySelectorAll('[data-asub]').forEach(b=>b.classList.toggle('on', b===btn));
+    ['adSubQueue','adSubCreate','adSubAwards','adSubTeam','adSubWithdraw'].forEach(
+      s=>$(s).classList.toggle('hidden', s!==btn.dataset.asub));
+    if(btn.dataset.asub==='adSubAwards') loadAwards();
+    window.scrollTo(0,0);
+  };
+});
+
+/* ── состояние ─────────────────────────────────────────────── */
+async function load(){
+  try{
+    STATE = await api('/api/state');
+  }catch(e){
+    $('loading').innerHTML =
+      '<div class="card"><div class="eyebrow"><b></b>Нет входа</div>' +
+      '<h2 class="big">Открой приложение из Telegram</h2>' +
+      '<p class="sub">Приложение проверяет подпись Telegram. По прямой ссылке ' +
+      'в браузере вход не работает — открой бота и нажми кнопку меню.</p></div>';
+    return;
+  }
+  const me = STATE.me;
+  $('hName').textContent = me.name || 'Гость';
+  $('hRole').textContent = roleLabel(me);
+  setBonus(me.bonus);
+  $('pVersion').textContent = STATE.build_version || '';
+
+  $('pBadge').textContent = me.trust_emoji;
+  $('pLevel').textContent = me.trust_name;
+  const score = (me.trust_score != null) ? me.trust_score : me.done_count;
+  if(me.next_trust_at){
+    $('pBar').style.width = pct(score, me.next_trust_at) + '%';
+    $('pTo').textContent = score + ' из ' + me.next_trust_at +
+      ' до уровня «' + me.next_trust_name + '»';
+  }else{
+    $('pBar').style.width = '100%';
+    $('pTo').textContent = 'Максимальный уровень 🎉';
+  }
+  const per = me.chat_xp_per_task || 50;
+  const fromChat = Math.floor((me.chat_xp || 0) / per);
+  $('pSource').textContent = me.chat_xp
+    ? me.done_count + ' ' + plural(me.done_count,'задание','задания','заданий') +
+      ' + ' + me.chat_xp + ' опыта в беседе' +
+      (fromChat ? ' (это ещё +' + fromChat + ')' : '')
+    : me.done_count + ' ' + plural(me.done_count,'задание','задания','заданий');
+  renderReferral(STATE.referral || {count:0, milestones:[]});
+  $('pRefRule').textContent = (STATE.referral_gate && STATE.referral_gate.required)
+    ? 'Друг заходит по твоей ссылке и подписывается на канал — прогресс сразу +1. Награда за ступень приходит в тот же момент.'
+    : 'Друг заходит по твоей ссылке и проходит одобрение в команду. Награда за ступень приходит сразу.';
+  renderAwardShelf();
+
+  const sel = $('ntType');
+  if(sel && !sel.dataset.filled){
+    sel.innerHTML = (STATE.task_types||[]).map(t=>
+      '<option value="'+esc(t.key)+'">'+t.emoji+' '+esc(t.title)+'</option>').join('');
+    sel.dataset.filled = '1';
+  }
+
+  renderSubscribeBox();
+  renderTasksTab();
+  document.querySelectorAll('.admin-only').forEach(el=>{
+    el.style.display = STATE.is_admin ? 'flex' : 'none';
+  });
+  $('nav').classList.toggle('has-admin', !!STATE.is_admin);
+
+  $('loading').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('nav').classList.remove('hidden');
+}
+
+function setBonus(v){
+  v = Number(v||0);
+  $('hBonus').textContent = v;
+  if(lastBonus !== null && v > lastBonus){
+    const w = $('hWallet');
+    w.classList.remove('pop'); void w.offsetWidth; w.classList.add('pop');
+  }
+  lastBonus = v;
+}
+
+function roleLabel(me){
+  if(me.role==='admin') return '🛡️ Ответственный';
+  if(me.status==='approved') return me.trust_emoji + ' ' + me.trust_name;
+  if(me.status==='blocked') return 'Доступ закрыт';
+  if(me.applied) return '⏳ Заявка на рассмотрении';
+  return 'Гость';
+}
+
+function renderSubscribeBox(){
+  const g = (STATE && STATE.referral_gate) || {};
+  const show = !!(g.required && g.invited && !g.confirmed);
+  $('subBox').classList.toggle('hidden', !show);
+  $('subOpen').classList.toggle('hidden', !g.url);
+}
+$('subOpen').onclick = ()=>{
+  const url = STATE && STATE.referral_gate && STATE.referral_gate.url;
+  if(!url){ toast('Ссылка на канал не настроена'); return; }
+  buzz('tap');
+  try{ tg && tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url,'_blank'); }
+  catch(e){ toast(url); }
+};
+$('subCheck').onclick = ()=>press($('subCheck'),'Проверяю…', async ()=>{
+  await api('/api/referral/verify',{method:'POST', body:JSON.stringify({})});
+  buzz('ok');
+  toast('Готово! Другу засчитано приглашение.');
+  await load();
+});
+
+function renderTasksTab(){
+  const me = STATE.me;
+  const canWork = !!STATE.can_work;
+  const blocked = me.status==='blocked';
+  const waiting = !canWork && !blocked && !!me.applied;
+  const fresh   = !canWork && !blocked && !me.applied;
+  $('applyBox').classList.toggle('hidden', !fresh);
+  $('waitBox').classList.toggle('hidden', !waiting);
+  $('blockedBox').classList.toggle('hidden', !blocked);
+  $('worksBox').classList.toggle('hidden', !canWork);
+  if(canWork) loadTasks();
+}
+
+function renderReferral(ref){
+  const count = Number(ref.count||0);
+  const ms = ref.milestones || [];
+  $('pRefCount').textContent = count;
+  const next = ms.find(m=>count < m.count);
+  $('pRefNext').textContent = next
+    ? 'ещё ' + (next.count-count) + ' до +' + next.reward + '⚡'
+    : 'все ступени пройдены 🎉';
+  let p = 100;
+  if(next && ms.length){
+    const i = ms.indexOf(next);
+    const prev = i ? ms[i-1].count : 0;
+    const inside = Math.max(0, Math.min(1, (count-prev)/(next.count-prev)));
+    p = ((i+inside)/ms.length)*100;
+  }
+  $('pRefBar').style.width = Math.max(0,Math.min(100,p))+'%';
+  $('pRefMilestones').innerHTML = ms.map(m=>
+    '<div class="step '+(count>=m.count?'done':'')+' '+(next===m?'next':'')+'">'+
+    '<div class="dot"></div><b>'+m.count+'</b><span>+'+m.reward+'</span></div>').join('');
+}
+
+/* витрина наград в профиле */
+function renderAwardShelf(){
+  const mine = (STATE && STATE.my_awards) || [];
+  $('pAwardsCnt').textContent = mine.length ? mine.length : '';
+  if(!mine.length){
+    $('pAwards').innerHTML =
+      '<div class="empty">Пока пусто. Награды выдаёт ответственный — ' +
+      'за смены, спасённые байки и помощь новичкам.</div>';
+    return;
+  }
+  $('pAwards').innerHTML =
+    '<div class="shelf">' + mine.map((a,i)=>
+      '<div class="medal" data-medal="'+i+'"><span class="em">'+esc(a.emoji)+'</span>'+
+      '<div class="nm">'+esc(a.title)+'</div>'+
+      (a.bonus?'<div class="bn">+'+a.bonus+'⚡</div>':'')+'</div>').join('') + '</div>';
+  $('pAwards').querySelectorAll('[data-medal]').forEach(el=>{
+    el.onclick = ()=>{
+      const a = mine[Number(el.dataset.medal)];
+      buzz('tap');
+      toast(a.title + (a.note ? ' — ' + a.note : (a.description ? ' — ' + a.description : '')));
+    };
+  });
+}
+
+/* ── задания ───────────────────────────────────────────────── */
+async function loadTasks(){
+  try{
+    const d = await api('/api/tasks/available');
+    const mine = d.mine || [];
+    const open = d.available || [];
+    const personal = open.filter(t=>t.is_personal);
+    const free = open.filter(t=>!t.is_personal);
+
+    $('mineWrap').classList.toggle('hidden', !mine.length);
+    $('mineCnt').textContent = mine.length || '';
+    $('mineList').innerHTML = mine.map(taskCardMine).join('');
+
+    $('assignedWrap').classList.toggle('hidden', !personal.length);
+    $('assignedCnt').textContent = personal.length || '';
+    $('assignedList').innerHTML = personal.map(taskCardOpen).join('');
+
+    $('availCnt').textContent = free.length || '';
+    $('availList').innerHTML = free.length ? free.map(taskCardOpen).join('')
+      : '<div class="empty">Свободных заданий нет. Заглядывай — новые появляются в течение дня.</div>';
+    bindTasks();
+  }catch(e){
+    if(e.status===403){ renderTasksTab(); return; }
+    $('availList').innerHTML = '<div class="empty">'+esc(e.message)+'</div>';
+  }
+}
+
+function taskBody(t){
+  const slot = fmtSlot(t.slot_start, t.slot_end);
+  const pills = [];
+  if(t.is_personal) pills.push('<span class="pill on">Только для тебя</span>');
+  if(t.repeatable)  pills.push('<span class="pill on">Для всех</span>');
+  if(slot)          pills.push('<span class="pill">🕒 '+esc(slot)+'</span>');
+  return '<div class="row1"><div class="tico">'+esc(t.emoji||'📍')+'</div>'+
+    '<div><div class="tt">'+esc(t.title)+'</div>'+
+    '<div class="ty">'+esc(t.type_title)+'</div></div>'+
+    '<span class="rw">+'+Number(t.reward||0)+'⚡</span></div>'+
+    (t.details?'<div class="dt">'+esc(t.details)+'</div>':'')+
+    (t.address?'<div class="addr">📍 '+esc(t.address)+'</div>':'')+
+    (pills.length?'<div class="meta">'+pills.join('')+'</div>':'');
+}
+function taskCardOpen(t){
+  return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
+    '<div class="acts"><button class="btn btn-volt sm" data-claim="'+t.id+'">'+
+    'Взять задание</button></div></div>';
+}
+function taskCardMine(t){
+  const review = t.status==='review';
+  return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
+    '<div class="meta"><span class="'+(review?'pill hot':'pill on')+'">'+
+    (review?'⏳ На проверке':'🔧 В работе')+'</span></div>'+
+    (review ? '' :
+      '<div class="acts"><button class="btn btn-volt sm" data-done="'+t.id+'">'+
+      'Готово</button></div>')+'</div>';
+}
+function bindTasks(){
+  document.querySelectorAll('[data-claim]').forEach(b=>{
+    b.onclick = ()=>press(b,'Беру…', async ()=>{
+      await api('/api/tasks/claim',{method:'POST',
+        body:JSON.stringify({task_id:Number(b.dataset.claim)})});
+      buzz('ok'); flash(document.querySelector('[data-card="'+b.dataset.claim+'"]'));
+      toast('Задание твоё. Выполнил — жми «Готово».');
+      await loadTasks();
+    });
+  });
+  document.querySelectorAll('[data-done]').forEach(b=>{
+    b.onclick = async ()=>{
+      const note = await askText({
+        title:'Задание выполнено',
+        lead:'Коротко опиши результат — ответственному будет проще подтвердить.',
+        placeholder:'Развёз 10 байков, два оставил у ТЦ',
+        okLabel:'Отправить на проверку', skipLabel:'Без комментария'});
+      if(note === null) return;
+      press(b,'Отправляю…', async ()=>{
+        await api('/api/tasks/complete',{method:'POST',
+          body:JSON.stringify({task_id:Number(b.dataset.done), note:note})});
+        buzz('ok'); flash(document.querySelector('[data-card="'+b.dataset.done+'"]'));
+        toast('Отправлено на проверку.');
+        await loadTasks();
+      });
+    };
+  });
+}
+
+/* ── кошелёк ───────────────────────────────────────────────── */
+async function loadWallet(){
+  try{
+    const d = await api('/api/wallet');
+    const min = Number(d.withdraw_min||1000);
+    const bonus = Number(d.bonus||0);
+    $('wBonus').textContent = bonus;
+    setBonus(bonus);
+    $('wBar').style.width = pct(bonus, min) + '%';
+    const enough = bonus >= min;
+    $('wWithdraw').disabled = !enough;
+    $('wWithdrawHint').textContent = enough
+      ? 'Можно обменять. Минимум — ' + min + '.'
+      : 'Нужно ещё ' + (min-bonus) + ' ' + plural(min-bonus,'молния','молнии','молний') +
+        ' до обмена. Минимум — ' + min + '.';
+    $('wWithdrawHint').classList.toggle('bad', false);
+    if(!$('wWithdrawAmount').value) $('wWithdrawAmount').placeholder = String(min);
+
+    const reqs = d.withdrawals || [];
+    $('wRequestsCard').classList.toggle('hidden', !reqs.length);
+    const label = {pending:'⏳ На рассмотрении', approved:'✅ Обменяно', rejected:'↩️ Отклонено'};
+    $('wRequests').innerHTML = reqs.map(r=>
+      '<div class="ledger"><div><div class="rs">'+(label[r.status]||esc(r.status))+'</div>'+
+      '<div class="dtm">'+fmtDate(r.created_at)+(r.note?' · '+esc(r.note):'')+'</div></div>'+
+      '<div class="amt">'+r.amount+'⚡</div></div>').join('');
+
+    const h = d.history || [];
+    $('wHistory').innerHTML = h.length ? h.map(x=>
+      '<div class="ledger"><div><div class="rs">'+esc(x.reason)+'</div>'+
+      '<div class="dtm">'+fmtDate(x.created_at)+'</div></div>'+
+      '<div class="amt '+(x.amount>0?'plus':'minus')+'">'+
+      (x.amount>0?'+':'')+x.amount+'⚡</div></div>').join('')
+      : '<div class="empty">Первое задание — и здесь появится первая строка.</div>';
+  }catch(e){ toast(e.message); }
+}
+$('wWithdraw').onclick = ()=>{
+  const amount = Number(($('wWithdrawAmount').value||'').replace(/\D/g,''));
+  if(!amount){ toast('Укажи сумму обмена'); return; }
+  press($('wWithdraw'),'Отправляю…', async ()=>{
+    const d = await api('/api/withdraw/request',{method:'POST',
+      body:JSON.stringify({amount:amount})});
+    buzz('ok');
+    $('wWithdrawAmount').value = '';
+    toast('Заявка #'+d.request_id+' создана. Сумма зарезервирована.');
+    await loadWallet();
+    if(d.contact){
+      const text = encodeURIComponent(
+        'Привет! Заявка на обмен #'+d.request_id+' на '+d.amount+' бибибонусов.');
+      const url = 'https://t.me/'+d.contact+'?text='+text;
+      try{ tg && tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url,'_blank'); }
+      catch(err){}
+    }
+  });
+};
+
+/* ── регистрация и вход ────────────────────────────────────── */
+$('apSend').onclick = ()=>{
+  const name = $('apName').value.trim();
+  if(name.length < 2){ toast('Укажи имя — ответственный должен понимать, кто это'); return; }
+  press($('apSend'),'Отправляю…', async ()=>{
+    await api('/api/apply',{method:'POST', body:JSON.stringify({
+      name:name, phone:$('apPhone').value.trim()})});
+    buzz('ok'); toast('Заявка отправлена!');
+    await load();
+  });
+};
+
+$('pRef').onclick = ()=>{
+  const u = STATE && STATE.bot_username;
+  if(!u){ toast('Ссылка появится, когда на хостинге задан BOT_USERNAME'); return; }
+  const link = 'https://t.me/'+u+'?start=ref_'+STATE.me.user_id;
+  const text = 'Помогаю Бибибайку и получаю бибибонусы на бесплатные поездки. Присоединяйся 🚲⚡';
+  const url = 'https://t.me/share/url?url='+encodeURIComponent(link)+
+              '&text='+encodeURIComponent(text);
+  buzz('tap');
+  try{ tg && tg.openTelegramLink ? tg.openTelegramLink(url) : window.open(url,'_blank'); }
+  catch(e){ toast(link); }
+};
+
+/* ── модерация ─────────────────────────────────────────────── */
+$('ntMode').onchange = ()=>{
+  $('ntAssigneeField').classList.toggle('hidden', $('ntMode').value!=='personal');
+};
+
+async function loadAdmin(){
+  if(!STATE || !STATE.is_admin) return;
+  try{
+    const d = await api('/api/admin/overview');
+    ADMIN = d;
+    const pend = d.pending || [];
+    $('adPendingCnt').textContent = pend.length || '';
+    $('adPending').innerHTML = pend.length ? pend.map(p=>
+      '<div class="task"><div class="row1"><div class="tico">🙋</div>'+
+      '<div><div class="tt">'+esc(p.full_name||'Без имени')+'</div>'+
+      '<div class="ty">'+esc(p.phone||'—')+' · @'+esc(p.username||'—')+'</div></div></div>'+
+      '<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить</button>'+
+      '<button class="mini warn" data-rej="'+p.user_id+'">Отклонить</button></div></div>').join('')
+      : '<div class="empty">Новых заявок нет.</div>';
+
+    const rev = d.review || [];
+    $('adReviewCnt').textContent = rev.length || '';
+    $('adReview').innerHTML = rev.length ? rev.map(t=>
+      '<div class="task">'+taskBody(t)+
+      (t.claimed_name?'<div class="meta"><span class="pill on">'+esc(t.claimed_name)+'</span></div>':'')+
+      (t.proof_note?'<div class="dt">💬 '+esc(t.proof_note)+'</div>':'')+
+      '<div class="acts"><button class="btn btn-volt sm" data-tok="'+t.id+'" '+
+      'data-as="'+(t.assignment_id||'')+'">Подтвердить +'+Number(t.reward||0)+'⚡</button>'+
+      '<button class="mini" data-tno="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Вернуть</button>'+
+      '</div></div>').join('')
+      : '<div class="empty">Проверять нечего — все задания закрыты.</div>';
+
+    const op = d.open_tasks || [];
+    $('adOpenCnt').textContent = op.length || '';
+    $('adOpen').innerHTML = op.length ? op.map(t=>
+      '<div class="task">'+taskBody(t)+
+      '<div class="meta"><span class="pill '+(t.status==='claimed'?'hot':'on')+'">'+
+      (t.status==='claimed'?'Взято':'Открыто')+'</span>'+
+      (t.assigned_name?'<span class="pill">'+esc(t.assigned_name)+'</span>':'')+
+      '</div></div>').join('')
+      : '<div class="empty">Активных заданий нет. Создай первое на вкладке «Задание».</div>';
+
+    const team = d.team || [];
+    $('adTeamCnt').textContent = team.length || '';
+    $('adTeam').innerHTML = team.length ? team.map(m=>
+      '<button class="member" data-member="'+m.user_id+'">'+
+      '<span class="mava">'+esc(m.trust_emoji)+'</span>'+
+      '<span class="mtx"><b>'+esc(m.name||'—')+'</b>'+
+      '<small>'+roleEmoji(m.role)+' '+esc(roleTitle(m.role))+' · '+
+      esc(m.trust_name)+' · '+m.done_count+' '+
+      plural(m.done_count,'задание','задания','заданий')+'</small></span>'+
+      '<span class="mbal">'+m.bonus+'⚡</span></button>').join('')
+      : '<div class="empty">В команде пока никого. Одобри первую заявку.</div>';
+
+    const ws = d.withdrawals || [];
+    const label = {pending:'⏳ На рассмотрении', approved:'✅ Обменяно', rejected:'↩️ Отклонено'};
+    $('adWithdrawals').innerHTML = ws.length ? ws.map(w=>
+      '<div class="task"><div class="row1"><div class="tico">⚡</div>'+
+      '<div><div class="tt">'+esc(w.full_name||('ID '+w.user_id))+'</div>'+
+      '<div class="ty">#'+w.id+' · '+(label[w.status]||esc(w.status))+' · '+
+      fmtDate(w.created_at)+'</div></div>'+
+      '<span class="rw">'+w.amount+'⚡</span></div>'+
+      (w.note?'<div class="dt">💬 '+esc(w.note)+'</div>':'')+
+      (w.status==='pending'
+        ? '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Обменял</button>'+
+          '<button class="mini warn" data-wno="'+w.id+'">Отклонить</button></div>'
+        : '')+'</div>').join('')
+      : '<div class="empty">Заявок на обмен нет.</div>';
+
+    // список сотрудников для персонального задания
+    const workers = team.filter(m=>m.role==='helper'||m.role==='employee');
+    $('ntAssignee').innerHTML = workers.length
+      ? workers.map(m=>'<option value="'+m.user_id+'">'+esc(m.name||('ID '+m.user_id))+'</option>').join('')
+      : '<option value="">Нет одобренных участников</option>';
+
+    renderGrantedList(d.granted || []);
+    bindAdmin();
+  }catch(e){ toast(e.message); }
+}
+
+function bindAdmin(){
+  document.querySelectorAll('[data-appr]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/decide',{method:'POST',
+        body:JSON.stringify({user_id:Number(b.dataset.appr), decision:'approve'})});
+      buzz('ok'); toast('Одобрено — задания у него уже видны.'); await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-rej]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/decide',{method:'POST',
+        body:JSON.stringify({user_id:Number(b.dataset.rej), decision:'reject'})});
+      toast('Отклонено. Вернуть можно кнопкой «Одобрить» позже.'); await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-tok]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/task/approve',{method:'POST', body:JSON.stringify({
+        task_id:Number(b.dataset.tok),
+        assignment_id: b.dataset.as ? Number(b.dataset.as) : null,
+        approve:true})});
+      buzz('ok'); toast('Подтверждено, бонусы начислены.'); await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-tno]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/task/approve',{method:'POST', body:JSON.stringify({
+        task_id:Number(b.dataset.tno),
+        assignment_id: b.dataset.as ? Number(b.dataset.as) : null,
+        approve:false})});
+      toast('Вернули на доработку.'); await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-wok]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/withdraw/decide',{method:'POST',
+        body:JSON.stringify({request_id:Number(b.dataset.wok), decision:'approve'})});
+      buzz('ok'); toast('Обмен закрыт.'); await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-wno]').forEach(b=>{
+    b.onclick = async ()=>{
+      const note = await askText({
+        title:'Отклонить обмен',
+        lead:'Причину увидит участник. Бонусы вернутся ему на баланс.',
+        placeholder:'Обменяю в следующий вторник',
+        okLabel:'Отклонить обмен'});
+      if(note === null) return;
+      press(b,'…', async ()=>{
+        await api('/api/admin/withdraw/decide',{method:'POST', body:JSON.stringify({
+          request_id:Number(b.dataset.wno), decision:'reject', note:note})});
+        toast('Отклонено, бонусы вернулись участнику.'); await loadAdmin();
+      });
+    };
+  });
+  document.querySelectorAll('[data-member]').forEach(b=>{
+    b.onclick = ()=>openMember(Number(b.dataset.member));
+  });
+}
+
+/* ── карточка участника ────────────────────────────────────── */
+let memberTarget = null;
+function openMember(uid){
+  const m = ((ADMIN && ADMIN.team) || []).find(x=>x.user_id===uid);
+  if(!m) return;
+  memberTarget = m;
+  $('msAva').textContent = m.trust_emoji;
+  $('msName').textContent = m.name || ('ID ' + m.user_id);
+  $('msMeta').textContent = roleEmoji(m.role) + ' ' + roleTitle(m.role) + ' · ' +
+    m.trust_name + ' · ' + m.done_count + ' ' +
+    plural(m.done_count,'задание','задания','заданий');
+  $('msBal').textContent = m.bonus + '⚡';
+  $('memberSheet').classList.remove('hidden');
+  buzz('tap');
+}
+function closeMember(){ $('memberSheet').classList.add('hidden'); }
+$('msClose').onclick = closeMember;
+$('memberSheet').onclick = e=>{ if(e.target===$('memberSheet')) closeMember(); };
+$('msPlus').onclick  = ()=>{ closeMember(); openBalance(memberTarget.user_id, memberTarget.name, 1); };
+$('msMinus').onclick = ()=>{ closeMember(); openBalance(memberTarget.user_id, memberTarget.name, -1); };
+$('msAward').onclick = ()=>{ closeMember(); openGrant(memberTarget.user_id); };
+$('msRole').onclick  = ()=>{ closeMember(); openRole(memberTarget.user_id, memberTarget.name, memberTarget.role); };
+
+/* ── роли ──────────────────────────────────────────────────── */
+const ROLE_EMOJI = {helper:'🌿', employee:'🚲', admin:'🛡️'};
+function roleTitle(role){
+  const list = (STATE && STATE.roles) || [];
+  const found = list.find(r=>r.key===role);
+  if(found) return found.title;
+  return {helper:'Помощник', employee:'Сотрудник', admin:'Ответственный'}[role] || 'Участник';
+}
+function roleEmoji(role){ return ROLE_EMOJI[role] || '👤'; }
+
+let roleTarget = null;
+function openRole(uid, name, current){
+  roleTarget = uid;
+  $('roleTitle').textContent = 'Роль — ' + (name || 'участник');
+  document.querySelectorAll('#roleSheet .pick').forEach(p=>{
+    p.classList.toggle('on', p.dataset.role===current);
+  });
+  $('roleSheet').classList.remove('hidden');
+  buzz('tap');
+}
+$('roleCancel').onclick = ()=>$('roleSheet').classList.add('hidden');
+$('roleSheet').onclick = e=>{ if(e.target===$('roleSheet')) $('roleSheet').classList.add('hidden'); };
+document.querySelectorAll('#roleSheet .pick').forEach(p=>{
+  // press() подменяет текст кнопки, а здесь внутри вложенная разметка —
+  // поэтому блокируем кнопки, а надпись не трогаем.
+  p.onclick = async ()=>{
+    const picks = document.querySelectorAll('#roleSheet .pick');
+    picks.forEach(x=>x.disabled = true);
+    try{
+      const d = await api('/api/admin/role',{method:'POST',
+        body:JSON.stringify({user_id:roleTarget, role:p.dataset.role})});
+      buzz('ok');
+      $('roleSheet').classList.add('hidden');
+      toast(d.already ? 'Роль уже такая.' : 'Роль изменена: ' + roleTitle(p.dataset.role));
+      await loadAdmin();
+    }catch(e){
+      buzz('no'); toast(e.message);
+    }finally{
+      picks.forEach(x=>x.disabled = false);
+    }
+  };
+});
+
+$('ntCreate').onclick = ()=>{
+  const mode = $('ntMode').value;
+  const body = {
+    type: $('ntType').value,
+    title: $('ntTitle').value.trim(),
+    details: $('ntDetails').value.trim(),
+    address: $('ntAddr').value.trim(),
+    reward: Number(($('ntReward').value||'').replace(/\D/g,'')) || 0,
+    repeatable: mode==='all',
+    assigned_to: mode==='personal' ? ($('ntAssignee').value||null) : null,
+    slot_start: $('ntSlotStart').value ? new Date($('ntSlotStart').value).toISOString() : null,
+    slot_end:   $('ntSlotEnd').value   ? new Date($('ntSlotEnd').value).toISOString()   : null
+  };
+  if(mode==='personal' && !body.assigned_to){ toast('Выбери сотрудника'); return; }
+  press($('ntCreate'),'Публикую…', async ()=>{
+    await api('/api/admin/task/create',{method:'POST', body:JSON.stringify(body)});
+    buzz('ok');
+    ['ntTitle','ntDetails','ntAddr','ntReward','ntSlotStart','ntSlotEnd']
+      .forEach(id=>$(id).value='');
+    toast(mode==='personal' ? 'Задание отправлено сотруднику.' : 'Задание опубликовано.');
+    document.querySelector('[data-asub="adSubQueue"]').click();
+    await loadAdmin();
+  });
+};
+
+/* баланс вручную */
+let balanceTarget = null, balanceSign = 1;
+function openBalance(uid, name, sign){
+  balanceTarget = uid; balanceSign = sign;
+  $('balanceTitle').textContent = (sign>0?'Начислить ':'Списать ') + '⚡ — ' + name;
+  $('balanceAmount').value = ''; $('balanceReason').value = '';
+  $('balanceSheet').classList.remove('hidden');
+  buzz('tap');
+}
+$('balanceCancel').onclick = ()=>$('balanceSheet').classList.add('hidden');
+$('balanceSheet').onclick = e=>{ if(e.target===$('balanceSheet')) $('balanceSheet').classList.add('hidden'); };
+$('balanceSave').onclick = ()=>{
+  const amount = Number(($('balanceAmount').value||'').replace(/\D/g,''));
+  if(!amount){ toast('Укажи сумму'); return; }
+  const reason = $('balanceReason').value.trim();
+  if(!reason){ toast('Причина обязательна — участник увидит её в истории'); return; }
+  press($('balanceSave'),'Сохраняю…', async ()=>{
+    await api('/api/admin/grant',{method:'POST', body:JSON.stringify({
+      user_id:balanceTarget, amount:amount*balanceSign, reason:reason})});
+    buzz('ok'); $('balanceSheet').classList.add('hidden');
+    toast('Баланс обновлён.'); await loadAdmin();
+  });
+};
+
+/* ── награды: каталог, редактор, выдача ────────────────────── */
+const EMOJI_SET = ['⚡','🏅','👑','🛠','🌙','🚀','🔥','💎','🥇','📸','🤝','🌱','🐺','🎯'];
+
+async function loadAwards(){
+  try{
+    const d = await api('/api/awards');
+    AWARDS = d.catalog || [];
+    $('awCnt').textContent = AWARDS.length || '';
+    $('awList').innerHTML = AWARDS.length ? AWARDS.map(a=>
+      '<div class="award'+(a.active?'':' off')+'">'+
+      '<div class="em">'+esc(a.emoji)+'</div>'+
+      '<div><div class="tt">'+esc(a.title)+'</div>'+
+      '<div class="ty">'+esc(a.description||'без описания')+'</div>'+
+      '<div class="meta">'+
+        (a.bonus?'<span class="pill hot">+'+a.bonus+'⚡</span>':'<span class="pill">без бонуса</span>')+
+        '<span class="pill">'+(a.repeatable?'много раз':'один раз')+'</span>'+
+        (a.active?'':'<span class="pill">выключена</span>')+
+      '</div>'+
+      '<div class="acts">'+
+        '<button class="mini" data-awgrant="'+a.id+'">Выдать</button>'+
+        '<button class="mini" data-awedit="'+a.id+'">Изменить</button>'+
+      '</div></div></div>').join('')
+      : '<div class="empty">Каталог пуст. Создай первую награду.</div>';
+    $('awList').querySelectorAll('[data-awgrant]').forEach(b=>{
+      b.onclick = ()=>openGrant(null, Number(b.dataset.awgrant));
+    });
+    $('awList').querySelectorAll('[data-awedit]').forEach(b=>{
+      b.onclick = ()=>openAward(AWARDS.find(x=>x.id===Number(b.dataset.awedit)));
+    });
+  }catch(e){ $('awList').innerHTML = '<div class="empty">'+esc(e.message)+'</div>'; }
+}
+
+function renderGrantedList(list){
+  $('awGranted').innerHTML = list.length ? list.map(g=>
+    '<div class="ledger"><div class="tico" style="width:34px;height:34px;font-size:17px">'+
+    esc(g.emoji)+'</div><div style="flex:1;min-width:0">'+
+    '<div class="rs">'+esc(g.title)+' → '+esc(g.full_name||('ID '+g.user_id))+'</div>'+
+    '<div class="dtm">'+fmtDate(g.granted_at)+(g.note?' · '+esc(g.note):'')+'</div></div>'+
+    (g.bonus?'<div class="amt plus">+'+g.bonus+'⚡</div>':'')+
+    '<button class="mini warn" data-awrev="'+g.id+'" style="margin-left:8px">Снять</button>'+
+    '</div>').join('')
+    : '<div class="empty">Пока никого не награждали.</div>';
+  $('awGranted').querySelectorAll('[data-awrev]').forEach(b=>{
+    b.onclick = ()=>press(b,'…', async ()=>{
+      await api('/api/admin/award/revoke',{method:'POST',
+        body:JSON.stringify({entry_id:Number(b.dataset.awrev)})});
+      toast('Награда снята.'); await loadAdmin(); await loadAwards();
+    });
+  });
+}
+
+let awardEditId = null;
+function toggleCheck(el){ el.onclick = ()=>{ el.classList.toggle('on'); buzz('tap'); }; }
+toggleCheck($('awRepeat')); toggleCheck($('awActive'));
+
+$('awEmojiRow').innerHTML = EMOJI_SET.map(e=>'<button data-e="'+e+'">'+e+'</button>').join('');
+$('awEmojiRow').querySelectorAll('[data-e]').forEach(b=>{
+  b.onclick = ()=>{
+    $('awEmoji').value = b.dataset.e;
+    $('awEmojiRow').querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+    buzz('tap');
+  };
+});
+
+function openAward(a){
+  awardEditId = a ? a.id : null;
+  $('awardSheetTitle').textContent = a ? 'Изменить награду' : 'Новая награда';
+  $('awEmoji').value = a ? a.emoji : '🏅';
+  $('awTitle').value = a ? a.title : '';
+  $('awDesc').value  = a ? (a.description||'') : '';
+  $('awBonus').value = a ? a.bonus : '';
+  $('awRepeat').classList.toggle('on', a ? a.repeatable : true);
+  $('awActive').classList.toggle('on', a ? a.active : true);
+  $('awEmojiRow').querySelectorAll('button').forEach(
+    x=>x.classList.toggle('on', a && x.dataset.e===a.emoji));
+  $('awardSheet').classList.remove('hidden');
+  buzz('tap');
+}
+$('awNew').onclick = ()=>openAward(null);
+$('awCancel').onclick = ()=>$('awardSheet').classList.add('hidden');
+$('awardSheet').onclick = e=>{ if(e.target===$('awardSheet')) $('awardSheet').classList.add('hidden'); };
+$('awSave').onclick = ()=>{
+  const title = $('awTitle').value.trim();
+  if(title.length < 2){ toast('Дай награде название'); return; }
+  press($('awSave'),'Сохраняю…', async ()=>{
+    await api('/api/admin/award/save',{method:'POST', body:JSON.stringify({
+      id: awardEditId,
+      emoji: $('awEmoji').value.trim() || '🏅',
+      title: title,
+      description: $('awDesc').value.trim(),
+      bonus: Number(($('awBonus').value||'').replace(/\D/g,'')) || 0,
+      repeatable: $('awRepeat').classList.contains('on'),
+      active: $('awActive').classList.contains('on')})});
+    buzz('ok'); $('awardSheet').classList.add('hidden');
+    toast(awardEditId ? 'Награда обновлена.' : 'Награда в каталоге.');
+    await loadAwards();
+  });
+};
+
+function openGrant(userId, awardId){
+  const team = (ADMIN && ADMIN.team) || [];
+  const cat = (AWARDS || (ADMIN && ADMIN.awards) || []).filter(a=>a.active);
+  if(!team.length){ toast('Сначала одобри хотя бы одного участника'); return; }
+  if(!cat.length){ toast('Сначала создай награду в каталоге'); return; }
+  $('grantAward').innerHTML = cat.map(a=>
+    '<option value="'+a.id+'"'+(a.id===awardId?' selected':'')+'>'+
+    a.emoji+' '+esc(a.title)+(a.bonus?' · +'+a.bonus+'⚡':'')+'</option>').join('');
+  $('grantMember').innerHTML = team.map(m=>
+    '<option value="'+m.user_id+'"'+(m.user_id===userId?' selected':'')+'>'+
+    esc(m.name||('ID '+m.user_id))+'</option>').join('');
+  $('grantNote').value = '';
+  $('grantSheet').classList.remove('hidden');
+  buzz('tap');
+}
+$('grantCancel').onclick = ()=>$('grantSheet').classList.add('hidden');
+$('grantSheet').onclick = e=>{ if(e.target===$('grantSheet')) $('grantSheet').classList.add('hidden'); };
+$('grantSave').onclick = ()=>{
+  press($('grantSave'),'Выдаю…', async ()=>{
+    await api('/api/admin/award/grant',{method:'POST', body:JSON.stringify({
+      user_id: Number($('grantMember').value),
+      award_id: Number($('grantAward').value),
+      note: $('grantNote').value.trim()})});
+    buzz('ok'); $('grantSheet').classList.add('hidden');
+    toast('Награда выдана, участник получил сообщение.');
+    await loadAdmin(); await loadAwards();
+  });
+};
+
+load();
+</script>
+</body>
+</html>
