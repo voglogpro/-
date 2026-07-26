@@ -29,7 +29,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.2.0 (регистрация и публикация заданий)"
+BUILD_VERSION = "2026-07-26 · БибиЗадачи v2.3.0 (светлая и тёмная тема)"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -211,12 +211,14 @@ DATA_DIR = os.getenv("DATA_DIR") or os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bibitasks.db")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+LOGO_PATH = os.path.join(BASE_DIR, "logo.jpg")
 
 print("=" * 60, flush=True)
 print(f"== {BUILD_VERSION}", flush=True)
 print(f"== рабочая папка: {BASE_DIR}", flush=True)
 print(f"== база: {DB_PATH}", flush=True)
 print(f"== index.html рядом: {os.path.exists(INDEX_PATH)}", flush=True)
+print(f"== logo.jpg рядом: {os.path.exists(LOGO_PATH)}", flush=True)
 print(f"== порт: {WEBAPP_PORT}", flush=True)
 print(f"== токен найден: {'да' if BOT_TOKEN else 'НЕТ'}", flush=True)
 print(f"== админов в ADMIN_IDS: {len(ADMIN_IDS)}", flush=True)
@@ -2291,10 +2293,19 @@ async def serve_index(request):
     return web.Response(text="index.html не найден", status=404)
 
 
+async def serve_logo(request):
+    if os.path.exists(LOGO_PATH):
+        return web.FileResponse(LOGO_PATH, headers={
+            "Cache-Control": "public, max-age=86400",
+        })
+    return web.Response(text="logo.jpg не найден", status=404)
+
+
 async def api_health(request):
     return _json({
         "ok": True, "version": BUILD_VERSION,
         "index_html": os.path.exists(INDEX_PATH),
+        "logo": os.path.exists(LOGO_PATH),
         "token_present": bool(BOT_TOKEN), "port": WEBAPP_PORT,
     })
 
@@ -2343,6 +2354,7 @@ async def start_api_server():
         app.router.add_post("/api/admin/award/grant", api_admin_award_grant)
         app.router.add_post("/api/admin/award/revoke", api_admin_award_revoke)
         app.router.add_get("/health", api_health)
+        app.router.add_get("/logo.jpg", serve_logo)
         app.router.add_get("/index.html", serve_index)
         app.router.add_get("/", serve_index)
         runner = web.AppRunner(app)

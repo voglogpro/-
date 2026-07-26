@@ -3,18 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#FFFFFF">
+<meta name="theme-color" id="themeMeta" content="#FFFFFF">
 <title>БибиЗадачи</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+try{
+  document.documentElement.dataset.theme =
+    localStorage.getItem('bibitasks_theme') === 'dark' ? 'dark' : 'light';
+}catch(e){ document.documentElement.dataset.theme = 'light'; }
+</script>
 <style>
 /* ============================================================
-   БибиЗадачи — светлая минималистичная тема.
-   Белый лист, светло-серые карточки, зелёный только акцентом:
+   БибиЗадачи — светлая и тёмная минималистичные темы.
+   Контрастный фон, спокойные карточки, зелёный только акцентом:
    прогресс, числа, активная вкладка, главная кнопка. Больше
    нигде. Плоско — ни теней, ни заливок во всю плашку.
    Один мотив: любой прогресс это шкала заряда с бегущим
    разрядом, бибибонус измеряется молнией.
-   Ни внешних шрифтов, ни библиотек, ни картинок.
+   Ни внешних шрифтов, ни библиотек.
    ============================================================ */
 :root{
   --bg:#FFFFFF;
@@ -28,9 +34,39 @@
   --brand-btn:#0E9C42;    /* акцент: кнопка с белым текстом */
   --brand-tint:#EDF9F1;   /* акцент: лёгкая подложка */
   --danger:#C8392E;
+  --detail:#3F4642;
+  --placeholder:#A2ACA6;
+  --notice-ink:#2C4A37;
+  --danger-tint:#FBEFEE;
+  --danger-ink:#7A3630;
+  --toast-bg:#0F1512;
+  --toast-ink:#FFFFFF;
+  --overlay:rgba(15,21,18,.38);
   --r:24px;
   --pad:16px;
   --disp:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#090C0A;
+  --surface:#151A17;
+  --surface-2:#232A26;
+  --line:#303833;
+  --ink:#FFFFFF;
+  --ink-2:#B6C0BA;
+  --brand:#25D366;
+  --brand-ink:#67E795;
+  --brand-btn:#159447;
+  --brand-tint:#132A1C;
+  --danger:#FF756B;
+  --detail:#D4DDD7;
+  --placeholder:#7D8982;
+  --notice-ink:#C6F5D7;
+  --danger-tint:#321A19;
+  --danger-ink:#FFB4AE;
+  --toast-bg:#FFFFFF;
+  --toast-ink:#090C0A;
+  --overlay:rgba(0,0,0,.68);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0}
@@ -41,6 +77,7 @@ body{
   font-size:15px;line-height:1.45;
   padding-bottom:calc(76px + env(safe-area-inset-bottom));
   overscroll-behavior-y:contain;
+  transition:background-color .2s,color .2s;
 }
 .num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
 .hidden{display:none!important}
@@ -54,12 +91,23 @@ button,input,select,textarea{font:inherit;color:inherit}
   display:flex;align-items:center;gap:12px;
   background:var(--bg);border-bottom:1px solid var(--line);
 }
+.logo-wrap{width:48px;height:48px;flex:none;position:relative}
 .logo{
   width:46px;height:46px;flex:none;border-radius:15px;
-  background:var(--brand);color:#0F1512;
-  font-weight:900;font-size:20px;letter-spacing:-.06em;
-  display:flex;align-items:center;justify-content:center;
+  background:var(--brand);overflow:hidden;
+  box-shadow:inset 0 0 0 1px var(--line);
 }
+.logo img{width:100%;height:100%;display:block;object-fit:cover;
+  object-position:44% 50%;transform:scale(1.18)}
+.theme-toggle{
+  position:absolute;right:-2px;bottom:-2px;z-index:2;
+  width:23px;height:23px;border:0;border-radius:9px;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--surface);color:var(--ink);font-size:12px;padding:0;
+  box-shadow:0 0 0 2px var(--bg),inset 0 0 0 1px var(--line);
+  transition:transform .09s,background .2s;
+}
+.theme-toggle:active{transform:scale(.94)}
 .who{flex:1;min-width:0}
 .who .nm{font-weight:800;font-size:17px;letter-spacing:-.02em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -135,16 +183,16 @@ p.sub{margin:0;color:var(--ink-2);font-size:13.5px}
 .btn:active{transform:scale(.975)}
 .btn:disabled{opacity:.4}
 .btn-volt{background:var(--brand-btn);color:#fff}
-.btn-dark{background:var(--ink);color:#fff}
+.btn-dark{background:var(--ink);color:var(--bg)}
 .btn-ghost{background:var(--bg);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line)}
-.btn-amber{background:var(--ink);color:#fff}
+.btn-amber{background:var(--ink);color:var(--bg)}
 .btn.sm{padding:12px 14px;font-size:14px;border-radius:13px;width:auto;flex:1}
 .mini{
   background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
   color:var(--ink);border-radius:13px;padding:11px 13px;font-weight:700;font-size:13px;
 }
 .mini:active{transform:scale(.97)}
-.mini.warn{color:var(--danger);box-shadow:inset 0 0 0 1px #EED6D3}
+.mini.warn{color:var(--danger);box-shadow:inset 0 0 0 1px var(--danger)}
 .acts{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
 
 /* ── поля ─────────────────────────────────────────────────── */
@@ -157,7 +205,7 @@ p.sub{margin:0;color:var(--ink-2);font-size:13.5px}
   width:100%;background:var(--bg);border:0;box-shadow:inset 0 0 0 1px var(--line);
   border-radius:14px;padding:14px;font-size:15px;
 }
-.tinput::placeholder{color:#A2ACA6}
+.tinput::placeholder{color:var(--placeholder)}
 .tinput:focus{outline:none;box-shadow:inset 0 0 0 1.5px var(--brand)}
 textarea.tinput{resize:none;line-height:1.45}
 select.tinput{appearance:none;background-image:
@@ -212,7 +260,7 @@ select.tinput{appearance:none;background-image:
   flex:none;font-weight:900;font-size:14.5px;color:var(--brand-ink);
   background:var(--brand-tint);border-radius:99px;padding:6px 11px;white-space:nowrap;
 }
-.dt{margin-top:10px;font-size:13.5px;color:#3F4642}
+.dt{margin-top:10px;font-size:13.5px;color:var(--detail)}
 .addr{margin-top:8px;font-size:13px;color:var(--ink-2)}
 .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .pill{
@@ -278,10 +326,10 @@ select.tinput{appearance:none;background-image:
 }
 .notice{
   border-radius:16px;padding:14px;font-size:13px;line-height:1.5;
-  background:var(--brand-tint);color:#2C4A37;
+  background:var(--brand-tint);color:var(--notice-ink);
 }
 .notice b{color:var(--ink)}
-.notice.bad{background:#FBEFEE;color:#7A3630}
+.notice.bad{background:var(--danger-tint);color:var(--danger-ink)}
 .rowsplit{display:flex;align-items:center;gap:12px}
 .rowsplit>*:first-child{flex:1;min-width:0}
 
@@ -310,7 +358,7 @@ select.tinput{appearance:none;background-image:
 /* ── шторки ───────────────────────────────────────────────── */
 .sheet{
   position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;
-  background:rgba(15,21,18,.38);animation:fade .2s both;
+  background:var(--overlay);animation:fade .2s both;
 }
 .sheet .inner{
   width:100%;max-height:92vh;overflow-y:auto;
@@ -381,7 +429,7 @@ select.tinput{appearance:none;background-image:
   position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));
   transform:translate3d(-50%,16px,0);opacity:0;pointer-events:none;z-index:80;
   max-width:86%;padding:13px 18px;border-radius:15px;
-  background:var(--ink);border:0;color:#fff;
+  background:var(--toast-bg);border:0;color:var(--toast-ink);
   font-size:13px;font-weight:700;text-align:center;
   transition:transform .26s,opacity .26s;
 }
@@ -418,7 +466,11 @@ select.tinput{appearance:none;background-image:
 
   <!-- шапка -->
   <div class="head">
-    <div class="logo">bb.</div>
+    <div class="logo-wrap">
+      <div class="logo"><img src="/logo.jpg" alt="Логотип Бибибайка"></div>
+      <button class="theme-toggle" id="themeToggle" type="button"
+              aria-label="Включить тёмную тему" title="Сменить тему">🌙</button>
+    </div>
     <div class="who">
       <div class="nm" id="hName">—</div>
       <div class="rl" id="hRole">—</div>
@@ -806,12 +858,36 @@ try{
   if(tg){
     tg.ready(); tg.expand();
     initData = tg.initData || '';
-    if(tg.setHeaderColor) tg.setHeaderColor('#ffffff');
-    if(tg.setBackgroundColor) tg.setBackgroundColor('#ffffff');
   }
 }catch(e){}
 
 let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
+
+/* ── тема ──────────────────────────────────────────────────── */
+function applyTheme(theme, save){
+  const dark = theme === 'dark';
+  const value = dark ? 'dark' : 'light';
+  const bg = dark ? '#090C0A' : '#FFFFFF';
+  document.documentElement.dataset.theme = value;
+  $('themeMeta').setAttribute('content', bg);
+  $('themeToggle').textContent = dark ? '☀️' : '🌙';
+  $('themeToggle').setAttribute('aria-label', dark
+    ? 'Включить светлую тему' : 'Включить тёмную тему');
+  $('themeToggle').setAttribute('aria-pressed', dark ? 'true' : 'false');
+  if(save !== false){
+    try{ localStorage.setItem('bibitasks_theme', value); }catch(e){}
+  }
+  try{
+    if(tg && tg.setHeaderColor) tg.setHeaderColor(bg);
+    if(tg && tg.setBackgroundColor) tg.setBackgroundColor(bg);
+    if(tg && tg.setBottomBarColor) tg.setBottomBarColor(bg);
+  }catch(e){}
+}
+$('themeToggle').onclick = ()=>{
+  buzz('tap');
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+};
+applyTheme(document.documentElement.dataset.theme || 'light', false);
 
 /* ── утилиты ───────────────────────────────────────────────── */
 function esc(s){
