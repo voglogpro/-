@@ -85,7 +85,7 @@ TOPIC_FRANCHISE = _as_int_env("TOPIC_FRANCHISE", 43)  # франшиза: тол
 # Сколько опыта равно одному выполненному заданию при расчёте уровня.
 CHAT_XP_PER_TASK = _as_int_env("CHAT_XP_PER_TASK", 50)
 XP_PER_MESSAGE = _as_int_env("XP_PER_MESSAGE", 1)    # обычное сообщение — мало
-XP_PER_THANKS = _as_int_env("XP_PER_THANKS", 15)     # спасибо тебе — много
+XP_PER_THANKS = _as_int_env("XP_PER_THANKS", 5)     # спасибо тебе — много
 MSG_MIN_CHARS = _as_int_env("MSG_MIN_CHARS", 4)      # короче — не считаем
 MSG_COOLDOWN_SEC = _as_int_env("MSG_COOLDOWN_SEC", 60)
 MSG_XP_DAILY_CAP = _as_int_env("MSG_XP_DAILY_CAP", 20)
