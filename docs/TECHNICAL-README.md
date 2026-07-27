@@ -27,11 +27,27 @@ Telegram-бот и Mini App для команды Бибибайка: участ
 3. Запустите `python main.py`.
 4. Проверьте `http://127.0.0.1:3000/health`.
 
-После настройки реального Telegram выполните read-only проверку, которая не
-отправляет и не удаляет сообщения:
+Production secrets-файл создавайте вне репозитория. Токен передавайте генератору
+только через переменную окружения — не аргументом командной строки:
 
 ```bash
-python scripts/telegram_preflight.py
+export BOT_TOKEN='значение из BotFather'
+python scripts/bootstrap_production_env.py \
+  --output /etc/bibitasks/bibitasks.env \
+  --public-base-url https://tasks.example.com \
+  --group-id -1000000000001 \
+  --ops-group-id -1000000000002 \
+  --admin-id 111111111 --admin-id 222222222
+unset BOT_TOKEN
+```
+
+Генератор запрещает путь внутри Git, не перезаписывает существующий файл,
+создаёт независимые webhook/media/encryption secrets и выставляет режим `0600`
+на Linux. После настройки реального Telegram выполните read-only проверку,
+которая не отправляет и не удаляет сообщения:
+
+```bash
+python scripts/telegram_preflight.py --env-file /etc/bibitasks/bibitasks.env
 ```
 
 Нулевой exit code означает, что обязательные проверки имени бота, групп,

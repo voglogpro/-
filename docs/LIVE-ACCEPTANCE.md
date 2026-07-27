@@ -20,7 +20,8 @@ Telegram, `task_id`, `assignment_id`, OPS message link, `withdrawal_id`, вне�
 ## 1. Read-only production preflight
 
 ```bash
-python scripts/telegram_preflight.py > telegram-preflight.json
+python scripts/telegram_preflight.py --env-file /etc/bibitasks/bibitasks.env \
+  > telegram-preflight.json
 ```
 
 Дополнительно откройте `/health/ready` с `X-Health-Token`.

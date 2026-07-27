@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import argparse
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Callable
 
 try:
@@ -187,8 +189,22 @@ def _report(checks):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Read-only Telegram production preflight",
+    )
+    parser.add_argument(
+        "--env-file", type=Path,
+        help="explicit secrets file; process environment keeps precedence",
+    )
+    args = parser.parse_args()
     if load_dotenv is not None:
-        load_dotenv(override=False)
+        if args.env_file:
+            env_path = args.env_file.expanduser().resolve()
+            if not env_path.is_file():
+                parser.error("--env-file must point to an existing regular file")
+            load_dotenv(dotenv_path=env_path, override=False)
+        else:
+            load_dotenv(override=False)
     report = run_preflight()
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1

@@ -256,9 +256,9 @@ Telegram-бот @BbGalterbot
 
 ### Тесты
 
-**87 автоматических тестов**, все локально зелёные:
+**89 автоматических тестов**, все локально зелёные:
 
-- **68** — backend, безопасность, Telegram preflight, идемпотентность, backup/restore
+- **70** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
 - **6** — точность PostgreSQL migration harness
 - **13** — интерфейс Mini App в Playwright
 
