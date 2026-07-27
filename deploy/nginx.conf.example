@@ -1,0 +1,73 @@
+# Replace the hostname, certificate paths and every REPLACE_* value before use.
+upstream bibitasks {
+    server 127.0.0.1:3000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name tasks.example.com;
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name tasks.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/tasks.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tasks.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:BIBITASKS_TLS:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=15552000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(self), microphone=(), geolocation=()" always;
+
+    location = /telegram/webhook/REPLACE_ROUTE_ID {
+        access_log off;
+        limit_except POST { deny all; }
+        client_max_body_size 1m;
+        proxy_pass http://bibitasks;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Telegram-Bot-Api-Secret-Token $http_x_telegram_bot_api_secret_token;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+    }
+
+    location ^~ /task-photo/ {
+        access_log off;
+        proxy_pass http://bibitasks;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Keep readiness internal. The application validates this token too.
+    location = /health/ready {
+        access_log off;
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://bibitasks;
+        proxy_set_header X-Health-Token REPLACE_HEALTH_TOKEN;
+    }
+
+    location = /health/live {
+        access_log off;
+        proxy_pass http://bibitasks;
+    }
+
+    location / {
+        proxy_pass http://bibitasks;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

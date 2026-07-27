@@ -1,0 +1,40 @@
+services:
+  bibitasks:
+    image: "${BIBITASKS_IMAGE:?Set an immutable GHCR image with @sha256 digest}"
+    command: ["python", "scripts/deployment_guard.py", "python", "main.py"]
+    restart: always
+    env_file: "${BIBITASKS_ENV_FILE:-.env}"
+    environment:
+      BIBITASKS_DEPLOYMENT_IMAGE: "${BIBITASKS_IMAGE:?Set an immutable GHCR image with @sha256 digest}"
+      BIBITASKS_ENVIRONMENT: production
+    ports:
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+    volumes:
+      - bibitasks_data:/app/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 768m
+    cpus: 1.5
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:3000/health/ready',headers={'X-Health-Token':os.environ['HEALTH_TOKEN']}); urllib.request.urlopen(r,timeout=3).close()"
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+volumes:
+  bibitasks_data:
+    name: "${BIBITASKS_DATA_VOLUME:-bibitasks_data}"

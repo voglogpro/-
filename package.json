@@ -1,0 +1,11 @@
+{
+  "name": "bibitasks-mini-app",
+  "private": true,
+  "version": "2.9.0",
+  "scripts": {
+    "test:frontend": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}

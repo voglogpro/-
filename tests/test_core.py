@@ -1,0 +1,2523 @@
+import asyncio
+import base64
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from PIL import Image
+from cryptography.fernet import Fernet
+from aiohttp.test_utils import TestClient, TestServer
+
+
+TEST_ROOT = Path(tempfile.mkdtemp(prefix="bibitasks_tests_"))
+os.environ["BOT_TOKEN"] = "123456:" + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+os.environ["DATA_DIR"] = str(TEST_ROOT)
+os.environ["WITHDRAW_ACCOUNT_KEY"] = Fernet.generate_key().decode("ascii")
+os.environ["TELEGRAM_INBOX_KEY"] = Fernet.generate_key().decode("ascii")
+os.environ["HEALTH_TOKEN"] = "health_" + "h" * 40
+os.environ["MEDIA_SIGNING_KEY"] = "media_" + "m" * 40
+
+import main  # noqa: E402  (environment must be set before application import)
+
+
+class DummyRequest:
+    def __init__(self, body, uid=None):
+        self._body = body
+        self.uid = uid
+
+    async def json(self):
+        return self._body
+
+
+def response_json(response):
+    import json
+    return json.loads(response.body.decode("utf-8"))
+
+
+class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        case = TEST_ROOT / self.id().rsplit(".", 1)[-1]
+        case.mkdir(parents=True, exist_ok=True)
+        main.DB_PATH = str(case / "bibitasks.db")
+        main.TASK_PHOTO_DIR = str(case / "task_photos")
+        Path(main.TASK_PHOTO_DIR).mkdir(exist_ok=True)
+        await main.init_db()
+
+    async def test_atomic_first_login(self):
+        uid = 900_000_001
+        await asyncio.gather(*(
+            main.upsert_member(uid, full_name="Тест") for _ in range(50)
+        ))
+        with sqlite3.connect(main.DB_PATH) as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM members WHERE user_id=?", (uid,)
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    async def test_webhook_configuration_is_fail_closed(self):
+        names = (
+            "TELEGRAM_UPDATE_MODE", "PUBLIC_BASE_URL", "WEBHOOK_ROUTE_ID",
+            "WEBHOOK_PATH", "WEBHOOK_SECRET", "WEBHOOK_MAX_CONNECTIONS",
+            "ADMIN_IDS",
+            "OPS_GROUP_ID", "OPS_GROUP_USERNAME", "GROUP_ID", "GROUP_USERNAME",
+        )
+        original = {name: getattr(main, name) for name in names}
+        try:
+            main.TELEGRAM_UPDATE_MODE = "webhook"
+            main.PUBLIC_BASE_URL = "https://tasks.example"
+            main.WEBHOOK_ROUTE_ID = "route_" + "a" * 40
+            main.WEBHOOK_PATH = "/telegram/webhook/" + main.WEBHOOK_ROUTE_ID
+            main.WEBHOOK_SECRET = "secret_" + "b" * 40
+            main.WEBHOOK_MAX_CONNECTIONS = 8
+            main.ADMIN_IDS = {42, 43}
+            main.OPS_GROUP_ID = -1009000000001
+            main.OPS_GROUP_USERNAME = ""
+            main.GROUP_ID = -1009000000002
+            main.GROUP_USERNAME = "bbbikefan"
+            main._validate_update_receiver_config()
+            main.GROUP_ID = main.OPS_GROUP_ID
+            with self.assertRaisesRegex(RuntimeError, "must differ"):
+                main._validate_update_receiver_config()
+            main.GROUP_ID = -1009000000002
+            main.PUBLIC_BASE_URL = "http://tasks.example"
+            with self.assertRaisesRegex(RuntimeError, "HTTPS origin"):
+                main._validate_update_receiver_config()
+            main.PUBLIC_BASE_URL = "https://user:pass@tasks.example"
+            with self.assertRaisesRegex(RuntimeError, "HTTPS origin"):
+                main._validate_update_receiver_config()
+            main.PUBLIC_BASE_URL = "https://tasks.example"
+            main.WEBHOOK_SECRET = "short"
+            with self.assertRaisesRegex(RuntimeError, "WEBHOOK_SECRET"):
+                main._validate_update_receiver_config()
+            main.WEBHOOK_SECRET = main.WEBHOOK_ROUTE_ID
+            with self.assertRaisesRegex(RuntimeError, "independent"):
+                main._validate_update_receiver_config()
+            main.WEBHOOK_SECRET = "secret_" + "b" * 40
+            main.WEBHOOK_MAX_CONNECTIONS = 101
+            with self.assertRaisesRegex(RuntimeError, "between 1 and 100"):
+                main._validate_update_receiver_config()
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+    async def test_staging_retry_is_accelerated_but_production_override_fails_closed(self):
+        names = (
+            "BIBITASKS_ENVIRONMENT", "TELEGRAM_RETRY_BASE_SECONDS",
+            "TELEGRAM_RETRY_MAX_SECONDS", "TELEGRAM_RETRY_MAX_ATTEMPTS",
+        )
+        original = {name: getattr(main, name) for name in names}
+        try:
+            main.BIBITASKS_ENVIRONMENT = "staging"
+            main.TELEGRAM_RETRY_BASE_SECONDS = 1
+            main.TELEGRAM_RETRY_MAX_SECONDS = 4
+            main.TELEGRAM_RETRY_MAX_ATTEMPTS = 3
+            self.assertEqual(
+                [main._telegram_retry_delay(attempt) for attempt in (1, 2, 3, 4)],
+                [1, 2, 4, 4],
+            )
+            main.BIBITASKS_ENVIRONMENT = "production"
+            with self.assertRaisesRegex(RuntimeError, "forbidden in production"):
+                main._validate_update_receiver_config()
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+    async def test_webhook_persists_deduplicates_and_processes_update(self):
+        original_secret = main.WEBHOOK_SECRET
+        main.WEBHOOK_SECRET = "secret_" + "z" * 40
+        app = main.web.Application()
+        app.router.add_post("/hook", main.telegram_webhook_handler)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        payload = {
+            "update_id": 7001,
+            "message": {
+                "message_id": 1,
+                "date": int(time.time()),
+                "chat": {"id": 123, "type": "private"},
+                "from": {
+                    "id": 123, "is_bot": False, "first_name": "Тест",
+                },
+                "text": "/start",
+            },
+        }
+        headers = {"X-Telegram-Bot-Api-Secret-Token": main.WEBHOOK_SECRET}
+        original_feed = main.dp.feed_raw_update
+        calls = []
+
+        async def fake_feed(_bot, update):
+            calls.append(update["update_id"])
+            return None
+
+        try:
+            denied = await client.post("/hook", json=payload)
+            wrong = await client.post(
+                "/hook", json=payload,
+                headers={"X-Telegram-Bot-Api-Secret-Token": "x" * 40},
+            )
+            get_response = await client.get("/hook")
+            invalid = await client.post(
+                "/hook", json={"update_id": True}, headers=headers,
+            )
+            too_deep = {"update_id": 7002}
+            cursor = too_deep
+            for _ in range(25):
+                cursor["message"] = {}
+                cursor = cursor["message"]
+            deep_response = await client.post("/hook", json=too_deep, headers=headers)
+            oversized = await client.post(
+                "/hook", data=BytesIO(b"x" * (1024 * 1024 + 1)),
+                headers={**headers, "Content-Type": "application/json"},
+            )
+            accepted = await client.post("/hook", json=payload, headers=headers)
+            duplicate = await client.post("/hook", json=payload, headers=headers)
+            with sqlite3.connect(main.DB_PATH) as db:
+                encrypted = db.execute(
+                    "SELECT payload_json FROM telegram_update_inbox WHERE update_id=7001"
+                ).fetchone()[0]
+            conflict = await client.post(
+                "/hook", json={
+                    **payload, "message": {**payload["message"], "message_id": 2},
+                }, headers=headers,
+            )
+            self.assertEqual(
+                (
+                    denied.status, wrong.status, get_response.status,
+                    invalid.status, deep_response.status, oversized.status,
+                    accepted.status, duplicate.status, conflict.status,
+                ),
+                (401, 401, 405, 400, 400, 413, 200, 200, 409),
+            )
+            self.assertNotIn("/start", encrypted)
+            self.assertTrue((await duplicate.json())["duplicate"])
+            main.dp.feed_raw_update = fake_feed
+            worker = asyncio.create_task(main.telegram_inbox_worker())
+            status = "pending"
+            for _ in range(200):
+                with sqlite3.connect(main.DB_PATH) as db:
+                    status = db.execute(
+                        "SELECT status FROM telegram_update_inbox WHERE update_id=7001"
+                    ).fetchone()[0]
+                if status == "done":
+                    break
+                await asyncio.sleep(0.01)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        finally:
+            main.dp.feed_raw_update = original_feed
+            main.WEBHOOK_SECRET = original_secret
+            await client.close()
+        self.assertEqual(status, "done")
+        self.assertEqual(calls, [7001])
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT COUNT(*),payload_json FROM telegram_update_inbox "
+                "WHERE update_id=7001"
+            ).fetchone()
+        self.assertEqual(row, (1, None))
+
+    async def test_update_receiver_switches_without_dropping_updates(self):
+        class Info:
+            url = ""
+            pending_update_count = 0
+            last_error_date = None
+            max_connections = 0
+            allowed_updates = []
+
+        class FakeBot:
+            def __init__(self):
+                self.info = Info()
+                self.set_calls = []
+                self.delete_calls = []
+
+            async def set_webhook(self, url, **kwargs):
+                self.set_calls.append((url, kwargs))
+                self.info.url = url
+                self.info.max_connections = kwargs["max_connections"]
+                self.info.allowed_updates = kwargs["allowed_updates"]
+
+            async def get_webhook_info(self):
+                return self.info
+
+            async def delete_webhook(self, **kwargs):
+                self.delete_calls.append(kwargs)
+
+        names = (
+            "bot", "TELEGRAM_UPDATE_MODE", "PUBLIC_BASE_URL", "WEBHOOK_ROUTE_ID",
+            "WEBHOOK_PATH", "WEBHOOK_SECRET",
+        )
+        original = {name: getattr(main, name) for name in names}
+        fake = FakeBot()
+        try:
+            main.bot = fake
+            main.TELEGRAM_UPDATE_MODE = "webhook"
+            main.PUBLIC_BASE_URL = "https://tasks.example"
+            main.WEBHOOK_ROUTE_ID = "route_" + "r" * 40
+            main.WEBHOOK_PATH = "/telegram/webhook/" + main.WEBHOOK_ROUTE_ID
+            main.WEBHOOK_SECRET = "secret_" + "s" * 40
+            await main._configure_update_receiver()
+            self.assertEqual(fake.set_calls[0][0], main._webhook_url())
+            self.assertFalse(fake.set_calls[0][1]["drop_pending_updates"])
+            self.assertIn("chat_member", fake.set_calls[0][1]["allowed_updates"])
+            self.assertTrue(main._telegram_runtime["receiver_ready"])
+            main.TELEGRAM_UPDATE_MODE = "polling"
+            await main._configure_update_receiver()
+            self.assertEqual(fake.delete_calls, [{"drop_pending_updates": False}])
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+    async def test_replayed_update_does_not_grant_chat_xp_twice(self):
+        user = SimpleNamespace(
+            id=900_000_099, full_name="Тестовый участник", username="tester",
+        )
+        token = main._current_update_id.set(88001)
+        try:
+            first = await main.add_chat_xp(user, 2, "msg")
+            replay = await main.add_chat_xp(user, 2, "msg")
+        finally:
+            main._current_update_id.reset(token)
+        with sqlite3.connect(main.DB_PATH) as db:
+            xp = db.execute(
+                "SELECT chat_xp FROM members WHERE user_id=?", (user.id,),
+            ).fetchone()[0]
+            effects = db.execute(
+                "SELECT COUNT(*) FROM telegram_update_effects WHERE update_id=88001"
+            ).fetchone()[0]
+        self.assertEqual(first[0], 2)
+        self.assertEqual(replay, (0, None))
+        self.assertEqual((xp, effects), (2, 1))
+
+    async def test_dead_telegram_update_redrive_is_audited_and_idempotent(self):
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        payload = {"update_id": 99001}
+        canonical = main.json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        operation_id = str(uuid.uuid4())
+        stamp = main.now_iso()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO telegram_update_inbox "
+                "(update_id,payload_json,payload_sha256,status,attempts,available_at,"
+                "received_at,dead_at) VALUES (?,?,?,'dead',10,?,?,?)",
+                (
+                    99001, main._encrypt_telegram_payload(canonical),
+                    main._telegram_payload_fingerprint(canonical), stamp, stamp, stamp,
+                ),
+            )
+            db.commit()
+        body = {
+            "update_id": 99001, "operation_id": operation_id,
+            "reason": "Исправлен обработчик обновления",
+        }
+        try:
+            first = response_json(await main.api_admin_telegram_inbox_redrive(
+                DummyRequest(body),
+            ))
+            replay = response_json(await main.api_admin_telegram_inbox_redrive(
+                DummyRequest(body),
+            ))
+            second_operation = str(uuid.uuid4())
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE telegram_update_inbox SET status='dead',dead_at=? "
+                    "WHERE update_id=99001", (main.now_iso(),),
+                )
+                db.commit()
+            second = response_json(await main.api_admin_telegram_inbox_redrive(
+                DummyRequest({**body, "operation_id": second_operation}),
+            ))
+            old_retry = response_json(await main.api_admin_telegram_inbox_redrive(
+                DummyRequest(body),
+            ))
+        finally:
+            main._require_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,attempts,redrive_operation_id,redriven_by "
+                "FROM telegram_update_inbox WHERE update_id=99001"
+            ).fetchone()
+            audit_count = db.execute(
+                "SELECT COUNT(*) FROM telegram_update_redrive_commands "
+                "WHERE update_id=99001"
+            ).fetchone()[0]
+        self.assertEqual(first["status"], "pending")
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(second["status"], "pending")
+        self.assertTrue(old_retry["idempotent"])
+        self.assertEqual(row, ("pending", 0, second_operation, 42))
+        self.assertEqual(audit_count, 2)
+
+    async def test_legacy_telegram_inbox_is_migrated_without_plaintext(self):
+        payload = {"update_id": 99101, "message": {"text": "личный текст"}}
+        canonical = main.json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO telegram_update_inbox "
+                "(update_id,payload_json,payload_sha256,status,attempts,available_at,"
+                "received_at) VALUES (?,?,?,'processing',0,?,?)",
+                (
+                    99101, canonical,
+                    main.hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    main.now_iso(), main.now_iso(),
+                ),
+            )
+            db.execute(
+                "INSERT INTO telegram_update_effects "
+                "(update_id,effect_key,created_at) VALUES (99101,'chat_xp:msg:12345',?)",
+                (main.now_iso(),),
+            )
+            db.commit()
+        await main.init_db()
+        with sqlite3.connect(main.DB_PATH) as db:
+            stored, fingerprint, status = db.execute(
+                "SELECT payload_json,payload_sha256,status "
+                "FROM telegram_update_inbox WHERE update_id=99101"
+            ).fetchone()
+            effect_key = db.execute(
+                "SELECT effect_key FROM telegram_update_effects WHERE update_id=99101"
+            ).fetchone()[0]
+        self.assertNotIn("личный текст", stored)
+        self.assertTrue(fingerprint.startswith("h1:"))
+        self.assertEqual(status, "pending")
+        self.assertEqual(main._decrypt_telegram_payload(stored), payload)
+        self.assertEqual(effect_key, "chat_xp:msg")
+
+    async def test_detailed_health_requires_token(self):
+        unauthorized = SimpleNamespace(headers={}, remote="203.0.113.10")
+        with self.assertRaises(main.web.HTTPUnauthorized):
+            await main.api_health(unauthorized)
+        authorized = SimpleNamespace(
+            headers={"X-Health-Token": main.HEALTH_TOKEN},
+            remote="203.0.113.10",
+        )
+        response = await main.api_health(authorized)
+        self.assertIn(response.status, (200, 503))
+
+    async def test_photo_declared_mime_must_match_content(self):
+        image_bytes = BytesIO()
+        Image.new("RGB", (2, 2), "green").save(image_bytes, format="PNG")
+        encoded = base64.b64encode(image_bytes.getvalue()).decode()
+        with self.assertRaisesRegex(ValueError, "не совпадает"):
+            await main._save_image("data:image/jpeg;base64," + encoded)
+
+    async def test_media_upload_is_idempotent_private_and_garbage_collected(self):
+        image_bytes = BytesIO()
+        Image.new("RGB", (3, 3), "blue").save(image_bytes, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(
+            image_bytes.getvalue()
+        ).decode()
+        operation = f"test:{uuid.uuid4()}"
+        first = await main._save_image(
+            data_url, upload_operation_id=operation, request_hash="same-request",
+        )
+        replay = await main._save_image(
+            data_url, upload_operation_id=operation, request_hash="same-request",
+        )
+        self.assertEqual(first["media_id"], replay["media_id"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            count, state = db.execute(
+                "SELECT COUNT(*),MAX(state) FROM media_objects "
+                "WHERE upload_operation_id=?", (operation,),
+            ).fetchone()
+        self.assertEqual((count, state), (1, "ready"))
+
+        app = main.web.Application()
+        app.router.add_get("/media/{media_id}", main.serve_media)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            valid = await client.get(main._signed_media_url(first["media_id"]))
+            tampered = await client.get(
+                main._signed_media_url(first["media_id"]).replace("signature=", "signature=x")
+            )
+            self.assertEqual((valid.status, tampered.status), (200, 403))
+            self.assertEqual(valid.headers["Cache-Control"], "private, no-store")
+        finally:
+            await client.close()
+
+        old = (main.datetime.now(main.timezone.utc) - main.timedelta(days=2)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "UPDATE media_objects SET created_at=? WHERE id=?",
+                (old, first["media_id"]),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (first["media_id"],),
+            ).fetchone()[0]
+        self.assertEqual(state, "deleted")
+        self.assertFalse((Path(main.TASK_PHOTO_DIR) / first["photo_file"]).exists())
+
+    async def test_s3_storage_adapter_is_private_and_checksum_verified(self):
+        class FakeS3:
+            def __init__(self):
+                self.objects = {}
+                self.last_put = None
+
+            def put_object(self, **kwargs):
+                self.last_put = kwargs
+                self.objects[(kwargs["Bucket"], kwargs["Key"])] = (
+                    bytes(kwargs["Body"]), kwargs["Metadata"],
+                )
+
+            def head_object(self, **kwargs):
+                try:
+                    content, metadata = self.objects[(kwargs["Bucket"], kwargs["Key"])]
+                except KeyError:
+                    raise FileNotFoundError from None
+                return {"ContentLength": len(content), "Metadata": metadata}
+
+            def get_object(self, **kwargs):
+                content, _ = self.objects[(kwargs["Bucket"], kwargs["Key"])]
+                return {"Body": BytesIO(content)}
+
+            def delete_object(self, **kwargs):
+                self.objects.pop((kwargs["Bucket"], kwargs["Key"]), None)
+
+            def list_object_versions(self, **_kwargs):
+                return {"Versions": [], "DeleteMarkers": [], "IsTruncated": False}
+
+        fake = FakeS3()
+        original_storage = main.MEDIA_STORAGE
+        original_client = main._s3_client
+        main.MEDIA_STORAGE = "s3"
+        main._s3_client = lambda **_kwargs: fake
+        content = b"jpeg-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        try:
+            await main._storage_put("safe.jpg", content, digest)
+            size, stored_digest = await main._storage_head("safe.jpg")
+            restored = await main._storage_read("safe.jpg")
+            await main._storage_delete("safe.jpg")
+        finally:
+            main.MEDIA_STORAGE = original_storage
+            main._s3_client = original_client
+        self.assertEqual((size, stored_digest, restored), (len(content), digest, content))
+        self.assertEqual(fake.last_put["ServerSideEncryption"], "AES256")
+        self.assertNotIn("ACL", fake.last_put)
+        self.assertFalse(fake.objects)
+
+    async def test_versioned_s3_delete_removes_all_versions_and_delete_markers(self):
+        class MissingVersion(Exception):
+            response = {"Error": {"Code": "NoSuchVersion"}}
+
+        class VersionedS3:
+            def __init__(self):
+                self.objects = {}
+                self.delete_markers = {("bibitasks/versioned.jpg", "marker-v3")}
+                self.deleted = []
+                self.sequence = 0
+
+            def put_object(self, **kwargs):
+                self.sequence += 1
+                version = f"v{self.sequence}"
+                self.objects[(kwargs["Key"], version)] = bytes(kwargs["Body"])
+                return {"VersionId": version}
+
+            def head_object(self, **kwargs):
+                version = kwargs.get("VersionId")
+                if version is None:
+                    candidates = [
+                        item_version for item_key, item_version in self.objects
+                        if item_key == kwargs["Key"]
+                    ]
+                    if not candidates:
+                        raise MissingVersion()
+                    version = sorted(candidates)[-1]
+                key = (kwargs["Key"], version)
+                if key not in self.objects:
+                    raise MissingVersion()
+                content = self.objects[key]
+                return {
+                    "ContentLength": len(content),
+                    "Metadata": {"sha256": main.hashlib.sha256(content).hexdigest()},
+                    "VersionId": key[1],
+                }
+
+            def delete_object(self, **kwargs):
+                key = (kwargs["Key"], kwargs["VersionId"])
+                self.deleted.append(key)
+                self.objects.pop(key, None)
+                self.delete_markers.discard(key)
+
+            def list_object_versions(self, **kwargs):
+                return {
+                    "Versions": [
+                        {"Key": key, "VersionId": version}
+                        for key, version in self.objects
+                        if key == kwargs["Prefix"]
+                    ],
+                    "DeleteMarkers": [
+                        {"Key": key, "VersionId": version}
+                        for key, version in self.delete_markers
+                        if key == kwargs["Prefix"]
+                    ],
+                    "IsTruncated": False,
+                }
+
+        fake = VersionedS3()
+        original_client = main._s3_client
+        main._s3_client = lambda **_kwargs: fake
+        try:
+            digest = main.hashlib.sha256(b"photo").hexdigest()
+            await main._storage_put(
+                "versioned.jpg", b"older", main.hashlib.sha256(b"older").hexdigest(),
+                backend="s3",
+            )
+            version_id = await main._storage_put(
+                "versioned.jpg", b"photo", digest, backend="s3",
+            )
+            await main._storage_delete(
+                "versioned.jpg", backend="s3", version_id=version_id,
+            )
+        finally:
+            main._s3_client = original_client
+        self.assertEqual(
+            set(fake.deleted),
+            {
+                ("bibitasks/versioned.jpg", "v1"),
+                ("bibitasks/versioned.jpg", "v2"),
+                ("bibitasks/versioned.jpg", "marker-v3"),
+            },
+        )
+        self.assertFalse(fake.objects)
+        self.assertFalse(fake.delete_markers)
+
+    async def test_s3_privacy_check_is_fail_closed_for_custom_endpoint(self):
+        class FakeS3:
+            def head_bucket(self, **_kwargs):
+                return {}
+
+            def get_public_access_block(self, **_kwargs):
+                return {"PublicAccessBlockConfiguration": {}}
+
+        original = (
+            main.MEDIA_STORAGE, main.S3_ENDPOINT_URL, main.S3_PRIVACY_MODE,
+            main._s3_client,
+        )
+        main.MEDIA_STORAGE = "s3"
+        main.S3_ENDPOINT_URL = "https://s3.example.test"
+        main.S3_PRIVACY_MODE = "public_access_block"
+        main._s3_client = lambda **_kwargs: FakeS3()
+        try:
+            self.assertFalse(await main._storage_healthcheck())
+        finally:
+            (
+                main.MEDIA_STORAGE, main.S3_ENDPOINT_URL, main.S3_PRIVACY_MODE,
+                main._s3_client,
+            ) = original
+
+    async def test_local_backup_restore_round_trip(self):
+        from scripts.backup import create_backup
+        from scripts.restore import restore_backup
+
+        image_bytes = BytesIO()
+        Image.new("RGB", (4, 4), "green").save(image_bytes, format="PNG")
+        media = await main._save_image(
+            "data:image/png;base64," + base64.b64encode(image_bytes.getvalue()).decode()
+        )
+        data_dir = Path(main.DB_PATH).parent
+        output_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_backups")
+        restore_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_restored")
+        backup_dir = create_backup(data_dir, output_dir)
+        restored = restore_backup(backup_dir, restore_dir)
+        with sqlite3.connect(restored / "bibitasks.db") as db:
+            row = db.execute(
+                "SELECT object_key,sha256,state FROM media_objects WHERE id=?",
+                (media["media_id"],),
+            ).fetchone()
+        restored_photo = restored / "task_photos" / row[0]
+        self.assertEqual(row[2], "ready")
+        self.assertTrue(restored_photo.is_file())
+        self.assertEqual(main.hashlib.sha256(restored_photo.read_bytes()).hexdigest(), row[1])
+        self.assertTrue((restored / "restore-report.json").is_file())
+
+    async def test_explicit_operational_env_file_beats_cwd_dotenv(self):
+        work = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_env")
+        work.mkdir(parents=True, exist_ok=True)
+        (work / ".env").write_text("S3_BUCKET=wrong-cwd-bucket\n", encoding="utf-8")
+        explicit = work / "restore.env"
+        explicit.write_text("S3_BUCKET=explicit-target-bucket\n", encoding="utf-8")
+        repo_root = Path(__file__).resolve().parents[1]
+        clean_env = dict(os.environ)
+        clean_env.pop("S3_BUCKET", None)
+        snippet = (
+            "import os,sys; from pathlib import Path; "
+            "sys.path.insert(0,sys.argv[1]); "
+            "from scripts.restore import _load_environment; "
+            "_load_environment(Path(sys.argv[2])); print(os.environ['S3_BUCKET'])"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", snippet, str(repo_root), str(explicit)],
+            cwd=work, env=clean_env, check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "explicit-target-bucket")
+
+    async def test_s3_backup_restore_rewrites_version_id(self):
+        from scripts.backup import create_backup
+        from scripts.restore import restore_backup
+
+        class Missing(Exception):
+            response = {"Error": {"Code": "NoSuchKey"}}
+
+        class FakeS3:
+            def __init__(self):
+                self.objects = {}
+                self.latest = {}
+                self.sequence = 1
+
+            def head_bucket(self, **_kwargs):
+                return {}
+
+            def get_public_access_block(self, **_kwargs):
+                names = (
+                    "BlockPublicAcls", "IgnorePublicAcls",
+                    "BlockPublicPolicy", "RestrictPublicBuckets",
+                )
+                return {"PublicAccessBlockConfiguration": {name: True for name in names}}
+
+            def _record(self, kwargs):
+                bucket, key = kwargs["Bucket"], kwargs["Key"]
+                version = kwargs.get("VersionId") or self.latest.get((bucket, key))
+                record = self.objects.get((bucket, key, version))
+                if record is None:
+                    raise Missing()
+                return version, record
+
+            def head_object(self, **kwargs):
+                version, record = self._record(kwargs)
+                return {
+                    "ContentLength": len(record["content"]),
+                    "Metadata": record["metadata"], "VersionId": version,
+                }
+
+            def get_object(self, **kwargs):
+                version, record = self._record(kwargs)
+                return {"Body": BytesIO(record["content"]), "VersionId": version}
+
+            def put_object(self, **kwargs):
+                bucket, key = kwargs["Bucket"], kwargs["Key"]
+                version = f"new-v{self.sequence}"
+                self.sequence += 1
+                self.objects[(bucket, key, version)] = {
+                    "content": bytes(kwargs["Body"]),
+                    "metadata": dict(kwargs.get("Metadata") or {}),
+                }
+                self.latest[(bucket, key)] = version
+                return {"VersionId": version}
+
+            def delete_object(self, **kwargs):
+                bucket, key = kwargs["Bucket"], kwargs["Key"]
+                version = kwargs.get("VersionId") or self.latest.get((bucket, key))
+                self.objects.pop((bucket, key, version), None)
+
+        content = b"private-versioned-photo"
+        digest = main.hashlib.sha256(content).hexdigest()
+        media_id = str(uuid.uuid4())
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at,version_id) "
+                "VALUES (?,'s3','remote.jpg','task_photo','ready','image/jpeg',?,?,?,?,?,?,?)",
+                (
+                    media_id, len(content), digest, "remote-upload", digest,
+                    main.now_iso(), main.now_iso(), "old-v1",
+                ),
+            )
+            db.commit()
+
+        fake = FakeS3()
+        fake.objects[("source-bucket", "bibitasks/remote.jpg", "old-v1")] = {
+            "content": content, "metadata": {"sha256": digest},
+        }
+        fake.latest[("source-bucket", "bibitasks/remote.jpg")] = "old-v1"
+        fake_boto3 = SimpleNamespace(client=lambda *_args, **_kwargs: fake)
+        fake_botocore = SimpleNamespace()
+        fake_botocore_config = SimpleNamespace(Config=lambda **kwargs: kwargs)
+        output_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_backups")
+        restore_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_restored")
+        env = {
+            "S3_BUCKET": "source-bucket", "S3_PREFIX": "bibitasks",
+            "S3_REGION": "us-east-1", "S3_SSE": "AES256",
+            "S3_PRIVACY_MODE": "public_access_block",
+        }
+        with patch.dict(sys.modules, {
+            "boto3": fake_boto3, "botocore": fake_botocore,
+            "botocore.config": fake_botocore_config,
+        }), patch.dict(
+            os.environ, env, clear=False,
+        ):
+            backup_dir = create_backup(Path(main.DB_PATH).parent, output_dir)
+            os.environ["S3_BUCKET"] = "target-bucket"
+            restored = restore_backup(backup_dir, restore_dir)
+        with sqlite3.connect(restored / "bibitasks.db") as db:
+            version_id = db.execute(
+                "SELECT version_id FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+        self.assertEqual(version_id, "new-v1")
+        self.assertEqual(
+            fake.objects[("target-bucket", "bibitasks/remote.jpg", "new-v1")]["content"],
+            content,
+        )
+
+    async def test_publication_reservation_prevents_two_pending_posts(self):
+        original_admin = main.is_admin
+
+        async def allow_admin(_uid):
+            return True
+
+        class FakeMessage:
+            def __init__(self, message_id):
+                self.message_id = message_id
+                self.text = "/новости"
+                self.chat = SimpleNamespace(id=700, type="private")
+                self.from_user = SimpleNamespace(id=42)
+                self.answers = []
+
+            async def answer(self, text, **_kwargs):
+                self.answers.append(text)
+
+        main.is_admin = allow_admin
+        first = FakeMessage(1)
+        second = FakeMessage(2)
+        try:
+            token = main._current_update_id.set(101)
+            await main._publish(first, ["часть 1", "часть 2"], 1, "news")
+            main._current_update_id.reset(token)
+            token = main._current_update_id.set(102)
+            await main._publish(second, ["другая версия"], 1, "news")
+            main._current_update_id.reset(token)
+            with sqlite3.connect(main.DB_PATH) as db:
+                operation_id = db.execute(
+                    "SELECT operation_id FROM publication_jobs WHERE kind='news'"
+                ).fetchone()[0]
+                db.execute(
+                    "UPDATE publication_jobs SET status='done' WHERE kind='news'"
+                )
+                db.execute(
+                    "UPDATE task_outbox SET status='sent' WHERE event_key=?",
+                    (operation_id,),
+                )
+                db.execute(
+                    "INSERT INTO published_posts "
+                    "(kind,chat_id,topic,message_ids,published_at,published_by,operation_id) "
+                    "VALUES ('news',700,1,'[77]',?,42,?)",
+                    (main.now_iso(), operation_id),
+                )
+                db.commit()
+            replay = FakeMessage(1)
+            replay.text = "/новости заново"
+            token = main._current_update_id.set(101)
+            await main._publish(replay, ["часть 1", "часть 2"], 1, "news")
+            main._current_update_id.reset(token)
+        finally:
+            main.is_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            jobs = db.execute(
+                "SELECT COUNT(*) FROM publication_jobs WHERE kind='news'"
+            ).fetchone()[0]
+            queued = db.execute(
+                "SELECT COUNT(*) FROM task_outbox WHERE event_type='group_publication'"
+            ).fetchone()[0]
+            job_status = db.execute(
+                "SELECT status FROM publication_jobs WHERE kind='news'"
+            ).fetchone()[0]
+        self.assertEqual((jobs, queued), (1, 1))
+        self.assertIn("уже стоит в очереди", second.answers[-1])
+        self.assertEqual(job_status, "done")
+        self.assertIn("уже опубликован", replay.answers[-1])
+
+    async def test_publication_cleanup_is_durable_and_retryable(self):
+        operation = "update:500:publication:news"
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO published_posts "
+                "(kind,chat_id,topic,message_ids,published_at,published_by,operation_id) "
+                "VALUES ('news',700,1,'[10,11]',?,42,'old-op')",
+                (main.now_iso(),),
+            )
+            db.execute(
+                "INSERT INTO publication_jobs "
+                "(kind,operation_id,status,requested_by,created_at) "
+                "VALUES ('news',?,'sending',42,?)",
+                (operation, main.now_iso()),
+            )
+            db.commit()
+        staged = await main._remember_published(
+            "news", 700, 1, [20], 42, operation,
+        )
+        self.assertTrue(staged)
+
+        class FakeBot:
+            def __init__(self):
+                self.fail = True
+                self.deleted = []
+
+            async def delete_message(self, chat_id, message_id):
+                if self.fail:
+                    self.fail = False
+                    raise RuntimeError("temporary Telegram error")
+                self.deleted.append((chat_id, message_id))
+
+        original_bot = main.bot
+        fake = FakeBot()
+        main.bot = fake
+        try:
+            with self.assertRaises(RuntimeError):
+                await main._run_publication_cleanup(operation)
+            await main._run_publication_cleanup(operation)
+        finally:
+            main.bot = original_bot
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute(
+                "SELECT status FROM publication_jobs WHERE operation_id=?", (operation,),
+            ).fetchone()[0]
+            remaining = db.execute(
+                "SELECT COUNT(*) FROM publication_cleanup_messages "
+                "WHERE operation_id=? AND status!='deleted'", (operation,),
+            ).fetchone()[0]
+        self.assertEqual((status, remaining), ("done", 0))
+        self.assertEqual(set(fake.deleted), {(700, 10), (700, 11)})
+
+    async def test_permanent_publication_cleanup_does_not_delete_current_or_block_repost(self):
+        operation = "update:501:publication:news"
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO published_posts "
+                "(kind,chat_id,topic,message_ids,published_at,published_by,operation_id) "
+                "VALUES ('news',700,1,'[10]',?,42,'old-op')",
+                (main.now_iso(),),
+            )
+            db.execute(
+                "INSERT INTO publication_jobs "
+                "(kind,operation_id,status,requested_by,created_at) "
+                "VALUES ('news',?,'sending',42,?)",
+                (operation, main.now_iso()),
+            )
+            db.commit()
+        await main._remember_published("news", 700, 1, [20], 42, operation)
+
+        class FailingBot:
+            async def delete_message(self, _chat_id, _message_id):
+                raise RuntimeError("permanent Telegram error")
+
+        original_bot = main.bot
+        original_admin_ids = main.ADMIN_IDS
+        main.bot = FailingBot()
+        main.ADMIN_IDS = {42}
+        try:
+            for _ in range(main.PUBLICATION_CLEANUP_MAX_ATTEMPTS - 1):
+                with self.assertRaises(RuntimeError):
+                    await main._run_publication_cleanup(operation)
+            await main._run_publication_cleanup(operation)
+        finally:
+            main.bot = original_bot
+            main.ADMIN_IDS = original_admin_ids
+
+        with sqlite3.connect(main.DB_PATH) as db:
+            current = db.execute(
+                "SELECT message_ids,operation_id FROM published_posts WHERE kind='news'"
+            ).fetchone()
+            job_status = db.execute(
+                "SELECT status FROM publication_jobs WHERE operation_id=?", (operation,),
+            ).fetchone()[0]
+            cleanup_status = db.execute(
+                "SELECT status,attempts FROM publication_cleanup_messages "
+                "WHERE operation_id=?", (operation,),
+            ).fetchone()
+            notification = db.execute(
+                "SELECT COUNT(*) FROM task_outbox WHERE event_key LIKE ?",
+                (f"publication-cleanup-failed:{operation}%",),
+            ).fetchone()[0]
+        self.assertEqual(current, ("[20]", operation))
+        self.assertEqual(job_status, "cleanup_failed")
+        self.assertEqual(cleanup_status, ("failed", 10))
+        self.assertGreaterEqual(notification, 1)
+
+        original_admin = main.is_admin
+
+        async def allow_admin(_uid):
+            return True
+
+        class FakeMessage:
+            message_id = 900
+            text = "/новости заново"
+            chat = SimpleNamespace(id=700, type="private")
+            from_user = SimpleNamespace(id=42)
+
+            def __init__(self):
+                self.answers = []
+
+            async def answer(self, text, **_kwargs):
+                self.answers.append(text)
+
+        main.is_admin = allow_admin
+        message = FakeMessage()
+        try:
+            token = main._current_update_id.set(502)
+            await main._publish(message, ["новая версия"], 1, "news")
+            main._current_update_id.reset(token)
+        finally:
+            main.is_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            next_job = db.execute(
+                "SELECT operation_id,status FROM publication_jobs WHERE kind='news'"
+            ).fetchone()
+        self.assertEqual(next_job, ("update:502:publication:news", "pending"))
+
+    async def test_current_publication_dead_delivery_keeps_cleanup_recoverable(self):
+        operation = "update:900:publication:news"
+        payload = {
+            "kind": "news", "target": 700, "topic": 1,
+            "parts": ["new"], "admin_id": 42,
+        }
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO published_posts "
+                "(kind,chat_id,topic,message_ids,published_at,published_by,operation_id) "
+                "VALUES ('news',700,1,'[20]',?,42,?)", (main.now_iso(), operation),
+            )
+            db.execute(
+                "INSERT INTO publication_jobs "
+                "(kind,operation_id,status,requested_by,created_at) "
+                "VALUES ('news',?,'cleanup_pending',42,?)",
+                (operation, main.now_iso()),
+            )
+            db.execute(
+                "INSERT INTO publication_cleanup_messages "
+                "(operation_id,chat_id,message_id,final_job_status,status) "
+                "VALUES (?, '700', 10, 'done', 'pending')", (operation,),
+            )
+            db.commit()
+        item = {
+            "event_type": "group_publication", "event_key": operation,
+            "payload_json": main.json.dumps(payload),
+        }
+        await main._deliver_outbox_item(item)
+        async with main.aiosqlite.connect(main.DB_PATH) as db:
+            await main._handle_dead_publication_in_tx(db, item)
+            await db.commit()
+        with sqlite3.connect(main.DB_PATH) as db:
+            job = db.execute(
+                "SELECT status FROM publication_jobs WHERE operation_id=?", (operation,),
+            ).fetchone()[0]
+            cleanup = db.execute(
+                "SELECT status,attempts FROM publication_cleanup_messages "
+                "WHERE operation_id=?", (operation,),
+            ).fetchone()
+        self.assertEqual(job, "cleanup_pending")
+        self.assertEqual(cleanup, ("pending", 0))
+
+    async def test_stale_media_reconciliation_and_delete_errors(self):
+        image_bytes = BytesIO()
+        Image.new("RGB", (3, 3), "red").save(image_bytes, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(
+            image_bytes.getvalue()
+        ).decode()
+        media = await main._save_image(data_url)
+        old = (main.datetime.now(main.timezone.utc) - main.timedelta(hours=2)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "UPDATE media_objects SET state='uploading',created_at=?,ready_at=NULL "
+                "WHERE id=?", (old, media["media_id"]),
+            )
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,reconcile_attempts) "
+                "VALUES (?,'local','missing.jpg','task_proof','uploading','image/jpeg',"
+                "1,?,'missing-op','missing-request',?,4)",
+                (str(uuid.uuid4()), "0" * 64, old),
+            )
+            missing_id = db.execute(
+                "SELECT id FROM media_objects WHERE upload_operation_id='missing-op'"
+            ).fetchone()[0]
+            db.commit()
+        await main._reconcile_stale_media_uploads()
+        with sqlite3.connect(main.DB_PATH) as db:
+            recovered = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media["media_id"],),
+            ).fetchone()[0]
+            missing = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (missing_id,),
+            ).fetchone()[0]
+        self.assertEqual((recovered, missing), ("ready", "quarantined"))
+
+        path = Path(main.TASK_PHOTO_DIR) / "permission.jpg"
+        path.write_bytes(b"private")
+        original_remove = main.os.remove
+        main.os.remove = lambda _path: (_ for _ in ()).throw(PermissionError("denied"))
+        try:
+            with self.assertRaises(PermissionError):
+                await main._storage_delete("permission.jpg", backend="local")
+        finally:
+            main.os.remove = original_remove
+
+    async def test_media_gc_and_task_attach_never_leave_deleted_reference(self):
+        media_id = str(uuid.uuid4())
+        filename = f"{media_id}.jpg"
+        content = b"old-ready-photo"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        old = (main.datetime.now(main.timezone.utc) - main.timedelta(days=2)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at,delete_after) "
+                "VALUES (?,'local',?,'task_brief','ready','image/jpeg',?,?,?,?,?,?,?)",
+                (
+                    media_id, filename, len(content), digest, "race-upload", digest,
+                    old, old, main.now_iso(),
+                ),
+            )
+            db.commit()
+
+        original_admin = main._require_admin
+        original_save = main._save_image
+
+        async def allow_admin(_request):
+            return 42, None
+
+        async def reuse_media(*_args, **_kwargs):
+            await asyncio.sleep(0)
+            return {"media_id": media_id, "photo_file": filename, "sha256": digest}
+
+        main._require_admin = allow_admin
+        main._save_image = reuse_media
+        body = {
+            "operation_id": str(uuid.uuid4()), "type": "fix_zone",
+            "title": "Гонка хранения", "details": "Проверка",
+            "city": "Краснодар", "address": "ул. Красная, 1", "reward": 80,
+            "evidence_policy": "after_required", "repeatable": False,
+            "announce": False, "photo_data": "synthetic",
+        }
+        try:
+            response, _ = await asyncio.gather(
+                main.api_admin_task_create(DummyRequest(body)),
+                main._cleanup_media_objects(),
+            )
+        finally:
+            main._require_admin = original_admin
+            main._save_image = original_save
+        with sqlite3.connect(main.DB_PATH) as db:
+            media_state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+            references = db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE photo_media_id=?", (media_id,),
+            ).fetchone()[0]
+        if response.status == 200:
+            self.assertEqual((references, media_state), (1, "ready"))
+            self.assertTrue((Path(main.TASK_PHOTO_DIR) / filename).exists())
+        else:
+            self.assertEqual(response.status, 409)
+            self.assertEqual(references, 0)
+            self.assertEqual(media_state, "deleted")
+            path.unlink(missing_ok=True)
+
+    async def test_polling_validates_independent_media_secret(self):
+        original_mode = main.TELEGRAM_UPDATE_MODE
+        original_key = main.MEDIA_SIGNING_KEY
+        try:
+            main.TELEGRAM_UPDATE_MODE = "polling"
+            main.MEDIA_SIGNING_KEY = ""
+            with self.assertRaisesRegex(RuntimeError, "MEDIA_SIGNING_KEY"):
+                main._validate_update_receiver_config()
+        finally:
+            main.TELEGRAM_UPDATE_MODE = original_mode
+            main.MEDIA_SIGNING_KEY = original_key
+
+    async def test_bonus_operation_is_idempotent_and_conflict_safe(self):
+        uid = 900_000_002
+        await main.upsert_member(uid, full_name="Тест")
+        operation = str(uuid.uuid4())
+        results = await asyncio.gather(*(
+            main.add_bonus(
+                uid, 77, "Проверка", by=42, operation_id=operation
+            )
+            for _ in range(20)
+        ))
+        with sqlite3.connect(main.DB_PATH) as db:
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (uid,)
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE operation_id=?",
+                (operation,),
+            ).fetchone()[0]
+        self.assertEqual(balance, 77)
+        self.assertEqual(rows, 1)
+        self.assertEqual(sum(not item["replayed"] for item in results), 1)
+        with self.assertRaisesRegex(ValueError, "другой операции"):
+            await main.add_bonus(
+                uid, 78, "Проверка", by=42, operation_id=operation
+            )
+
+    async def test_task_announcement_uses_private_ops_and_dead_retry(self):
+        original_admin = main._require_admin
+        original_config = (
+            main.OPS_GROUP_ID, main.OPS_GROUP_USERNAME,
+            main.GROUP_ID, main.GROUP_USERNAME,
+        )
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        main.OPS_GROUP_ID = -1009000002222
+        main.OPS_GROUP_USERNAME = ""
+        main.GROUP_ID = -1009000001111
+        main.GROUP_USERNAME = "bbbikefan"
+        try:
+            created = await main.api_admin_task_create(DummyRequest({
+                "operation_id": str(uuid.uuid4()), "type": "fix_zone",
+                "title": "Приватная парковка", "details": "Выровнять байки",
+                "city": "Краснодар", "address": "Точный адрес", "reward": 80,
+                "evidence_policy": "after_required", "repeatable": False,
+                "announce": True,
+            }))
+            data = response_json(created)
+            with sqlite3.connect(main.DB_PATH) as db:
+                outbox = db.execute(
+                    "SELECT id,chat_id,status FROM task_outbox WHERE event_key=?",
+                    (f"task:{data['task_id']}:announcement",),
+                ).fetchone()
+                db.execute(
+                    "UPDATE task_outbox SET status='sent',sent_at=?,"
+                    "telegram_message_id=845,telegram_thread_id=17 WHERE id=?",
+                    (main.now_iso(), outbox[0]),
+                )
+                db.commit()
+            status_response = await main.api_admin_task_announcement_status(
+                SimpleNamespace(rel_url=SimpleNamespace(query={
+                    "ids": str(data["task_id"]),
+                }))
+            )
+            invalid_status = await main.api_admin_task_announcement_status(
+                SimpleNamespace(rel_url=SimpleNamespace(query={"ids": "1,bad"}))
+            )
+            oversized_status = await main.api_admin_task_announcement_status(
+                SimpleNamespace(rel_url=SimpleNamespace(query={
+                    "ids": ",".join(str(item) for item in range(1, 102)),
+                }))
+            )
+            overlong_status = await main.api_admin_task_announcement_status(
+                SimpleNamespace(rel_url=SimpleNamespace(query={"ids": "9" * 20}))
+            )
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE task_outbox SET status='dead',attempts=10 WHERE id=?",
+                    (outbox[0],),
+                )
+                db.commit()
+            retried = await main.api_admin_task_announcement_retry(DummyRequest({
+                "task_id": data["task_id"], "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+            (
+                main.OPS_GROUP_ID, main.OPS_GROUP_USERNAME,
+                main.GROUP_ID, main.GROUP_USERNAME,
+            ) = original_config
+        self.assertEqual(data["announcement_status"], "queued")
+        self.assertEqual(outbox[1], "-1009000002222")
+        self.assertNotEqual(outbox[1], "-1009000001111")
+        status_item = response_json(status_response)["items"][0]
+        self.assertEqual(status_item["status"], "sent")
+        self.assertEqual(status_item["url"], "https://t.me/c/9000002222/17/845")
+        self.assertEqual(invalid_status.status, 400)
+        self.assertEqual(oversized_status.status, 400)
+        self.assertEqual(overlong_status.status, 400)
+        self.assertEqual(response_json(retried)["status"], "pending")
+
+    async def test_telegram_task_link_supports_private_topics_and_public_ops(self):
+        self.assertEqual(
+            main._telegram_message_url(-1009000002222, 845, 17),
+            "https://t.me/c/9000002222/17/845",
+        )
+        self.assertEqual(
+            main._telegram_message_url("@private_ops", 845, 17, "private_ops"),
+            "https://t.me/private_ops/17/845",
+        )
+        self.assertEqual(main._telegram_message_url("bad", 845), "")
+
+    async def test_withdrawal_processing_can_be_safely_handed_over(self):
+        worker_id, first_admin, next_admin = 901_100_001, 901_100_002, 901_100_003
+        for uid, role in ((worker_id, "helper"), (first_admin, "admin"), (next_admin, "admin")):
+            await main.upsert_member(
+                uid, full_name=str(uid), status="approved", role=role,
+            )
+        old = (main.datetime.now(main.timezone.utc) - main.timedelta(hours=2)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            request_id = db.execute(
+                "INSERT INTO withdrawal_requests "
+                "(user_id,amount,status,created_at,processing_by,processing_at) "
+                "VALUES (?,1000,'processing',?,?,?)",
+                (worker_id, old, first_admin, old),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_next(_request):
+            return next_admin, None
+
+        main._require_admin = allow_next
+        try:
+            takeover = await main.api_admin_withdraw_handoff(DummyRequest({
+                "request_id": request_id, "action": "takeover",
+                "reason": "Предыдущая смена недоступна",
+                "operation_id": str(uuid.uuid4()),
+            }))
+            overview = await main.api_admin_overview(DummyRequest({}))
+            released = await main.api_admin_withdraw_handoff(DummyRequest({
+                "request_id": request_id, "action": "release",
+                "reason": "Передаю следующей смене",
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response_json(takeover)["processing_by"], next_admin)
+        overview_item = next(
+            item for item in response_json(overview)["withdrawals"]
+            if item["id"] == request_id
+        )
+        self.assertEqual(overview_item["processing_name"], str(next_admin))
+        self.assertEqual(overview_item["lease_state"], "held_by_me")
+        self.assertGreater(overview_item["lease_remaining_seconds"], 0)
+        self.assertIsNone(response_json(released)["processing_by"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            owner = db.execute(
+                "SELECT processing_by FROM withdrawal_requests WHERE id=?", (request_id,),
+            ).fetchone()[0]
+            events = db.execute(
+                "SELECT COUNT(*) FROM withdrawal_events WHERE withdrawal_id=? "
+                "AND event_type IN ('processing_taken_over','processing_released')",
+                (request_id,),
+            ).fetchone()[0]
+        self.assertIsNone(owner)
+        self.assertEqual(events, 2)
+
+    async def test_invalid_withdrawal_lease_timestamp_is_expired_and_audited(self):
+        worker_id, owner_id, takeover_id = 901_110_001, 901_110_002, 901_110_003
+        for uid, role in ((worker_id, "helper"), (owner_id, "admin"), (takeover_id, "admin")):
+            await main.upsert_member(uid, full_name=str(uid), status="approved", role=role)
+        with sqlite3.connect(main.DB_PATH) as db:
+            request_id = db.execute(
+                "INSERT INTO withdrawal_requests "
+                "(user_id,amount,status,created_at,processing_by,processing_at) "
+                "VALUES (?,1000,'processing',?,?,?)",
+                (worker_id, main.now_iso(), owner_id, "not-an-iso-date"),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_takeover(_request):
+            return takeover_id, None
+
+        main._require_admin = allow_takeover
+        try:
+            response = await main.api_admin_withdraw_handoff(DummyRequest({
+                "request_id": request_id, "action": "takeover",
+                "reason": "Некорректный старый lease",
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response_json(response)["lease_state"], "held_by_me")
+        with sqlite3.connect(main.DB_PATH) as db:
+            metadata = db.execute(
+                "SELECT metadata_json FROM withdrawal_events WHERE withdrawal_id=? "
+                "AND event_type='processing_taken_over'", (request_id,),
+            ).fetchone()[0]
+        self.assertTrue(json.loads(metadata)["invalid_processing_timestamp"])
+
+    async def test_miniapp_referral_token_binds_once(self):
+        referrer, newcomer, other = 901_200_001, 901_200_002, 901_200_003
+        for uid in (referrer, newcomer, other):
+            await main.upsert_member(uid, full_name=str(uid))
+        token = "opaque-test-token"
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO referral_tokens(token,referrer_id,created_at,expires_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    token, referrer, main.now_iso(),
+                    (main.datetime.now(main.timezone.utc) + main.timedelta(days=1)).isoformat(),
+                ),
+            )
+            db.commit()
+        first = await main._bind_referral_token(newcomer, "rf_" + token)
+        second = await main._bind_referral_token(newcomer, "rf_" + token)
+        with sqlite3.connect(main.DB_PATH) as db:
+            bound = db.execute(
+                "SELECT referred_by FROM members WHERE user_id=?", (newcomer,),
+            ).fetchone()[0]
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(bound, referrer)
+
+    async def test_admin_application_queue_is_paginated_and_searchable(self):
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        try:
+            for index in range(120):
+                await main.upsert_member(
+                    902_000_000 + index, full_name=f"Кандидат {index}",
+                    city="Краснодар" if index == 77 else "Москва",
+                    about="Готов помогать", status="pending", role="applicant",
+                    applied_at=main.now_iso(),
+                )
+            first = await main.api_admin_queue(SimpleNamespace(
+                rel_url=SimpleNamespace(query={"kind": "applications", "limit": "50"})
+            ))
+            found = await main.api_admin_queue(SimpleNamespace(
+                rel_url=SimpleNamespace(query={
+                    "kind": "applications", "q": "Краснодар", "limit": "50",
+                })
+            ))
+        finally:
+            main._require_admin = original_admin
+        first_data, found_data = response_json(first), response_json(found)
+        self.assertEqual((len(first_data["items"]), first_data["total"]), (50, 120))
+        self.assertEqual(first_data["next_cursor"], "50")
+        self.assertEqual((len(found_data["items"]), found_data["total"]), (1, 1))
+
+    async def test_task_create_retry_returns_one_task(self):
+        original = main._require_admin
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        operation = str(uuid.uuid4())
+        body = {
+            "operation_id": operation,
+            "type": "fix_zone",
+            "title": "Поправить парковку",
+            "details": "Освободить проход",
+            "city": "Краснодар",
+            "address": "ул. Красная, 1",
+            "reward": 80,
+            "evidence_policy": "after_required",
+            "max_participants": 1,
+            "budget_cap": 80,
+            "repeatable": False,
+            "announce": False,
+        }
+        try:
+            first = await main.api_admin_task_create(DummyRequest(body))
+            second = await main.api_admin_task_create(DummyRequest(body))
+        finally:
+            main._require_admin = original
+        first_data, second_data = response_json(first), response_json(second)
+        self.assertEqual(first.status, 200)
+        self.assertEqual(first_data["task_id"], second_data["task_id"])
+        self.assertTrue(second_data["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE operation_id=?", (operation,)
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+        conflict = dict(body, title="Другое задание")
+        original = main._require_admin
+        main._require_admin = allow_admin
+        try:
+            conflict_response = await main.api_admin_task_create(
+                DummyRequest(conflict)
+            )
+        finally:
+            main._require_admin = original
+        self.assertEqual(conflict_response.status, 409)
+
+    async def test_photo_report_is_linked_to_claimed_task(self):
+        uid = 900_000_003
+        await main.upsert_member(
+            uid, full_name="Исполнитель", city="Краснодар",
+            status="approved", role="helper",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_at,evidence_policy) "
+                "VALUES ('fix_zone','Парковка','Краснодар','ул. Красная',80,'closed',?,?)",
+                (main.now_iso(), "photo_required"),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'claimed',?,80)",
+                (task_id, uid, main.now_iso()),
+            ).lastrowid
+            db.commit()
+
+        original_worker, original_notify = main._require_worker, main._notify_admins
+
+        async def allow_worker(_request):
+            return uid, None
+
+        main._require_worker = allow_worker
+        main._notify_admins = lambda *_args, **_kwargs: None
+        image_bytes = BytesIO()
+        Image.new("RGB", (2, 2), "green").save(image_bytes, format="PNG")
+        png = base64.b64encode(image_bytes.getvalue()).decode()
+        completion_operation = str(uuid.uuid4())
+        completion_body = {
+            "task_id": task_id,
+            "assignment_id": assignment_id,
+            "note": "Готово",
+            "proof_photos": ["data:image/png;base64," + png],
+            "operation_id": completion_operation,
+        }
+        try:
+            response = await main.api_task_complete(DummyRequest(completion_body))
+            replay = await main.api_task_complete(DummyRequest(completion_body))
+            conflict = await main.api_task_complete(DummyRequest({
+                **completion_body, "note": "Другой отчёт",
+            }))
+        finally:
+            main._require_worker = original_worker
+            main._notify_admins = original_notify
+        self.assertEqual(response.status, 200)
+        self.assertEqual(replay.status, 200)
+        self.assertTrue(response_json(replay)["idempotent"])
+        self.assertEqual(conflict.status, 409)
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,)
+            ).fetchone()[0]
+            evidence = db.execute(
+                "SELECT kind,user_id,media_id FROM task_evidence WHERE task_id=?",
+                (task_id,),
+            ).fetchall()
+        self.assertEqual(status, "review")
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0][:2], ("after", uid))
+        self.assertTrue(evidence[0][2])
+        with sqlite3.connect(main.DB_PATH) as db:
+            stored_assignment = db.execute(
+                "SELECT assignment_id FROM task_evidence WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+        self.assertEqual(stored_assignment, assignment_id)
+
+    async def test_admin_cannot_approve_own_execution(self):
+        admin_id = 900_000_004
+        await main.upsert_member(
+            admin_id, full_name="Администратор", city="Краснодар",
+            status="approved", role="admin",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_by,created_at) "
+                "VALUES ('fix_zone','Самопроверка','Краснодар','Адрес',80,'closed',?,?)",
+                (42, main.now_iso()),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'review',?,80)",
+                (task_id, admin_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        try:
+            response = await main.api_admin_task_approve(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "approve": True, "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 403)
+        with sqlite3.connect(main.DB_PATH) as db:
+            bonus, status = db.execute(
+                "SELECT m.bonus,a.status FROM members m "
+                "JOIN task_assignments a ON a.id=? WHERE m.user_id=?",
+                (assignment_id, admin_id),
+            ).fetchone()
+        self.assertEqual((bonus, status), (0, "review"))
+
+    async def test_admin_can_finally_reject_without_payout(self):
+        worker_id, admin_id = 905_000_001, 905_000_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", city="Краснодар",
+            status="approved", role="helper",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_by,created_at) "
+                "VALUES ('fix_zone','Отклонение','Краснодар','Адрес',60,'closed',999,?)",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot,completion_operation_id) "
+                "VALUES (?,?,'review',?,60,?)",
+                (task_id, worker_id, main.now_iso(), str(uuid.uuid4())),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        try:
+            response = await main.api_admin_task_approve(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "decision": "reject", "note": "Результат не соответствует заданию",
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 200)
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+            bonus = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+            ledger = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()[0]
+        self.assertEqual((status, bonus, ledger), ("rejected", 0, 0))
+
+    async def test_review_decision_is_idempotent_under_concurrency(self):
+        worker_id, admin_id = 906_000_001, 906_000_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,city,address,reward,status,created_by,created_at) "
+                "VALUES ('fix_zone','Проверка','Краснодар','Адрес',90,'closed',999,?)",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'review',?,90)",
+                (task_id, worker_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        operation_id = str(uuid.uuid4())
+        body = {
+            "task_id": task_id, "assignment_id": assignment_id,
+            "decision": "approve", "operation_id": operation_id,
+        }
+        try:
+            results = await asyncio.gather(*(
+                main.api_admin_task_approve(DummyRequest(body)) for _ in range(20)
+            ))
+            conflict = await main.api_admin_task_approve(DummyRequest({
+                **body, "decision": "reject", "note": "Иной результат",
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertTrue(all(response.status == 200 for response in results))
+        self.assertEqual(conflict.status, 409)
+        self.assertEqual(sum(not response_json(r)["idempotent"] for r in results), 1)
+        with sqlite3.connect(main.DB_PATH) as db:
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+            ledger = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()[0]
+            commands = db.execute(
+                "SELECT COUNT(*) FROM task_review_commands WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()[0]
+        self.assertEqual((balance, ledger, commands), (90, 1, 1))
+
+    async def test_completion_replay_survives_revision(self):
+        worker_id, admin_id = 906_100_001, 906_100_002
+        await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_by,created_at,evidence_policy) "
+                "VALUES ('fix_zone','Повтор','Краснодар','Адрес',30,'closed',999,?,'comment_only')",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'claimed',?,30)",
+                (task_id, worker_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_worker, original_admin = main._require_worker, main._require_admin
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_worker, main._require_admin = allow_worker, allow_admin
+        completion = {
+            "task_id": task_id, "assignment_id": assignment_id,
+            "note": "Работа выполнена", "proof_photos": [],
+            "operation_id": str(uuid.uuid4()),
+        }
+        try:
+            submitted = await main.api_task_complete(DummyRequest(completion))
+            revised = await main.api_admin_task_approve(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "decision": "revise", "note": "Нужно поправить ещё раз",
+                "operation_id": str(uuid.uuid4()),
+            }))
+            replay = await main.api_task_complete(DummyRequest(completion))
+        finally:
+            main._require_worker, main._require_admin = original_worker, original_admin
+        self.assertEqual((submitted.status, revised.status, replay.status), (200, 200, 200))
+        self.assertTrue(response_json(replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "claimed")
+
+    async def test_legacy_completion_command_is_backfilled_before_revision(self):
+        worker_id, admin_id = 906_200_001, 906_200_002
+        await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
+        operation_id = str(uuid.uuid4())
+        note = "Старый принятый отчёт"
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_by,created_at,evidence_policy) "
+                "VALUES ('fix_zone','Миграция','Краснодар','Адрес',30,'closed',999,?,'comment_only')",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,"
+                "completion_operation_id,completion_request_hash) "
+                "VALUES (?,?,'review',?,?,30,?,NULL)",
+                (task_id, worker_id, main.now_iso(), main.now_iso(), operation_id),
+            ).lastrowid
+            request_hash = main._request_fingerprint({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "user_id": worker_id, "note": note, "proof_photos": [],
+            })
+            db.execute(
+                "UPDATE task_assignments SET completion_request_hash=? WHERE id=?",
+                (request_hash, assignment_id),
+            )
+            db.commit()
+        await main.init_db()
+        original_worker, original_admin = main._require_worker, main._require_admin
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_worker, main._require_admin = allow_worker, allow_admin
+        try:
+            revised = await main.api_admin_task_approve(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "decision": "revise", "note": "Нужно поправить",
+                "operation_id": str(uuid.uuid4()),
+            }))
+            replay = await main.api_task_complete(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "note": note, "proof_photos": [], "operation_id": operation_id,
+            }))
+        finally:
+            main._require_worker, main._require_admin = original_worker, original_admin
+        self.assertEqual((revised.status, replay.status), (200, 200))
+        self.assertTrue(response_json(replay)["idempotent"])
+
+    async def test_revision_deadline_expires_even_when_task_already_expired(self):
+        worker_id, admin_id = 907_000_001, 907_000_002
+        await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
+        past = (main.datetime.now(main.timezone.utc) - main.timedelta(minutes=2)).isoformat()
+        future = (main.datetime.now(main.timezone.utc) + main.timedelta(minutes=2)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,city,address,reward,status,created_by,created_at,slot_end) "
+                "VALUES ('fix_zone','Доработка','Краснодар','Адрес',40,'expired',999,?,?)",
+                (main.now_iso(), past),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot,due_at) "
+                "VALUES (?,?,'review',?,40,?)",
+                (task_id, worker_id, main.now_iso(), past),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        try:
+            revised = await main.api_admin_task_approve(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "decision": "revise", "note": "Исправить расположение",
+                "revision_due_at": future, "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(revised.status, 200)
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "UPDATE task_assignments SET revision_due_at=? WHERE id=?",
+                (past, assignment_id),
+            )
+            db.commit()
+        await main._expire_due_tasks()
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "expired")
+
+    async def test_completed_one_off_task_cannot_be_cancelled(self):
+        admin_id = 908_000_001
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,city,address,reward,status,repeatable,created_at) "
+                "VALUES ('fix_zone','Готово','Краснодар','Адрес',50,'closed',0,?)",
+                (main.now_iso(),),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,123,'done',?,50)",
+                (task_id, main.now_iso()),
+            )
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        try:
+            response = await main.api_admin_task_cancel(DummyRequest({
+                "task_id": task_id, "reason": "Больше не нужно",
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 409)
+        with sqlite3.connect(main.DB_PATH) as db:
+            status = db.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+        self.assertEqual(status, "closed")
+
+    async def test_repeatable_capacity_release_and_reclaim(self):
+        users = [910_000_001, 910_000_002, 910_000_003]
+        for uid in users:
+            await main.upsert_member(
+                uid, full_name=f"Участник {uid}", city="Краснодар",
+                status="approved", role="helper",
+            )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_at,repeatable,"
+                "max_participants,budget_cap) "
+                "VALUES ('fix_zone','Массовое','Краснодар','Адрес',80,'open',?,1,2,160)",
+                (main.now_iso(),),
+            ).lastrowid
+            db.commit()
+        original_worker = main._require_worker
+
+        async def worker_from_request(request):
+            return request.uid, None
+
+        main._require_worker = worker_from_request
+        try:
+            results = await asyncio.gather(*(
+                main.api_task_claim(DummyRequest({"task_id": task_id}, uid))
+                for uid in users
+            ))
+            self.assertEqual(sorted(r.status for r in results), [200, 200, 409])
+            winner = users[[r.status for r in results].index(200)]
+            release_operation = str(uuid.uuid4())
+            body = {
+                "task_id": task_id, "reason": "Изменились планы",
+                "operation_id": release_operation,
+            }
+            released = await main.api_task_release(DummyRequest(body, winner))
+            replay = await main.api_task_release(DummyRequest(body, winner))
+            conflict = await main.api_task_release(DummyRequest({
+                **body, "reason": "Другая причина",
+            }, winner))
+            self.assertEqual((released.status, replay.status, conflict.status), (200, 200, 409))
+            loser = users[[r.status for r in results].index(409)]
+            reclaimed = await main.api_task_claim(
+                DummyRequest({"task_id": task_id}, loser)
+            )
+            self.assertEqual(reclaimed.status, 200)
+        finally:
+            main._require_worker = original_worker
+        with sqlite3.connect(main.DB_PATH) as db:
+            committed = db.execute(
+                "SELECT COUNT(*),COALESCE(SUM(reward_snapshot),0) "
+                "FROM task_assignments WHERE task_id=? "
+                "AND status IN ('claimed','review','done')", (task_id,),
+            ).fetchone()
+            release_events = db.execute(
+                "SELECT COUNT(*) FROM product_events WHERE event_name='task_released'"
+            ).fetchone()[0]
+        self.assertEqual(committed, (2, 160))
+        self.assertEqual(release_events, 1)
+
+    async def test_cancel_blocks_review_then_is_idempotent(self):
+        worker_id, admin_id = 920_000_001, 920_000_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", city="Краснодар",
+            status="approved", role="helper",
+        )
+        await main.upsert_member(
+            admin_id, full_name="Ответственный", city="Краснодар",
+            status="approved", role="admin",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,city,address,reward,status,created_at) "
+                "VALUES ('fix_zone','Отмена','Краснодар','Адрес',50,'closed',?)",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'review',?,50)",
+                (task_id, worker_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        operation = str(uuid.uuid4())
+        body = {"task_id": task_id, "reason": "Больше не требуется", "operation_id": operation}
+        try:
+            blocked = await main.api_admin_task_cancel(DummyRequest(body))
+            self.assertEqual(blocked.status, 409)
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE task_assignments SET status='claimed' WHERE id=?",
+                    (assignment_id,),
+                )
+                db.commit()
+            cancelled = await main.api_admin_task_cancel(DummyRequest(body))
+            replay = await main.api_admin_task_cancel(DummyRequest(body))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual((cancelled.status, replay.status), (200, 200))
+        self.assertTrue(response_json(replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_status = db.execute(
+                "SELECT status FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()[0]
+            assignment_status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+            ledger = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE task_id=?", (task_id,),
+            ).fetchone()[0]
+        self.assertEqual((task_status, assignment_status, ledger), ("cancelled", "cancelled", 0))
+
+    async def test_deadline_expires_claim_without_touching_review(self):
+        past = "2020-01-01T00:00:00+00:00"
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_at,slot_start,slot_end,repeatable,"
+                "max_participants,budget_cap) "
+                "VALUES ('fix_zone','Просрочено','Краснодар','Адрес',40,'open',?,"
+                "'2019-01-01T00:00:00+00:00',?,1,3,120)",
+                (main.now_iso(), past),
+            ).lastrowid
+            claimed_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot,due_at) "
+                "VALUES (?,1,'claimed',?,40,?)",
+                (task_id, main.now_iso(), past),
+            ).lastrowid
+            review_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot,due_at) "
+                "VALUES (?,2,'review',?,40,?)",
+                (task_id, main.now_iso(), past),
+            ).lastrowid
+            db.commit()
+        await main._expire_due_tasks()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_status = db.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+            statuses = dict(db.execute(
+                "SELECT id,status FROM task_assignments WHERE id IN (?,?)",
+                (claimed_id, review_id),
+            ).fetchall())
+        self.assertEqual(task_status, "expired")
+        self.assertEqual(statuses, {claimed_id: "expired", review_id: "review"})
+
+    async def test_encrypted_withdrawal_full_flow_is_idempotent(self):
+        worker_id, admin_id = 930_000_001, 930_000_002
+        await main.upsert_member(
+            worker_id, full_name="Получатель", city="Краснодар",
+            status="approved", role="helper", bonus=1500,
+        )
+        await main.upsert_member(
+            admin_id, full_name="Кассир", city="Краснодар",
+            status="approved", role="admin",
+        )
+        original_worker, original_admin = main._require_worker, main._require_admin
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_worker, main._require_admin = allow_worker, allow_admin
+        request_operation = str(uuid.uuid4())
+        request_body = {
+            "amount": 1000, "account_ref": "BB-ACCOUNT-7788",
+            "operation_id": request_operation,
+        }
+        try:
+            created = await main.api_withdraw_request(DummyRequest(request_body))
+            replay = await main.api_withdraw_request(DummyRequest(request_body))
+            changed = await main.api_withdraw_request(DummyRequest({
+                **request_body, "account_ref": "BB-ACCOUNT-9999",
+            }))
+            request_id = response_json(created)["request_id"]
+            reveal = await main.api_admin_withdraw_account(DummyRequest({
+                "request_id": request_id,
+            }))
+            renewed = await main.api_admin_withdraw_account(DummyRequest({
+                "request_id": request_id,
+            }))
+            decision_operation = str(uuid.uuid4())
+            decision_body = {
+                "request_id": request_id, "decision": "approve",
+                "external_reference": "TX-2026-0001",
+                "operation_id": decision_operation,
+            }
+            decided = await main.api_admin_withdraw_decide(DummyRequest(decision_body))
+            decision_replay = await main.api_admin_withdraw_decide(DummyRequest(decision_body))
+            decision_changed = await main.api_admin_withdraw_decide(DummyRequest({
+                **decision_body, "external_reference": "TX-CHANGED",
+            }))
+            with sqlite3.connect(main.DB_PATH) as db:
+                second_request_id = db.execute(
+                    "INSERT INTO withdrawal_requests "
+                    "(user_id,amount,status,created_at,account_ciphertext,account_masked,"
+                    "processing_by,processing_at) "
+                    "VALUES (?,?, 'processing', ?, ?, ?, ?, ?)",
+                    (
+                        930_000_003, 1000, main.now_iso(),
+                        main._encrypt_account_ref("BB-SECOND-ACCOUNT"), "BB••••NT",
+                        admin_id, main.now_iso(),
+                    ),
+                ).lastrowid
+                db.commit()
+            canonical_conflict = await main.api_admin_withdraw_decide(DummyRequest({
+                "request_id": second_request_id, "decision": "approve",
+                "external_reference": "tx-2026-0001",
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_worker, main._require_admin = original_worker, original_admin
+        self.assertEqual((created.status, replay.status, changed.status), (200, 200, 409))
+        self.assertEqual(response_json(reveal)["account_ref"], "BB-ACCOUNT-7788")
+        self.assertEqual(response_json(renewed)["lease_state"], "held_by_me")
+        self.assertGreater(response_json(renewed)["lease_remaining_seconds"], 0)
+        self.assertEqual((decided.status, decision_replay.status, decision_changed.status), (200, 200, 409))
+        self.assertEqual(canonical_conflict.status, 409)
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,account_ciphertext,account_masked,external_reference "
+                "FROM withdrawal_requests WHERE id=?", (request_id,),
+            ).fetchone()
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+            reserve_rows = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE withdrawal_id=?", (request_id,),
+            ).fetchone()[0]
+            renew_events = db.execute(
+                "SELECT COUNT(*) FROM withdrawal_events WHERE withdrawal_id=? "
+                "AND event_type='processing_renewed'", (request_id,),
+            ).fetchone()[0]
+        self.assertEqual(row[0], "completed")
+        self.assertNotIn("BB-ACCOUNT-7788", row[1])
+        self.assertNotEqual(row[2], "BB-ACCOUNT-7788")
+        self.assertEqual(row[3], "TX-2026-0001")
+        self.assertEqual((balance, reserve_rows), (500, 1))
+        self.assertEqual(renew_events, 1)
+
+    async def test_withdrawal_rejection_refunds_exactly_once(self):
+        worker_id, admin_id = 940_000_001, 940_000_002
+        await main.upsert_member(
+            worker_id, full_name="Возврат", city="Краснодар",
+            status="approved", role="helper", bonus=1200,
+        )
+        original_worker, original_admin = main._require_worker, main._require_admin
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_worker, main._require_admin = allow_worker, allow_admin
+        try:
+            created = await main.api_withdraw_request(DummyRequest({
+                "amount": 1000, "account_ref": "BB-REFUND-100",
+                "operation_id": str(uuid.uuid4()),
+            }))
+            request_id = response_json(created)["request_id"]
+            operation = str(uuid.uuid4())
+            body = {
+                "request_id": request_id, "decision": "reject",
+                "note": "Аккаунт не найден", "operation_id": operation,
+            }
+            rejected = await main.api_admin_withdraw_decide(DummyRequest(body))
+            replay = await main.api_admin_withdraw_decide(DummyRequest(body))
+            conflict = await main.api_admin_withdraw_decide(DummyRequest({
+                **body, "note": "Другая причина",
+            }))
+        finally:
+            main._require_worker, main._require_admin = original_worker, original_admin
+        self.assertEqual((rejected.status, replay.status, conflict.status), (200, 200, 409))
+        with sqlite3.connect(main.DB_PATH) as db:
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+            ledger = db.execute(
+                "SELECT amount FROM bonus_ledger WHERE withdrawal_id=? ORDER BY id",
+                (request_id,),
+            ).fetchall()
+            status = db.execute(
+                "SELECT status FROM withdrawal_requests WHERE id=?", (request_id,),
+            ).fetchone()[0]
+        self.assertEqual(balance, 1200)
+        self.assertEqual(ledger, [(-1000,), (1000,)])
+        self.assertEqual(status, "rejected_refunded")
+
+    async def test_analytics_rejects_personal_free_text(self):
+        async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(ValueError, "Недопустимые свойства"):
+                await main._track_event_in_tx(
+                    db, "task_claimed", "backend", user_id=1,
+                    properties={"name": "Нельзя хранить"},
+                )
+            await db.rollback()
+        with sqlite3.connect(main.DB_PATH) as db:
+            leaks = db.execute(
+                "SELECT COUNT(*) FROM product_events "
+                "WHERE properties_json LIKE '%Нельзя хранить%'"
+            ).fetchone()[0]
+        self.assertEqual(leaks, 0)
+
+    async def test_analytics_dedupe_never_persists_raw_telegram_ids(self):
+        raw_key = "group_join:-1001234567890:987654321"
+        async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+            await main._track_event_in_tx(
+                db, "group_member_joined", "group", user_id=987654321,
+                dedupe_key=raw_key,
+            )
+            await db.commit()
+        with sqlite3.connect(main.DB_PATH) as db:
+            stored = db.execute(
+                "SELECT dedupe_key FROM product_events WHERE event_name='group_member_joined'"
+            ).fetchone()[0]
+        self.assertTrue(stored.startswith("h1:"))
+        self.assertNotIn("987654321", stored)
+        self.assertNotIn("1001234567890", stored)
+
+    async def test_legacy_raw_analytics_dedupe_is_removed_on_migration(self):
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO product_events "
+                "(event_id,occurred_at,event_name,source,dedupe_key,expires_at) "
+                "VALUES ('legacy-raw',?,'bot_started','bot','start:987654321',?)",
+                (
+                    main.now_iso(),
+                    (main.datetime.now(main.timezone.utc) + main.timedelta(days=1)).isoformat(),
+                ),
+            )
+            db.commit()
+        await main.init_db()
+        with sqlite3.connect(main.DB_PATH) as db:
+            stored = db.execute(
+                "SELECT dedupe_key FROM product_events WHERE event_id='legacy-raw'"
+            ).fetchone()[0]
+        self.assertIsNone(stored)
+
+    async def test_completed_withdrawal_account_is_purged_after_retention(self):
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(days=main.WITHDRAW_ACCOUNT_RETENTION_DAYS + 1)
+        ).isoformat()
+        ciphertext = main._encrypt_account_ref("BB-ACCOUNT-SECRET")
+        with sqlite3.connect(main.DB_PATH) as db:
+            request_id = db.execute(
+                "INSERT INTO withdrawal_requests "
+                "(user_id,amount,status,created_at,decided_at,account_ciphertext,"
+                "account_masked,account_fingerprint) VALUES (1,1000,'completed',?,?,?,?,?)",
+                (
+                    old, old, ciphertext, "BB••••ET",
+                    main._account_fingerprint("BB-ACCOUNT-SECRET"),
+                ),
+            ).lastrowid
+            db.commit()
+        await main.cleanup_expired_analytics()
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT account_ciphertext,account_purged_at FROM withdrawal_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+            events = db.execute(
+                "SELECT COUNT(*) FROM withdrawal_events "
+                "WHERE withdrawal_id=? AND event_type='account_purged'",
+                (request_id,),
+            ).fetchone()[0]
+        self.assertIsNone(row[0])
+        self.assertTrue(row[1])
+        self.assertEqual(events, 1)
+
+    async def test_analytics_retention_removes_event_and_orphan_subject(self):
+        past = (main.datetime.now(main.timezone.utc) - main.timedelta(days=1)).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO analytics_subjects (subject_id,user_id,created_at) "
+                "VALUES ('subject-old',123,?)", (past,),
+            )
+            db.execute(
+                "INSERT INTO product_events "
+                "(event_id,occurred_at,event_name,source,subject_id,expires_at) "
+                "VALUES ('event-old',?,'bot_started','bot','subject-old',?)",
+                (past, past),
+            )
+            db.commit()
+        await main.cleanup_expired_analytics()
+        with sqlite3.connect(main.DB_PATH) as db:
+            events = db.execute(
+                "SELECT COUNT(*) FROM product_events WHERE event_id='event-old'"
+            ).fetchone()[0]
+            subjects = db.execute(
+                "SELECT COUNT(*) FROM analytics_subjects WHERE subject_id='subject-old'"
+            ).fetchone()[0]
+        self.assertEqual((events, subjects), (0, 0))
+
+    async def test_best_effort_analytics_never_breaks_user_flow(self):
+        original = main._track_event
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("analytics unavailable")
+
+        main._track_event = broken
+        try:
+            await main._track_event_best_effort(
+                "bot_started", "bot", user_id=123, dedupe_key="start:123"
+            )
+        finally:
+            main._track_event = original
+
+    async def test_outbox_stays_sent_when_publication_analytics_fails(self):
+        with sqlite3.connect(main.DB_PATH) as db:
+            outbox_id = db.execute(
+                "INSERT INTO task_outbox "
+                "(event_key,event_type,chat_id,payload_json,status,attempts,available_at,created_at) "
+                "VALUES ('test-publish','group_task','@test',?,'pending',0,?,?)",
+                (
+                    main.json.dumps({
+                        "text": "Задание", "task_id": 77,
+                        "admin_id": 1, "operation_id": str(uuid.uuid4()),
+                    }),
+                    main.now_iso(), main.now_iso(),
+                ),
+            ).lastrowid
+            db.commit()
+        original_deliver, original_track = main._deliver_outbox_item, main._track_event
+
+        async def delivered(_item):
+            return SimpleNamespace(message_id=845, message_thread_id=17)
+
+        async def broken(*_args, **_kwargs):
+            raise RuntimeError("analytics unavailable")
+
+        main._deliver_outbox_item, main._track_event = delivered, broken
+        worker = asyncio.create_task(main.outbox_worker())
+        try:
+            status = "pending"
+            receipt = (None, None)
+            for _ in range(100):
+                with sqlite3.connect(main.DB_PATH) as db:
+                    status, *receipt = db.execute(
+                        "SELECT status,telegram_message_id,telegram_thread_id "
+                        "FROM task_outbox WHERE id=?", (outbox_id,),
+                    ).fetchone()
+                if status == "sent":
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            main._deliver_outbox_item, main._track_event = original_deliver, original_track
+        self.assertEqual(status, "sent")
+        self.assertEqual(tuple(receipt), (845, 17))
+
+    async def test_referral_confirmation_records_exactly_one_event(self):
+        referrer_id, referred_id = 960_000_001, 960_000_002
+        await main.upsert_member(
+            referrer_id, full_name="Пригласивший", status="approved", role="helper",
+        )
+        await main.upsert_member(
+            referred_id, full_name="Друг", status="approved", role="helper",
+            referred_by=referrer_id, ref_confirmed=0,
+        )
+        original_notify = main._notify
+        main._notify = lambda *_args, **_kwargs: None
+        try:
+            first = await main.confirm_referral(referred_id)
+            replay = await main.confirm_referral(referred_id)
+        finally:
+            main._notify = original_notify
+        self.assertEqual(first[0], referrer_id)
+        self.assertEqual(replay, (referrer_id, 0, 0))
+        with sqlite3.connect(main.DB_PATH) as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM product_events "
+                "WHERE event_name='referral_confirmed'"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    async def test_legacy_assignment_unique_migrates_without_data_loss(self):
+        legacy_root = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_legacy")
+        legacy_root.mkdir(parents=True, exist_ok=True)
+        legacy_db = legacy_root / "legacy.db"
+        with sqlite3.connect(legacy_db) as db:
+            db.execute("""
+                CREATE TABLE task_assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'claimed',
+                    claimed_at TEXT NOT NULL,
+                    done_at TEXT,
+                    proof_note TEXT,
+                    review_note TEXT,
+                    completion_operation_id TEXT,
+                    completion_request_hash TEXT,
+                    submission_attempt INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(task_id,user_id)
+                )
+            """)
+            db.execute(
+                "INSERT INTO task_assignments "
+                "(id,task_id,user_id,status,claimed_at) VALUES (7,77,88,'claimed',?)",
+                (main.now_iso(),),
+            )
+            db.commit()
+        original_path = main.DB_PATH
+        main.DB_PATH = str(legacy_db)
+        try:
+            await main.init_db()
+        finally:
+            main.DB_PATH = original_path
+        with sqlite3.connect(legacy_db) as db:
+            preserved = db.execute(
+                "SELECT id,task_id,user_id,status FROM task_assignments WHERE id=7"
+            ).fetchone()
+            table_sql = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_assignments'"
+            ).fetchone()[0]
+        self.assertEqual(preserved, (7, 77, 88, "claimed"))
+        self.assertNotIn("UNIQUE(task_id,user_id)", table_sql.replace(" ", ""))
+
+    async def test_legacy_task_reward_is_backfilled_to_canonical_assignment(self):
+        legacy_root = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_reward")
+        legacy_root.mkdir(parents=True, exist_ok=True)
+        legacy_db = legacy_root / "legacy_reward.db"
+        original_path = main.DB_PATH
+        main.DB_PATH = str(legacy_db)
+        try:
+            await main.init_db()
+            with sqlite3.connect(legacy_db) as db:
+                db.execute(
+                    "INSERT INTO members (user_id,bonus,created_at) VALUES (?,?,?)",
+                    (77, 80, main.now_iso()),
+                )
+                task_id = db.execute(
+                    "INSERT INTO tasks "
+                    "(type,title,city,address,reward,status,claimed_by,claimed_at,done_at,created_at) "
+                    "VALUES ('fix_zone','Старое','Краснодар','Адрес',80,'done',77,?,?,?)",
+                    (main.now_iso(), main.now_iso(), main.now_iso()),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO bonus_ledger "
+                    "(user_id,amount,reason,task_id,created_at,operation_id,balance_after) "
+                    "VALUES (77,80,'Старое задание',?,?,?,80)",
+                    (task_id, main.now_iso(), f"task_reward:task:{task_id}"),
+                )
+                db.commit()
+            await main.init_db()
+            with sqlite3.connect(legacy_db) as db:
+                assignment = db.execute(
+                    "SELECT id,status FROM task_assignments WHERE task_id=?", (task_id,),
+                ).fetchone()
+                ledger_assignment = db.execute(
+                    "SELECT assignment_id FROM bonus_ledger WHERE task_id=?", (task_id,),
+                ).fetchone()[0]
+                balance = db.execute(
+                    "SELECT bonus FROM members WHERE user_id=77"
+                ).fetchone()[0]
+        finally:
+            main.DB_PATH = original_path
+        self.assertEqual(assignment[1], "done")
+        self.assertEqual(ledger_assignment, assignment[0])
+        self.assertEqual(balance, 80)
+
+    async def test_startup_schema_upgrade_rolls_back_as_one_transaction(self):
+        atomic_root = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_atomic")
+        atomic_root.mkdir(parents=True, exist_ok=True)
+        atomic_db = atomic_root / "atomic_upgrade.db"
+        original_path = main.DB_PATH
+        main.DB_PATH = str(atomic_db)
+        try:
+            await main.init_db()
+            with sqlite3.connect(atomic_db) as db:
+                task_id = db.execute(
+                    "INSERT INTO tasks "
+                    "(type,title,reward,status,repeatable,created_at) "
+                    "VALUES ('fix_zone','Неоднозначное старое задание',80,'open',1,?)",
+                    (main.now_iso(),),
+                ).lastrowid
+                for user_id in (701, 702):
+                    db.execute(
+                        "INSERT INTO task_assignments "
+                        "(task_id,user_id,status,claimed_at) VALUES (?,?,'done',?)",
+                        (task_id, user_id, main.now_iso()),
+                    )
+                db.execute(
+                    "INSERT INTO bonus_ledger "
+                    "(user_id,amount,reason,task_id,created_at,operation_id,balance_after) "
+                    "VALUES (701,80,'Legacy',?,?,?,80)",
+                    (task_id, main.now_iso(), f"task_reward:task:{task_id}"),
+                )
+                withdrawal_id = db.execute(
+                    "INSERT INTO withdrawal_requests "
+                    "(user_id,amount,status,created_at) VALUES (701,1000,'approved',?)",
+                    (main.now_iso(),),
+                ).lastrowid
+                db.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "Ambiguous legacy task reward"):
+                await main.init_db()
+
+            with sqlite3.connect(atomic_db) as db:
+                task_state = db.execute(
+                    "SELECT max_participants,budget_cap FROM tasks WHERE id=?", (task_id,),
+                ).fetchone()
+                withdrawal_status = db.execute(
+                    "SELECT status FROM withdrawal_requests WHERE id=?", (withdrawal_id,),
+                ).fetchone()[0]
+                ledger_assignment = db.execute(
+                    "SELECT assignment_id FROM bonus_ledger WHERE task_id=?", (task_id,),
+                ).fetchone()[0]
+        finally:
+            main.DB_PATH = original_path
+        self.assertEqual(task_state, (None, None))
+        self.assertEqual(withdrawal_status, "approved")
+        self.assertIsNone(ledger_assignment)
+
+    async def test_critical_worker_failure_terminates_service(self):
+        async def failed_worker():
+            await asyncio.sleep(0)
+            raise RuntimeError("synthetic worker failure")
+
+        async def long_running_service():
+            await asyncio.Event().wait()
+
+        previous = dict(main._background_tasks)
+        main._background_tasks.clear()
+        main._shutdown_event.clear()
+        main._background_tasks["outbox"] = asyncio.create_task(failed_worker())
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Critical worker failed: outbox"):
+                await main._serve_with_critical_workers(long_running_service())
+        finally:
+            await asyncio.gather(*main._background_tasks.values(), return_exceptions=True)
+            main._background_tasks.clear()
+            main._background_tasks.update(previous)
+
+    async def test_newer_sqlite_schema_refuses_application_downgrade(self):
+        downgrade_root = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_downgrade")
+        downgrade_root.mkdir(parents=True, exist_ok=True)
+        downgrade_db = downgrade_root / "newer.db"
+        original_path = main.DB_PATH
+        main.DB_PATH = str(downgrade_db)
+        try:
+            await main.init_db()
+            with sqlite3.connect(downgrade_db) as db:
+                db.execute(f"PRAGMA user_version={main.SQLITE_SCHEMA_VERSION + 1}")
+            with self.assertRaisesRegex(RuntimeError, "refusing downgrade"):
+                await main.init_db()
+            with sqlite3.connect(downgrade_db) as db:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            main.DB_PATH = original_path
+        self.assertEqual(version, main.SQLITE_SCHEMA_VERSION + 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

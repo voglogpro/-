@@ -1,0 +1,36 @@
+services:
+  backup:
+    image: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
+    restart: always
+    env_file: "${BIBITASKS_ENV_FILE:-.env}"
+    command: ["python", "scripts/deployment_guard.py", "python", "scripts/backup_scheduler.py"]
+    environment:
+      BIBITASKS_DEPLOYMENT_IMAGE: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
+      BACKUP_DATA_DIR: /app/data
+      BACKUP_OUTPUT_DIR: /app/backups
+      BACKUP_STATUS_FILE: /tmp/backup-status.json
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-600}"
+      BACKUP_RPO_SECONDS: "${BACKUP_RPO_SECONDS:-900}"
+      BACKUP_MAX_CONSECUTIVE_FAILURES: "3"
+    volumes:
+      - bibitasks_data:/app/data:ro
+      - "${BACKUP_DIR:?Mount an encrypted off-host backup destination}:/app/backups"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 384m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "python", "scripts/backup_scheduler.py", "--check"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  bibitasks_data:
+    external: true
+    name: "${BIBITASKS_DATA_VOLUME:-bibitasks_data}"

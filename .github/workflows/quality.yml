@@ -1,0 +1,250 @@
+name: quality
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Install browser runtime
+        run: npx playwright install --with-deps chromium
+      - name: Mini App browser smoke tests
+        run: npm run test:frontend
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: miniapp-playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes --requirement requirements.lock
+      - name: Audit locked Python dependencies
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit --requirement requirements.lock --progress-spinner off
+      - name: Compile backend
+        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/restore.py
+      - name: Core safety tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test backup including media
+        shell: bash
+        run: |
+          root="$(mktemp -d)"
+          python - "$root" <<'PY'
+          import json
+          import sqlite3
+          import subprocess
+          import sys
+          from contextlib import closing
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          data = root / "data"
+          output = root / "output"
+          (data / "task_photos").mkdir(parents=True)
+          (data / "task_photos" / "sample.jpg").write_bytes(b"test-photo")
+          with closing(sqlite3.connect(data / "bibitasks.db")) as db:
+              db.execute("CREATE TABLE sample (value TEXT)")
+              db.execute("INSERT INTO sample VALUES ('ok')")
+          result = subprocess.run(
+              [sys.executable, "scripts/backup.py", "--data-dir", str(data),
+               "--output-dir", str(output)],
+              check=True, capture_output=True, text=True,
+          )
+          destination = Path(result.stdout.strip())
+          manifest = json.loads((destination / "manifest.json").read_text("utf-8"))
+          assert (destination / "task_photos" / "sample.jpg").read_bytes() == b"test-photo"
+          assert manifest["database"]["integrity_check"] == "ok"
+          assert manifest["media"][0]["path"] == "task_photos/sample.jpg"
+          PY
+      - name: Build production image
+        run: docker build --tag bibitasks:ci .
+      - name: Smoke-test image identity and locked imports
+        run: >-
+          docker run --rm --entrypoint python bibitasks:ci -c
+          "import os,aiogram,aiohttp,aiosqlite,boto3,cryptography,PIL;
+          assert os.getuid()!=0; assert os.access('/app/data',os.W_OK)"
+      - name: Validate tracked secrets and generated data
+        shell: bash
+        run: |
+          test ! -e .env
+          test ! -d data
+          ! git grep -nE '[0-9]{6,12}:[A-Za-z0-9_-]{30,}' -- . ':(exclude).env.example'
+
+  postgres-migration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: bibitasks_migration
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-admin-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bibitasks_migration"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://bibitasks_migrator:ci-migration-only@127.0.0.1:5432/bibitasks_migration
+      MIGRATION_EXPECTED_DATABASE: bibitasks_migration
+      MIGRATION_EXPECTED_SCHEMA: public
+      MIGRATION_EXPECTED_SERVER_ADDRESS: 127.0.0.1
+      MIGRATION_EXPECTED_SERVER_PORT: "5432"
+      MIGRATION_EXPECTED_USER: bibitasks_migrator
+      PGPASSWORD: ci-admin-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          pip install --require-hashes --requirement requirements.lock
+          pip install --require-hashes --requirement requirements-migration.lock
+          pip install pip-audit==2.10.1
+          pip-audit --requirement requirements-migration.lock --progress-spinner off
+      - name: Create least-privileged migration owner
+        run: |
+          psql -h 127.0.0.1 -U postgres -d bibitasks_migration -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE bibitasks_migrator LOGIN PASSWORD 'ci-migration-only'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          GRANT CONNECT ON DATABASE bibitasks_migration TO bibitasks_migrator;
+          ALTER SCHEMA public OWNER TO bibitasks_migrator;
+          SQL
+      - name: Compile migration harness
+        run: >-
+          python -m py_compile db_migration/*.py migrations/env.py
+          migrations/versions/*.py scripts/pg_harness_common.py
+          scripts/migrate_sqlite_to_postgres.py
+          scripts/reconcile_sqlite_postgres.py
+          tests/fixtures/build_current_sqlite.py
+      - name: Create exact PostgreSQL baseline
+        run: |
+          alembic upgrade head
+          alembic upgrade head
+      - name: Build synthetic canonical SQLite source
+        run: python tests/fixtures/build_current_sqlite.py --data-dir "$RUNNER_TEMP/migration-source"
+      - name: Migration guard unit tests
+        env:
+          MIGRATION_SOURCE: ${{ runner.temp }}/migration-source/bibitasks.db
+        run: python -m unittest discover -s migration_tests -v
+      - name: Type-check all source rows without writes
+        run: >-
+          python scripts/migrate_sqlite_to_postgres.py
+          --source "$RUNNER_TEMP/migration-source/bibitasks.db"
+      - name: Refuse a mismatched PostgreSQL port
+        shell: bash
+        run: |
+          set +e
+          python scripts/migrate_sqlite_to_postgres.py \
+            --source "$RUNNER_TEMP/migration-source/bibitasks.db" \
+            --apply --writers-stopped \
+            --database-url "$MIGRATION_DATABASE_URL" \
+            --expected-database bibitasks_migration \
+            --expected-schema public \
+            --expected-server-address 127.0.0.1 \
+            --expected-server-port 5433 \
+            --expected-user bibitasks_migrator
+          status=$?
+          set -e
+          test "$status" -eq 3
+      - name: Import in one guarded transaction
+        run: >-
+          python scripts/migrate_sqlite_to_postgres.py
+          --source "$RUNNER_TEMP/migration-source/bibitasks.db"
+          --apply --writers-stopped
+          --database-url "$MIGRATION_DATABASE_URL"
+          --expected-database bibitasks_migration
+          --expected-schema public
+          --expected-server-address 127.0.0.1
+          --expected-server-port 5432
+          --expected-user bibitasks_migrator
+          --report "$RUNNER_TEMP/migration-report.json"
+      - name: Refuse destructive schema rollback
+        shell: bash
+        run: |
+          set +e
+          alembic downgrade base
+          status=$?
+          set -e
+          test "$status" -ne 0
+          test "$(psql -h 127.0.0.1 -U postgres -d bibitasks_migration -Atc \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='members'")" -eq 1
+      - name: Independently reconcile source and target
+        run: >-
+          python scripts/reconcile_sqlite_postgres.py
+          --source "$RUNNER_TEMP/migration-source/bibitasks.db"
+          --database-url "$MIGRATION_DATABASE_URL"
+          --expected-database bibitasks_migration
+          --expected-schema public
+          --expected-server-address 127.0.0.1
+          --expected-server-port 5432
+          --expected-user bibitasks_migrator
+          --report "$RUNNER_TEMP/reconciliation-report.json"
+      - name: Verify nonempty-target guard and identity state
+        shell: bash
+        run: |
+          set +e
+          python scripts/migrate_sqlite_to_postgres.py \
+            --source "$RUNNER_TEMP/migration-source/bibitasks.db" \
+            --apply --writers-stopped \
+            --database-url "$MIGRATION_DATABASE_URL" \
+            --expected-database bibitasks_migration \
+            --expected-schema public \
+            --expected-server-address 127.0.0.1 \
+            --expected-server-port 5432 \
+            --expected-user bibitasks_migrator
+          status=$?
+          set -e
+          test "$status" -eq 3
+          python - <<'PY'
+          import os
+          import psycopg
+          with psycopg.connect(os.environ["MIGRATION_DATABASE_URL"].replace("+psycopg", "")) as db:
+              for table in ("tasks", "bonus_ledger", "product_events"):
+                  maximum, next_value = db.execute(
+                      f'SELECT COALESCE(MAX(id),0), nextval(pg_get_serial_sequence(%s, %s)) FROM "{table}"',
+                      (table, "id"),
+                  ).fetchone()
+                  assert next_value == maximum + 1, (table, maximum, next_value)
+              db.rollback()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: postgres-migration-redacted-reports
+          path: |
+            ${{ runner.temp }}/migration-report.json
+            ${{ runner.temp }}/reconciliation-report.json
+          if-no-files-found: ignore
+          retention-days: 14
