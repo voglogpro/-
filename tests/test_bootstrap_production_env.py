@@ -33,19 +33,24 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(len({values[name] for name in secret_names}), len(secret_names))
         self.assertEqual(values["BIBITASKS_ENVIRONMENT"], "production")
         self.assertEqual(values["TELEGRAM_UPDATE_MODE"], "webhook")
+        self.assertEqual(values["DATA_DIR"], "/app/data")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
         self.assertNotIn(token, "\n".join(values[name] for name in secret_names))
         repo_root = Path(__file__).resolve().parents[1]
-        process_env = {**os.environ, **values}
-        result = subprocess.run(
-            [
-                sys.executable, "-c",
-                "import main; main._validate_update_receiver_config(); print('CONFIG_OK')",
-            ],
-            cwd=repo_root, env=process_env, capture_output=True, text=True,
-            timeout=30,
+        with tempfile.TemporaryDirectory() as data_dir:
+            process_env = {**os.environ, **values, "DATA_DIR": data_dir}
+            result = subprocess.run(
+                [
+                    sys.executable, "-c",
+                    "import main; main._validate_update_receiver_config(); print('CONFIG_OK')",
+                ],
+                cwd=repo_root, env=process_env, capture_output=True, text=True,
+                timeout=30,
+            )
+        self.assertEqual(
+            result.returncode, 0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CONFIG_OK", result.stdout)
         self.assertNotIn(token, result.stdout + result.stderr)
 

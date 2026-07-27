@@ -51,7 +51,17 @@ jobs:
       - name: Compile backend
         run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/restore.py scripts/telegram_preflight.py
       - name: Core safety tests
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee core-tests.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: backend-core-test-log
+          path: core-tests.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Smoke-test backup including media
         shell: bash
         run: |
