@@ -49,7 +49,7 @@ jobs:
           pip install pip-audit==2.10.1
           pip-audit --requirement requirements.lock --progress-spinner off
       - name: Compile backend
-        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/restore.py
+        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/restore.py scripts/telegram_preflight.py
       - name: Core safety tests
         run: python -m unittest discover -s tests -v
       - name: Smoke-test backup including media

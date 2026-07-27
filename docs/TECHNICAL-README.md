@@ -27,6 +27,17 @@ Telegram-бот и Mini App для команды Бибибайка: участ
 3. Запустите `python main.py`.
 4. Проверьте `http://127.0.0.1:3000/health`.
 
+После настройки реального Telegram выполните read-only проверку, которая не
+отправляет и не удаляет сообщения:
+
+```bash
+python scripts/telegram_preflight.py
+```
+
+Нулевой exit code означает, что обязательные проверки имени бота, групп,
+прав, forum mode, webhook и Mini App menu button прошли. Затем выполните
+[`LIVE-ACCEPTANCE.md`](LIVE-ACCEPTANCE.md) на реальных устройствах.
+
 Для контейнера: `docker compose up --build`. Каталог `/app/data` обязательно должен находиться на постоянном диске. Текущая SQLite-сборка допускает только один экземпляр приложения.
 
 Фотографии проходят через реестр `media_objects`: загрузка и проверка checksum
@@ -75,7 +86,7 @@ Webhook сначала сохраняет update в `telegram_update_inbox`, о�
   Наличие dead update считается деградацией и требует ручного redrive, а старая
   необработанная очередь (`telegram_inbox_stale=true`) отключает readiness.
 
-Целевая production-архитектура и план миграции описаны в [ADR-001](docs/ADR-001-professional-architecture.md). Telegram-настройка — в [чек-листе интеграции](docs/TELEGRAM-INTEGRATION.md).
-Ежедневные действия и правила пилота — в [операционном регламенте](docs/PILOT-OPERATIONS.md).
-Изолированная репетиция PostgreSQL — в [migration harness](docs/POSTGRES-MIGRATION-HARNESS.md); рабочий `main.py` пока остаётся SQLite-only.
-Immutable image, backup cadence и безопасный rollback пилота — в [release/recovery runbook](docs/RELEASE-AND-RECOVERY.md).
+Целевая production-архитектура и план миграции описаны в [ADR-001](ADR-001-professional-architecture.md). Telegram-настройка — в [чек-листе интеграции](TELEGRAM-INTEGRATION.md).
+Ежедневные действия и правила пилота — в [операционном регламенте](PILOT-OPERATIONS.md).
+Изолированная репетиция PostgreSQL — в [migration harness](POSTGRES-MIGRATION-HARNESS.md); рабочий `main.py` пока остаётся SQLite-only.
+Immutable image, backup cadence и безопасный rollback пилота — в [release/recovery runbook](RELEASE-AND-RECOVERY.md).

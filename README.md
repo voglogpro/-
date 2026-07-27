@@ -256,9 +256,9 @@ Telegram-бот @BbGalterbot
 
 ### Тесты
 
-**84 автоматических теста**, все локально зелёные:
+**87 автоматических тестов**, все локально зелёные:
 
-- **65** — backend, безопасность, идемпотентность, backup/restore
+- **68** — backend, безопасность, Telegram preflight, идемпотентность, backup/restore
 - **6** — точность PostgreSQL migration harness
 - **13** — интерфейс Mini App в Playwright
 
@@ -271,6 +271,9 @@ Production требует не только `BOT_TOKEN`, но и отдельн�
 Полный шаблон находится в [`.env.example`](.env.example), а порядок запуска —
 в [`docs/PILOT-OPERATIONS.md`](docs/PILOT-OPERATIONS.md). Настоящие значения
 никогда не коммитятся.
+
+Перед live-приёмкой выполните `python scripts/telegram_preflight.py`, затем
+пройдите [`docs/LIVE-ACCEPTANCE.md`](docs/LIVE-ACCEPTANCE.md).
 
 **Права бота в группе.** Три вещи, без которых часть механик молча
 не работает:
