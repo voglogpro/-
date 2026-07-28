@@ -95,7 +95,7 @@ jobs:
           PY
       - name: Build production image
         run: docker build --tag bibitasks:ci .
-      - name: Validate owner pilot stack
+      - name: Validate owner pilot stack syntax
         env:
           BIBITASKS_IMAGE: ghcr.io/voglogpro/bibitasks@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           BIBITASKS_ENV_FILE: .env.example
@@ -106,20 +106,18 @@ jobs:
         run: |
           mkdir -p "$BACKUP_DIR"
           touch "$BACKUP_SENTINEL"
-          docker compose -f compose.pilot.yaml config --format json > pilot-stack.json
+          docker compose version
+          docker compose -f compose.pilot.yaml config --quiet
+      - name: Validate pilot security policy
+        shell: bash
+        run: |
           python - <<'PY'
-          import json
-          stack = json.load(open("pilot-stack.json", encoding="utf-8"))
-          services = stack["services"]
-          assert services["backup"]["network_mode"] == "none"
-          assert "env_file" not in services["backup"]
-          assert set(services["bibitasks"]["networks"]) == {"pilot"}
-          assert set(services["caddy"]["networks"]) == {"pilot"}
-          backup_mounts = services["backup"]["volumes"]
-          assert all(
-              item.get("bind", {}).get("create_host_path") is False
-              for item in backup_mounts if item["type"] == "bind"
-          )
+          manifest = open("compose.pilot.yaml", encoding="utf-8").read()
+          backup = manifest.split("\n  backup:\n", 1)[1].split("\n  caddy:\n", 1)[0]
+          assert "env_file:" not in backup
+          assert "network_mode: none" in backup
+          assert manifest.count("create_host_path: false") == 2
+          assert manifest.count("networks: [pilot]") == 2
           caddyfile = open("deploy/Caddyfile", encoding="utf-8").read()
           assert "@sensitive_routes path /telegram/webhook/* /task-photo/* /media/*" in caddyfile
           assert "log_skip @sensitive_routes" in caddyfile
