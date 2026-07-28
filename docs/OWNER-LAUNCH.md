@@ -64,8 +64,8 @@ docker version
 docker compose version --short
 ```
 
-Нужен Docker Compose **2.33.1 или новее**: stack явно фиксирует default gateway
-для сетей. На production VPS не должно быть сохранённого входа в чужой registry.
+Используйте актуальный Compose plugin из официального Docker repository. На
+production VPS не должно быть сохранённого входа в чужой registry.
 
 Репозиторий клонируется в `/opt/bibitasks`, checkout фиксируется на полном commit
 SHA проверенного релиза. Каталоги секретов и внешней копии проверяются явно:

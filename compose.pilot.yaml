@@ -10,10 +10,7 @@ services:
     expose: ["3000"]
     volumes:
       - bibitasks_data:/app/data
-    networks:
-      internal:
-      outbound:
-        gw_priority: 1
+    networks: [pilot]
     init: true
     read_only: true
     tmpfs:
@@ -92,10 +89,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks:
-      edge:
-        gw_priority: 1
-      internal:
+    networks: [pilot]
     depends_on:
       bibitasks:
         condition: service_healthy
@@ -116,10 +110,7 @@ services:
       retries: 3
 
 networks:
-  edge:
-  internal:
-    internal: true
-  outbound:
+  pilot:
 
 volumes:
   bibitasks_data:

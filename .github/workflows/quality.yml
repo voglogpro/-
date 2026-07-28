@@ -113,8 +113,8 @@ jobs:
           services = stack["services"]
           assert services["backup"]["network_mode"] == "none"
           assert "env_file" not in services["backup"]
-          assert services["bibitasks"]["networks"]["outbound"]["gw_priority"] == 1
-          assert services["caddy"]["networks"]["edge"]["gw_priority"] == 1
+          assert set(services["bibitasks"]["networks"]) == {"pilot"}
+          assert set(services["caddy"]["networks"]) == {"pilot"}
           backup_mounts = services["backup"]["volumes"]
           assert all(
               item.get("bind", {}).get("create_host_path") is False
