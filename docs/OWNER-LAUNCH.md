@@ -86,14 +86,15 @@ sudo chmod 0400 /mnt/bibitasks-backups/.bibitasks-offhost
 Проверенный релиз для пилота:
 
 ```text
-tag: v2.9.0
-commit: ef6eda5d539ba6d00deecaed83127e5b70275189
-image: ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d
+tag: v2.9.1
+commit: acd0239a9ace9960c988c13e4608e2620b186fd3
+image: ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac
 platform: linux/amd64
 ```
 
-28 июля 2026 года образ проверен через anonymous pull. В OCI index опубликованы
-SPDX SBOM и SLSA provenance, привязанные к amd64-манифесту этого релиза.
+28 июля 2026 года tag `2.9.1` проверен через anonymous registry pull: OCI index
+указывает на commit выше и amd64 manifest `sha256:e36bd41bf130dcb2c1ed681767fa92ad13ba9c125aadbc651b28af33d865841a`.
+Release workflow публикует SPDX SBOM и SLSA provenance.
 
 Разработчик создаёт подписанный release tag только из зелёного commit. GitHub
 Actions публикует неизменяемую ссылку вида
@@ -106,7 +107,7 @@ token на сервере не хранится. `unauthorized` — STOP; не �
 с широкими правами как временный обход.
 
 ```bash
-export BIBITASKS_IMAGE='ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d'
+export BIBITASKS_IMAGE='ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac'
 docker pull "$BIBITASKS_IMAGE"
 BIBITASKS_UID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -u)"
 BIBITASKS_GID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -g)"
@@ -173,8 +174,8 @@ sudo chmod 0600 /etc/bibitasks/bibitasks.env
 Создайте `/etc/bibitasks/deploy.env` без token:
 
 ```dotenv
-BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d
-BIBITASKS_RELEASE_COMMIT=ef6eda5d539ba6d00deecaed83127e5b70275189
+BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac
+BIBITASKS_RELEASE_COMMIT=acd0239a9ace9960c988c13e4608e2620b186fd3
 BIBITASKS_ENV_FILE=/etc/bibitasks/bibitasks.env
 BIBITASKS_DOMAIN=tasks.example.com
 BACKUP_DIR=/mnt/bibitasks-backups
