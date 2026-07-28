@@ -72,6 +72,12 @@ members = Table(
     Column("ref_confirmed", Boolean, nullable=False, server_default=text("false")),
     Column("city_change_requested", Text),
     Column("city_change_requested_at", DateTime(timezone=True)),
+    Column(
+        "group_membership_status", Text, nullable=False,
+        server_default=text("'unknown'"),
+    ),
+    Column("group_joined_at", DateTime(timezone=True)),
+    Column("group_left_at", DateTime(timezone=True)),
 )
 
 tasks = Table(
@@ -626,6 +632,33 @@ Index(
     "idx_assignment_decision_operation", task_assignments.c.decision_operation_id,
     unique=True, postgresql_where=task_assignments.c.decision_operation_id.is_not(None),
 )
+
+telegram_join_requests = Table(
+    "telegram_join_requests", metadata,
+    Column("request_key", Text, primary_key=True),
+    Column("update_id", BigInteger, unique=True),
+    Column("chat_id", Text, nullable=False),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("invite_link_sha256", Text),
+    Column("source", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("decision", Text),
+    Column("decision_queued_at", DateTime(timezone=True)),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("joined_at", DateTime(timezone=True)),
+    Column("manual_retry_reason", Text),
+    Column("manual_retry_by", BigInteger, fk("members.user_id")),
+    Column("manual_retry_at", DateTime(timezone=True)),
+    Column("last_error", Text),
+    CheckConstraint(
+        "source IN ('bot_invite','unverified')", name="join_request_source",
+    ),
+    CheckConstraint(
+        "decision IS NULL OR decision IN ('approve','decline')",
+        name="join_request_decision",
+    ),
+)
 Index(
     "idx_task_disputes_status", task_disputes.c.status,
     task_disputes.c.opened_at, task_disputes.c.id,
@@ -730,6 +763,10 @@ Index(
     "idx_telegram_inbox_redrive_operation", telegram_update_inbox.c.redrive_operation_id,
     unique=True, postgresql_where=telegram_update_inbox.c.redrive_operation_id.is_not(None),
 )
+Index(
+    "idx_join_requests_user_status", telegram_join_requests.c.user_id,
+    telegram_join_requests.c.status, telegram_join_requests.c.requested_at,
+)
 Index("idx_media_gc", media_objects.c.state, media_objects.c.delete_after)
 Index(
     "idx_product_events_dedupe", product_events.c.dedupe_key, unique=True,
@@ -752,7 +789,7 @@ IDENTITY_TABLES = (
     "product_events", "awards", "member_awards",
 )
 
-if len(metadata.tables) != 33:
-    raise RuntimeError(f"Expected 33 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 42:
-    raise RuntimeError("Expected exactly 42 semantic indexes")
+if len(metadata.tables) != 34:
+    raise RuntimeError(f"Expected 34 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 43:
+    raise RuntimeError("Expected exactly 43 semantic indexes")

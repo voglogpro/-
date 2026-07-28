@@ -2,6 +2,6 @@
 
 from .metadata import metadata
 
-ALEMBIC_HEAD = "0005_manual_grant_reversals"
+ALEMBIC_HEAD = "0006_join_request_admission"
 
 __all__ = ["ALEMBIC_HEAD", "metadata"]

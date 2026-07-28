@@ -41,16 +41,16 @@ def upgrade() -> None:
             manual_retry_at TIMESTAMPTZ,
             last_error TEXT,
             CONSTRAINT pk_telegram_join_requests PRIMARY KEY (request_key),
-            CONSTRAINT uq_telegram_join_requests_update UNIQUE (update_id),
-            CONSTRAINT fk_telegram_join_requests_user
+            CONSTRAINT uq_telegram_join_requests_update_id UNIQUE (update_id),
+            CONSTRAINT fk_telegram_join_requests_user_id_members
                 FOREIGN KEY (user_id) REFERENCES members (user_id)
                 ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-            CONSTRAINT fk_telegram_join_requests_retry_admin
+            CONSTRAINT fk_telegram_join_requests_manual_retry_by_members
                 FOREIGN KEY (manual_retry_by) REFERENCES members (user_id)
                 ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-            CONSTRAINT ck_telegram_join_requests_source
+            CONSTRAINT ck_telegram_join_requests_join_request_source
                 CHECK (source IN ('bot_invite','unverified')),
-            CONSTRAINT ck_telegram_join_requests_decision
+            CONSTRAINT ck_telegram_join_requests_join_request_decision
                 CHECK (decision IS NULL OR decision IN ('approve','decline'))
         )
     """)
