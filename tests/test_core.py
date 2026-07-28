@@ -65,6 +65,158 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             status="approved", role="admin",
         )
 
+    async def test_staff_access_presets_use_immutable_granular_snapshots(self):
+        user_id = 991_900_001
+        await main.upsert_member(user_id, status="approved", role="employee")
+        async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+            grant_id, generation, created = await main._insert_access_grant_snapshot_in_tx(
+                db, user_id, "scout", "manual",
+                operation_id="test-scout-grant:991900001",
+            )
+            await db.commit()
+        self.assertTrue(created)
+        self.assertEqual(generation, 1)
+        access = await main._effective_staff_access(user_id)
+        self.assertEqual(access["policy_version"], 1)
+        self.assertEqual(access["presets"], ["scout"])
+        self.assertIn("task.create", access["capabilities"])
+        self.assertIn("task.template.manage", access["capabilities"])
+        self.assertNotIn("withdrawal.decide", access["capabilities"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            snapshot = {
+                row[0] for row in db.execute(
+                    "SELECT capability FROM staff_grant_capabilities WHERE grant_id=?",
+                    (grant_id,),
+                )
+            }
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "INSERT INTO staff_grant_capabilities (grant_id,capability) "
+                    "VALUES (?,'unknown.capability')",
+                    (grant_id,),
+                )
+        self.assertEqual(snapshot, set(main.CAPABILITY_PRESETS["scout"]))
+
+    async def test_scout_member_search_never_exposes_or_sorts_by_bonus(self):
+        scout_id = 991_900_004
+        low_bonus_id = 991_900_005
+        high_bonus_id = 991_900_006
+        await main.upsert_member(
+            scout_id, full_name="Scout", status="approved", role="employee",
+        )
+        await main.upsert_member(
+            low_bonus_id, full_name="A low", status="approved", role="employee",
+            bonus=10, done_count=9,
+        )
+        await main.upsert_member(
+            high_bonus_id, full_name="Z high", status="approved", role="employee",
+            bonus=9999, done_count=1,
+        )
+        async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+            await main._insert_access_grant_snapshot_in_tx(
+                db, scout_id, "scout", "manual",
+                operation_id="test-scout-grant:991900004",
+            )
+            await db.commit()
+
+        async def authenticated_user(_request):
+            return {"id": scout_id}
+
+        request = DummyRequest({}, uid=scout_id)
+        request.rel_url = SimpleNamespace(query={"sort": "bonus", "limit": "100"})
+        with patch.object(main, "_auth_user", new=authenticated_user):
+            response = await main.api_admin_members(request)
+            overview = await main.api_admin_overview(request)
+
+        payload = response_json(response)
+        members = {item["user_id"]: item for item in payload["items"]}
+        self.assertIsNone(members[low_bonus_id]["bonus"])
+        self.assertIsNone(members[high_bonus_id]["bonus"])
+        ordered_ids = [item["user_id"] for item in payload["items"]]
+        self.assertLess(ordered_ids.index(low_bonus_id), ordered_ids.index(high_bonus_id))
+        overview_members = {
+            item["user_id"]: item for item in response_json(overview)["team"]
+        }
+        self.assertIsNone(overview_members[low_bonus_id]["bonus"])
+        self.assertIsNone(overview_members[high_bonus_id]["bonus"])
+
+    async def test_legacy_authority_backfills_owner_and_stays_as_projection(self):
+        user_id = 991_900_002
+        await main.upsert_member(user_id, status="approved", role="employee")
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO admin_authorities "
+                "(user_id,origin,granted_operation_id,granted_at) VALUES (?,?,?,?)",
+                (user_id, "manual", "legacy-owner-op", main.now_iso()),
+            )
+            db.commit()
+        await main.init_db()
+        access = await main._effective_staff_access(user_id)
+        self.assertEqual(access["presets"], ["owner"])
+        self.assertEqual(set(access["capabilities"]), set(main.CAPABILITY_PRESETS["owner"]))
+        with sqlite3.connect(main.DB_PATH) as db:
+            authority = db.execute(
+                "SELECT origin,granted_operation_id FROM admin_authorities WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            role = db.execute(
+                "SELECT role FROM members WHERE user_id=?", (user_id,),
+            ).fetchone()[0]
+        self.assertEqual(authority, ("manual", "legacy-owner-op"))
+        self.assertEqual(role, "admin")
+
+    async def test_access_assignment_requires_independent_checker_and_is_idempotent(self):
+        maker_id, checker_id, target_id = 991_900_011, 991_900_012, 991_900_013
+        await self._seed_admin(maker_id)
+        await self._seed_admin(checker_id)
+        await main.upsert_member(target_id, status="approved", role="employee")
+        request_body = {
+            "change_action": "assign", "target_user_id": target_id,
+            "preset": "cashier", "expected_generation": 0,
+            "reason": "independent access assignment review",
+            "operation_id": str(uuid.uuid4()),
+        }
+        requested = response_json(await main._api_admin_access_request(
+            maker_id, request_body,
+        ))
+        self.assertEqual(requested["status"], "pending")
+        replayed_request = response_json(await main._api_admin_access_request(
+            maker_id, request_body,
+        ))
+        self.assertTrue(replayed_request["idempotent"])
+        decision_body = {
+            "change_id": requested["change_id"], "decision": "approve",
+            "note": "independent checker approval",
+            "operation_id": str(uuid.uuid4()),
+        }
+        self_decision = await main._api_admin_access_decide(maker_id, decision_body)
+        self.assertEqual(self_decision.status, 403)
+        decided = response_json(await main._api_admin_access_decide(
+            checker_id, decision_body,
+        ))
+        self.assertEqual(decided["status"], "applied")
+        replayed_decision = response_json(await main._api_admin_access_decide(
+            checker_id, decision_body,
+        ))
+        self.assertTrue(replayed_decision["idempotent"])
+        access = await main._effective_staff_access(target_id)
+        self.assertEqual(access["presets"], ["cashier"])
+        self.assertIn("withdrawal.decide", access["capabilities"])
+        self.assertNotIn("task.create", access["capabilities"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            grant = db.execute(
+                "SELECT generation,granted_by,approved_by,status "
+                "FROM staff_access_grants WHERE user_id=? AND preset='cashier'",
+                (target_id,),
+            ).fetchone()
+            event = db.execute(
+                "SELECT before_json,after_json FROM staff_access_events "
+                "WHERE target_user_id=?", (target_id,),
+            ).fetchone()
+        self.assertEqual(grant, (1, maker_id, checker_id, "active"))
+        self.assertEqual(json.loads(event[0])["capabilities"], [])
+        self.assertIn("withdrawal.decide", json.loads(event[1])["capabilities"])
+
     @staticmethod
     def _join_request_event(
         user_id, invite_url, *, update_id, user_chat_id=None,

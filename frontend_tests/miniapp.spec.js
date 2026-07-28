@@ -44,6 +44,48 @@ function state(overrides = {}) {
   };
 }
 
+function staffState(capabilities, overrides = {}) {
+  return state({
+    ...overrides,
+    is_admin: true,
+    staff_access: {
+      policy_version: 1,
+      presets: overrides.presets || [],
+      capabilities,
+    },
+  });
+}
+
+function emptyAdminOverview(overrides = {}) {
+  return {
+    pending: [], pending_total: 0, rejected: [], city_changes: [], review: [],
+    review_total: 0, recent_decisions: [], open_tasks: [], team: [], awards: [],
+    granted: [], withdrawals: [], task_templates: [], role_changes: [],
+    manual_grants: [], join_requests: [], ...overrides,
+  };
+}
+
+const SCOUT_CAPABILITIES = [
+  'application.queue.view', 'application.review', 'admission.view', 'admission.retry',
+  'member.search', 'member.tags.view', 'member.tags.manage', 'member.city.review',
+  'member.role.manage_basic', 'task.view', 'task.create', 'task.cancel',
+  'task.delivery.view', 'task.template.manage', 'telegram.publication.manage',
+];
+const REVIEWER_CAPABILITIES = [
+  'task.review.queue', 'task.review', 'task.dispute.request', 'task.dispute.decide',
+  'bonus.grant.small', 'bonus.reversal.request', 'bonus.reversal.decide',
+  'award.view', 'award.grant', 'award.revoke', 'member.task_summary.view',
+];
+const CASHIER_CAPABILITIES = [
+  'withdrawal.queue.view', 'withdrawal.account.reveal', 'withdrawal.handoff',
+  'withdrawal.decide', 'member.financial_summary.view',
+];
+const OWNER_CAPABILITIES = Array.from(new Set([
+  ...SCOUT_CAPABILITIES, ...REVIEWER_CAPABILITIES, ...CASHIER_CAPABILITIES,
+  'access.view', 'access.request', 'access.decide', 'award.catalog.manage',
+  'telegram.inbox.redrive', 'operations.health.view',
+]));
+
 async function openMiniApp(page, options = {}) {
   let currentState = options.initialState || state();
   const requests = [];
@@ -238,6 +280,26 @@ async function openMiniApp(page, options = {}) {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ catalog: overview.awards || [], mine: [] }),
+      });
+    }
+    if (url.pathname === '/api/admin/access' && options.accessData) {
+      if (request.method() === 'POST') {
+        const value = typeof options.accessPostResponse === 'function'
+          ? options.accessPostResponse(body)
+          : (options.accessPostResponse || { ok: true });
+        return route.fulfill({
+          status: value.status || 200,
+          contentType: 'application/json',
+          body: JSON.stringify(value.body || value),
+        });
+      }
+      const value = typeof options.accessData === 'function'
+        ? options.accessData()
+        : options.accessData;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(value),
       });
     }
     if (url.pathname === '/api/admin/task/approve' && options.approveResponses) {
@@ -1429,4 +1491,142 @@ test('роль ответственного ставится в очередь �
   expect(request.body.user_id).toBe(303);
   expect(request.body.reason).toContain('вечерней смены');
   expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+});
+
+test('staff_access закрывает административную оболочку даже при старом is_admin', async ({ page }) => {
+  await openMiniApp(page, { initialState: staffState([]) });
+  await expect(page.locator('#nav [data-tab="tab-admin"]')).toBeHidden();
+  await expect(page.locator('#nav')).toBeHidden();
+});
+
+test('legacy is_admin остаётся только fallback браузерной фикстуры', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: state({ is_admin: true }),
+    adminOverview: emptyAdminOverview(),
+  });
+  await expect(page.locator('#nav [data-tab="tab-admin"]')).toBeVisible();
+});
+
+test('скаут видит заявки, задания и людей без финансовых разделов', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: staffState(SCOUT_CAPABILITIES),
+    adminOverview: emptyAdminOverview(),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await expect(page.locator('[data-asub="adSubQueue"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubCreate"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubTeam"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubAwards"]')).toBeHidden();
+  await expect(page.locator('[data-asub="adSubAccess"]')).toBeHidden();
+  await expect(page.locator('[data-cap-any="application.queue.view,application.review"]').first()).toBeVisible();
+  await expect(page.locator('[data-cap-any="task.review.queue,task.review,task.dispute.request,task.dispute.decide"]').first()).toBeHidden();
+  await page.locator('[data-asub="adSubTeam"]').click();
+  await expect(page.locator('#adTeamSort option[value="bonus"]')).toBeHidden();
+});
+
+test('ревьюер видит проверку, сводку дел и бонусы, но не набор, создание и выплаты', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: staffState(REVIEWER_CAPABILITIES),
+    adminOverview: emptyAdminOverview(),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await expect(page.locator('[data-asub="adSubQueue"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubCreate"]')).toBeHidden();
+  await expect(page.locator('[data-asub="adSubTeam"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubAwards"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubAccess"]')).toBeHidden();
+  await expect(page.locator('#adReview').locator('..')).toBeVisible();
+  await expect(page.locator('#adPending').locator('..')).toBeHidden();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await expect(page.locator('#manualGrantHistory').locator('..')).toBeVisible();
+  await expect(page.locator('#adWithdrawals').locator('..')).toBeHidden();
+});
+
+test('кассир получает только очередь выплат без каталога наград', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: staffState(CASHIER_CAPABILITIES),
+    adminOverview: emptyAdminOverview(),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await expect(page.locator('[data-asub="adSubQueue"]')).toBeHidden();
+  await expect(page.locator('[data-asub="adSubCreate"]')).toBeHidden();
+  await expect(page.locator('[data-asub="adSubTeam"]')).toBeVisible();
+  await expect(page.locator('[data-asub="adSubAwards"]')).toBeVisible();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await expect(page.locator('#adWithdrawals').locator('..')).toBeVisible();
+  await expect(page.locator('#awList').locator('..')).toBeHidden();
+  await expect(page.locator('#manualGrantHistory').locator('..')).toBeHidden();
+});
+
+test('владелец видит все рабочие разделы и управление доступом', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: staffState(OWNER_CAPABILITIES, {
+      presets: [{ key: 'scout', title: 'Скаут' }],
+    }),
+    adminOverview: emptyAdminOverview(),
+    accessData: { grants: [], changes: [], presets: { scout: SCOUT_CAPABILITIES } },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  for (const id of ['adSubQueue', 'adSubCreate', 'adSubTeam', 'adSubAwards', 'adSubAccess']) {
+    await expect(page.locator(`[data-asub="${id}"]`)).toBeVisible();
+  }
+  await page.locator('[data-asub="adSubAccess"]').click();
+  await expect(page.locator('#staffAccessRequestCard')).toBeVisible();
+  await expect(page.locator('#staffAccessHistory')).toBeVisible();
+});
+
+test('доступ использует maker-checker, generation и идемпотентные операции', async ({ page }) => {
+  const accessData = {
+    presets: { scout: SCOUT_CAPABILITIES, reviewer: REVIEWER_CAPABILITIES },
+    grants: [{
+      user_id: 303, full_name: 'Иван Скаут', preset: 'scout', generation: 4, active: true,
+    }],
+    changes: [{
+      id: 10, target_user_id: 303, target_name: 'Иван Скаут', change_action: 'assign',
+      preset: 'reviewer', reason: 'Нужен контроль фото', status: 'pending',
+      requested_by: 101, requested_by_name: 'Анна', can_decide: false,
+      wait_reason: 'Нужен второй ответственный',
+    }, {
+      id: 11, target_user_id: 303, target_name: 'Иван Скаут', change_action: 'revoke',
+      preset: 'scout', reason: 'Смена завершена', status: 'pending',
+      requested_by: 202, requested_by_name: 'Олег', can_decide: true,
+    }],
+  };
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['access.view', 'access.request', 'access.decide'], {
+      presets: ['owner'],
+    }),
+    adminOverview: emptyAdminOverview(),
+    accessData,
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await expect(page.locator('#staffAccessGeneration')).toContainText('4');
+  await expect(page.getByRole('button', { name: 'Нужен второй ответственный' })).toBeDisabled();
+
+  await page.locator('#staffAccessAction').selectOption('assign');
+  await page.locator('#staffAccessPreset').selectOption('reviewer');
+  await expect(page.locator('#staffAccessGeneration')).toContainText('0');
+  await page.locator('#staffAccessReason').fill('Будет проверять фотографии вечерней смены');
+  await page.locator('#staffAccessRequest').click();
+  await expect.poll(() => harness.requests.filter(item =>
+    item.path === '/api/admin/access' && item.method === 'POST' && item.body?.action === 'request'
+  ).length).toBe(1);
+  const request = harness.requests.find(item => item.path === '/api/admin/access' && item.body?.action === 'request');
+  expect(request.body).toMatchObject({
+    change_action: 'assign', target_user_id: 303, preset: 'reviewer', expected_generation: 0,
+    reason: 'Будет проверять фотографии вечерней смены',
+  });
+  expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+
+  await page.locator('[data-access-decide="11"][data-access-decision="approve"]').click();
+  await page.locator('#askText').fill('Сотрудник и завершение смены проверены');
+  await page.locator('#askOk').click();
+  await expect.poll(() => harness.requests.filter(item =>
+    item.path === '/api/admin/access' && item.method === 'POST' && item.body?.action === 'decide'
+  ).length).toBe(1);
+  const decision = harness.requests.find(item => item.path === '/api/admin/access' && item.body?.action === 'decide');
+  expect(decision.body).toMatchObject({
+    change_id: 11, decision: 'approve', note: 'Сотрудник и завершение смены проверены',
+  });
+  expect(decision.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
 });

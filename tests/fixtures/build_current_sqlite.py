@@ -30,6 +30,7 @@ def main():
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     import main as application
+    from db_migration.access_contract import CAPABILITIES_V1
 
     asyncio.run(application.init_db())
     stamp = application.now_iso()
@@ -64,6 +65,42 @@ def main():
             "INSERT INTO admin_authorities "
             "(user_id,origin,granted_operation_id,granted_at) "
             "VALUES (101,'manual','fixture-authority',?)", (stamp,),
+        )
+        grant_id = db.execute(
+            "INSERT INTO staff_access_grants "
+            "(id,user_id,preset,origin,status,policy_version,generation,"
+            "grant_operation_id,granted_at) "
+            "VALUES (9001,101,'owner','manual','active',1,1,"
+            "'rbac-v1-backfill:101:manual:fixture-authority',?)",
+            (stamp,),
+        ).lastrowid
+        db.executemany(
+            "INSERT INTO staff_grant_capabilities (grant_id,capability) VALUES (?,?)",
+            [(grant_id, capability) for capability in CAPABILITIES_V1],
+        )
+        db.execute(
+            "INSERT INTO staff_access_changes "
+            "(id,target_user_id,change_action,preset,expected_generation,reason,status,"
+            "requested_by,requested_at,request_operation_id,request_hash) "
+            "VALUES (9101,102,'assign','scout',0,'Тестовый доступ','pending',"
+            "101,?,'access-request-fixture',?)",
+            (stamp, "4" * 64),
+        )
+        owner_snapshot = json.dumps({
+            "capabilities": sorted(CAPABILITIES_V1),
+            "generation": 1,
+            "origin": "manual",
+            "policy_version": 1,
+            "preset": "owner",
+            "status": "active",
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        db.execute(
+            "INSERT INTO staff_access_events "
+            "(id,target_user_id,preset,event_type,actor_id,operation_id,"
+            "policy_version,before_json,after_json,created_at) "
+            "VALUES (9201,101,'owner','assign',NULL,"
+            "'rbac-v1-event:101:manual:1',1,'{}',?,?)",
+            (owner_snapshot, stamp),
         )
         db.execute(
             "INSERT INTO telegram_join_requests "
@@ -277,6 +314,10 @@ def main():
                 (
                     "manual-reversal-decision-fixture",
                     "manual_grant_reversal_decision", "3" * 64, 103, stamp,
+                ),
+                (
+                    "access-request-fixture",
+                    "staff_access_request", "4" * 64, 101, stamp,
                 ),
             ],
         )

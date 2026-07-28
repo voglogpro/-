@@ -27,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import create_engine
 
 from db_migration import ALEMBIC_HEAD
+from db_migration.access_contract import CAPABILITIES_V1
 from db_migration.metadata import metadata
 from db_migration.types import (
     ConversionError, parse_bigint, parse_bool01, parse_date, parse_json, parse_utc,
@@ -42,6 +43,14 @@ JSON_SHAPES = {
     ("task_outbox", "payload_json"): "object",
     ("product_events", "properties_json"): "object",
     ("published_posts", "message_ids"): "array",
+    ("staff_access_changes", "result_json"): "object",
+    ("staff_access_events", "before_json"): "object",
+    ("staff_access_events", "after_json"): "object",
+}
+CANONICAL_JSON_COLUMNS = {
+    ("staff_access_changes", "result_json"),
+    ("staff_access_events", "before_json"),
+    ("staff_access_events", "after_json"),
 }
 ALLOWED = {
     ("members", "role"): {"candidate", "applicant", "helper", "employee", "admin"},
@@ -63,6 +72,15 @@ ALLOWED = {
         "failed", "failed_cleanup_pending",
     },
     ("publication_cleanup_messages", "status"): {"pending", "deleted", "failed"},
+    ("staff_access_grants", "preset"): {"scout", "reviewer", "cashier", "owner"},
+    ("staff_access_grants", "origin"): {"env", "manual"},
+    ("staff_access_grants", "status"): {"active", "revoked"},
+    ("staff_grant_capabilities", "capability"): set(CAPABILITIES_V1),
+    ("staff_access_changes", "change_action"): {"assign", "revoke"},
+    ("staff_access_changes", "preset"): {"scout", "reviewer", "cashier", "owner"},
+    ("staff_access_changes", "status"): {"pending", "applied", "rejected"},
+    ("staff_access_events", "preset"): {"scout", "reviewer", "cashier", "owner"},
+    ("staff_access_events", "event_type"): {"assign", "revoke", "env_sync"},
 }
 FORBIDDEN_DSN_QUERY_KEYS = {"host", "hostaddr", "port", "service", "dbname", "user"}
 
@@ -131,6 +149,16 @@ def iter_transformed_rows(source, table_name):
                 column.name: _convert(table_name, column, source_row[column.name])
                 for column in table.columns
             }
+            for column in table.columns:
+                key = (table_name, column.name)
+                if key not in CANONICAL_JSON_COLUMNS or source_row[column.name] is None:
+                    continue
+                canonical = json.dumps(
+                    converted[column.name], ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if source_row[column.name] != canonical:
+                    raise ConversionError("access policy JSON is not canonical")
             for column in table.columns:
                 allowed = ALLOWED.get((table_name, column.name))
                 if allowed and converted[column.name] not in allowed:

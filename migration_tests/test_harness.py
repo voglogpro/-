@@ -1,4 +1,5 @@
 import os
+import json
 from contextlib import closing
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ import unittest
 
 from db_migration.metadata import metadata
 from db_migration import ALEMBIC_HEAD
+from db_migration.access_contract import CAPABILITIES_V1
 from db_migration.types import ConversionError, parse_bigint, parse_json
 from scripts.migrate_sqlite_to_postgres import (
     iter_transformed_rows, validate_database_endpoint,
@@ -24,12 +26,12 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
-        self.assertEqual(ALEMBIC_HEAD, "0006_join_request_admission")
+        self.assertEqual(ALEMBIC_HEAD, "0007_capability_rbac")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
-        self.assertEqual(len(metadata.tables), 34)
-        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 43)
+        self.assertEqual(len(metadata.tables), 38)
+        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 47)
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
-        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 297)
+        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 298)
 
     def test_incremental_foreign_keys_match_canonical_deferrability(self):
         versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
@@ -38,6 +40,7 @@ class MigrationHarnessTests(unittest.TestCase):
             "0004_authority_operation_registry.py",
             "0005_manual_grant_reversals.py",
             "0006_join_request_admission.py",
+            "0007_capability_rbac.py",
         ):
             ddl = (versions / filename).read_text(encoding="utf-8")
             self.assertGreater(ddl.count("FOREIGN KEY"), 0, filename)
@@ -46,6 +49,47 @@ class MigrationHarnessTests(unittest.TestCase):
                 ddl.count("DEFERRABLE INITIALLY DEFERRED"),
                 f"{filename} must mirror db_migration.metadata fk() semantics",
             )
+
+    def test_capability_v1_contract_is_complete_and_migration_is_forward_only(self):
+        self.assertEqual(len(CAPABILITIES_V1), 38)
+        self.assertEqual(len(set(CAPABILITIES_V1)), len(CAPABILITIES_V1))
+        self.assertIn("task.template.manage", CAPABILITIES_V1)
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations" / "versions" / "0007_capability_rbac.py"
+        ).read_text(encoding="utf-8")
+        for capability in CAPABILITIES_V1:
+            self.assertIn(capability, migration)
+        self.assertIn("FROM admin_authorities", migration)
+        self.assertIn("m.status='approved'", migration)
+        self.assertNotIn("UPDATE members SET role", migration)
+        self.assertIn("Destructive capability-RBAC downgrade is disabled", migration)
+
+    def test_access_policy_json_must_be_canonical(self):
+        table = metadata.tables["staff_access_events"]
+        canonical = json.dumps(
+            {"generation": 1, "preset": "owner"},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        row = {
+            "id": 1, "target_user_id": 10, "preset": "owner",
+            "event_type": "assign", "actor_id": None,
+            "operation_id": "access-event-test",
+            "policy_version": 1, "before_json": "{}",
+            "after_json": canonical, "created_at": "2026-07-28T10:00:00+00:00",
+        }
+
+        class SourceStub:
+            def __init__(self, value):
+                self.value = value
+
+            def execute(self, _sql):
+                return [{**row, "after_json": self.value}]
+
+        converted = list(iter_transformed_rows(SourceStub(canonical), table.name))
+        self.assertEqual(converted[0]["after_json"]["preset"], "owner")
+        with self.assertRaisesRegex(DataError, "row 1"):
+            list(iter_transformed_rows(SourceStub('{"preset": "owner", "generation": 1}'), table.name))
 
     def test_integer_and_json_conversion_are_lossless(self):
         self.assertEqual(parse_bigint(42), 42)

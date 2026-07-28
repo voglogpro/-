@@ -49,7 +49,7 @@ from aiogram.types import (
 
 APP_VERSION = "v2.10.0"
 BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
-SQLITE_SCHEMA_VERSION = 297
+SQLITE_SCHEMA_VERSION = 298
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -669,6 +669,36 @@ ROLE_TITLES = {
     "admin": "Ответственный",
 }
 
+RBAC_POLICY_VERSION = 1
+CAPABILITY_PRESETS = {
+    "scout": frozenset({
+        "application.queue.view", "application.review", "member.search",
+        "member.tags.view", "member.tags.manage", "member.city.review",
+        "member.role.manage_basic", "task.view", "task.create", "task.cancel",
+        "task.delivery.view", "task.delivery.retry", "task.template.manage",
+        "admission.view", "admission.retry", "telegram.publication.manage",
+    }),
+    "reviewer": frozenset({
+        "task.review.queue", "task.review", "task.dispute.request",
+        "task.dispute.decide", "bonus.grant.small",
+        "bonus.reversal.request", "bonus.reversal.decide", "award.view",
+        "award.grant", "award.revoke", "member.task_summary.view",
+    }),
+    "cashier": frozenset({
+        "withdrawal.queue.view", "withdrawal.account.reveal",
+        "withdrawal.handoff", "withdrawal.decide",
+        "member.financial_summary.view",
+    }),
+}
+CAPABILITY_PRESETS["owner"] = frozenset().union(
+    *CAPABILITY_PRESETS.values(), {
+        "access.view", "access.request", "access.decide",
+        "award.catalog.manage", "telegram.inbox.redrive",
+        "operations.health.view",
+    },
+)
+ALL_STAFF_CAPABILITIES = frozenset().union(*CAPABILITY_PRESETS.values())
+
 # Fast manual thanks are intentionally small and positive-only.  Larger or
 # negative corrections must go through a task/award/withdrawal reconciliation
 # flow with its own business invariant.
@@ -1242,6 +1272,80 @@ async def init_db():
                 granted_at TEXT NOT NULL,
                 PRIMARY KEY(user_id, origin),
                 FOREIGN KEY(user_id) REFERENCES members(user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS staff_access_grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                preset TEXT NOT NULL CHECK(preset IN ('scout','reviewer','cashier','owner')),
+                origin TEXT NOT NULL CHECK(origin IN ('env','manual')),
+                status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+                policy_version INTEGER NOT NULL,
+                generation INTEGER NOT NULL CHECK(generation>0),
+                granted_by INTEGER,
+                approved_by INTEGER,
+                grant_operation_id TEXT NOT NULL UNIQUE,
+                granted_at TEXT NOT NULL,
+                revoked_by INTEGER,
+                revoke_operation_id TEXT UNIQUE,
+                revoked_at TEXT,
+                UNIQUE(user_id,preset,origin,generation),
+                FOREIGN KEY(user_id) REFERENCES members(user_id),
+                CHECK(approved_by IS NULL OR granted_by IS NULL OR approved_by<>granted_by)
+            )
+        """)
+        capability_sql = ",".join(
+            "'" + item.replace("'", "''") + "'"
+            for item in sorted(ALL_STAFF_CAPABILITIES)
+        )
+        await db.execute(f"""
+            CREATE TABLE IF NOT EXISTS staff_grant_capabilities (
+                grant_id INTEGER NOT NULL,
+                capability TEXT NOT NULL CHECK(capability IN ({capability_sql})),
+                PRIMARY KEY(grant_id,capability),
+                FOREIGN KEY(grant_id) REFERENCES staff_access_grants(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS staff_access_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_user_id INTEGER NOT NULL,
+                change_action TEXT NOT NULL CHECK(change_action IN ('assign','revoke')),
+                preset TEXT NOT NULL CHECK(preset IN ('scout','reviewer','cashier','owner')),
+                expected_generation INTEGER NOT NULL CHECK(expected_generation>=0),
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','applied','rejected')),
+                requested_by INTEGER NOT NULL,
+                requested_at TEXT NOT NULL,
+                request_operation_id TEXT NOT NULL UNIQUE,
+                request_hash TEXT NOT NULL,
+                decided_by INTEGER,
+                decided_at TEXT,
+                decision_note TEXT,
+                decision_operation_id TEXT UNIQUE,
+                decision_hash TEXT,
+                result_json TEXT,
+                FOREIGN KEY(target_user_id) REFERENCES members(user_id),
+                CHECK(requested_by<>target_user_id),
+                CHECK(decided_by IS NULL OR (
+                    decided_by<>requested_by AND decided_by<>target_user_id
+                ))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS staff_access_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_user_id INTEGER NOT NULL,
+                preset TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor_id INTEGER,
+                operation_id TEXT NOT NULL UNIQUE,
+                policy_version INTEGER NOT NULL,
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(target_user_id) REFERENCES members(user_id)
             )
         """)
         await db.execute("""
@@ -1888,6 +1992,18 @@ async def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_role_change_one_pending "
             "ON admin_role_changes(user_id) WHERE status='pending'")
         await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_access_one_active "
+            "ON staff_access_grants(user_id,preset,origin) WHERE status='active'")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_staff_grant_capability "
+            "ON staff_grant_capabilities(capability,grant_id)")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_access_one_pending "
+            "ON staff_access_changes(target_user_id,preset) WHERE status='pending'")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_staff_access_changes_status "
+            "ON staff_access_changes(status,requested_at,id)")
+        await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_withdrawals_user "
             "ON withdrawal_requests(user_id, created_at)")
         await db.execute("DROP INDEX IF EXISTS idx_withdrawals_one_pending")
@@ -2191,6 +2307,7 @@ async def init_db():
             "UPDATE members SET role='admin',status='approved' WHERE EXISTS "
             "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=members.user_id)"
         )
+        await _reconcile_legacy_owner_grants_in_tx(db)
         await db.execute(f"PRAGMA user_version={SQLITE_SCHEMA_VERSION}")
         await db.commit()
     logger.info("База БибиЗадачи готова.")
@@ -2749,45 +2866,163 @@ def _request_fingerprint(data):
     return hashlib.sha256(encoded).hexdigest()
 
 
-async def _admin_active_in_tx(db, admin_id):
-    """Re-authorize a privileged actor inside the write transaction."""
-    authority_clause = (
-        " AND EXISTS (SELECT 1 FROM admin_authorities aa WHERE aa.user_id=m.user_id)"
-        if BIBITASKS_ENVIRONMENT == "production" else ""
+async def _insert_access_grant_snapshot_in_tx(
+    db, user_id, preset, origin, *, operation_id, granted_by=None,
+    approved_by=None,
+):
+    """Create an immutable preset snapshot; existing active grants are idempotent."""
+    if preset not in CAPABILITY_PRESETS or origin not in {"env", "manual"}:
+        raise ValueError("invalid access grant")
+    active = await (await db.execute(
+        "SELECT id,generation FROM staff_access_grants "
+        "WHERE user_id=? AND preset=? AND origin=? AND status='active'",
+        (int(user_id), preset, origin),
+    )).fetchone()
+    if active:
+        return int(active[0]), int(active[1]), False
+    generation = int((await (await db.execute(
+        "SELECT COALESCE(MAX(generation),0)+1 FROM staff_access_grants "
+        "WHERE user_id=? AND preset=? AND origin=?",
+        (int(user_id), preset, origin),
+    )).fetchone())[0])
+    cursor = await db.execute(
+        "INSERT INTO staff_access_grants "
+        "(user_id,preset,origin,status,policy_version,generation,granted_by,"
+        "approved_by,grant_operation_id,granted_at) "
+        "VALUES (?,?,?,'active',?,?,?,?,?,?)",
+        (
+            int(user_id), preset, origin, RBAC_POLICY_VERSION, generation,
+            granted_by, approved_by, operation_id, now_iso(),
+        ),
     )
+    grant_id = int(cursor.lastrowid)
+    await db.executemany(
+        "INSERT INTO staff_grant_capabilities (grant_id,capability) VALUES (?,?)",
+        [(grant_id, capability) for capability in sorted(CAPABILITY_PRESETS[preset])],
+    )
+    return grant_id, generation, True
+
+
+async def _reconcile_legacy_owner_grants_in_tx(db):
+    """Backfill owner snapshots from the rollback authority projection."""
+    authorities = await (await db.execute(
+        "SELECT aa.user_id,aa.origin,aa.granted_operation_id "
+        "FROM admin_authorities aa JOIN members m ON m.user_id=aa.user_id "
+        "WHERE m.status='approved' AND m.role='admin'"
+    )).fetchall()
+    authority_keys = {(int(row[0]), str(row[1])) for row in authorities}
+    for user_id, origin, granted_operation_id in authorities:
+        await _insert_access_grant_snapshot_in_tx(
+            db, int(user_id), "owner", str(origin),
+            operation_id=(
+                f"rbac-v1-backfill:{int(user_id)}:{origin}:"
+                f"{granted_operation_id or 'legacy'}"
+            ),
+        )
+    active_owner_grants = await (await db.execute(
+        "SELECT id,user_id,origin FROM staff_access_grants "
+        "WHERE preset='owner' AND status='active'"
+    )).fetchall()
+    for grant_id, user_id, origin in active_owner_grants:
+        if (int(user_id), str(origin)) in authority_keys:
+            continue
+        stamp = now_iso()
+        await db.execute(
+            "UPDATE staff_access_grants SET status='revoked',revoked_at=?,"
+            "revoke_operation_id=? WHERE id=? AND status='active'",
+            (stamp, f"rbac-v1-projection-revoke:{int(grant_id)}", int(grant_id)),
+        )
+
+
+async def _effective_staff_access_in_tx(db, user_id):
+    rows = await (await db.execute(
+        "SELECT DISTINCT g.preset,c.capability FROM staff_access_grants g "
+        "JOIN staff_grant_capabilities c ON c.grant_id=g.id "
+        "JOIN members m ON m.user_id=g.user_id "
+        "WHERE g.user_id=? AND g.status='active' AND m.status='approved' "
+        "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
+        (int(user_id),),
+    )).fetchall()
+    return {
+        "policy_version": RBAC_POLICY_VERSION,
+        "presets": sorted({str(row[0]) for row in rows}),
+        "capabilities": sorted({str(row[1]) for row in rows}),
+    }
+
+
+async def _effective_staff_access(user_id):
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        return await _effective_staff_access_in_tx(db, user_id)
+
+
+async def _has_capability_in_tx(db, user_id, capability):
+    if capability not in ALL_STAFF_CAPABILITIES:
+        return False
     row = await (await db.execute(
-        "SELECT 1 FROM members m WHERE m.user_id=? AND m.role='admin' "
-        "AND m.status='approved'" + authority_clause, (int(admin_id),),
+        "SELECT 1 FROM staff_access_grants g "
+        "JOIN staff_grant_capabilities c ON c.grant_id=g.id "
+        "JOIN members m ON m.user_id=g.user_id "
+        "WHERE g.user_id=? AND g.status='active' AND m.status='approved' "
+        "AND c.capability=? AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS "
+        "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=g.user_id "
+        "AND aa.origin=g.origin))) LIMIT 1",
+        (int(user_id), capability),
     )).fetchone()
     return bool(row)
 
 
+async def _has_capability(user_id, capability):
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        return await _has_capability_in_tx(db, user_id, capability)
+
+
+async def _active_capability_holder_ids_in_tx(db, capability):
+    if capability not in ALL_STAFF_CAPABILITIES:
+        return set()
+    rows = await (await db.execute(
+        "SELECT DISTINCT g.user_id FROM staff_access_grants g "
+        "JOIN staff_grant_capabilities c ON c.grant_id=g.id "
+        "JOIN members m ON m.user_id=g.user_id "
+        "WHERE g.status='active' AND m.status='approved' AND c.capability=? "
+        "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
+        (capability,),
+    )).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+async def _admin_active_in_tx(db, admin_id):
+    """Compatibility alias: any active capability opens the staff shell."""
+    access = await _effective_staff_access_in_tx(db, admin_id)
+    return bool(access["capabilities"])
+
+
 async def _active_admin_ids_in_tx(db):
-    """List currently authorized admins under the same policy as writes."""
-    sql = (
-        "SELECT m.user_id FROM members m WHERE m.role='admin' "
-        "AND m.status='approved'"
-    )
-    if BIBITASKS_ENVIRONMENT == "production":
-        sql += (
-            " AND EXISTS (SELECT 1 FROM admin_authorities aa "
-            "WHERE aa.user_id=m.user_id)"
-        )
-    return {
-        int(row[0]) for row in await (await db.execute(sql)).fetchall()
-    }
+    """Compatibility list for presentation; writes use granular capabilities."""
+    rows = await (await db.execute(
+        "SELECT DISTINCT g.user_id FROM staff_access_grants g "
+        "JOIN members m ON m.user_id=g.user_id "
+        "WHERE g.status='active' AND m.status='approved' "
+        "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))"
+    )).fetchall()
+    return {int(row[0]) for row in rows}
 
 
 async def _admin_task_has_independent_review_path_in_tx(
     db, creator_id, performer_id,
 ):
     """Require distinct actors for review and a possible later dispute."""
-    active_admins = await _active_admin_ids_in_tx(db)
+    reviewers = await _active_capability_holder_ids_in_tx(db, "task.review")
+    dispute_checkers = await _active_capability_holder_ids_in_tx(
+        db, "task.dispute.decide",
+    )
     performer_id = int(performer_id)
     creator_id = int(creator_id) if creator_id is not None else None
-    eligible_reviewers = active_admins - {performer_id, creator_id}
+    eligible_reviewers = reviewers - {performer_id, creator_id}
     return any(
-        active_admins - {performer_id, reviewer_id}
+        dispute_checkers - {performer_id, reviewer_id}
         for reviewer_id in eligible_reviewers
     )
 
@@ -2819,6 +3054,8 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
             ),
             "admin_role_request": ("admin_role_changes", "request_operation_id"),
             "admin_role_decision": ("admin_role_changes", "decision_operation_id"),
+            "staff_access_request": ("staff_access_changes", "request_operation_id"),
+            "staff_access_decision": ("staff_access_changes", "decision_operation_id"),
             "award_grant": ("member_awards", "operation_id"),
             "award_revoke": ("member_awards", "revoke_operation_id"),
             "withdrawal_request": ("withdrawal_requests", "operation_id"),
@@ -2848,6 +3085,8 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
         ),
         ("admin_role_changes", "request_operation_id", "admin_role_request"),
         ("admin_role_changes", "decision_operation_id", "admin_role_decision"),
+        ("staff_access_changes", "request_operation_id", "staff_access_request"),
+        ("staff_access_changes", "decision_operation_id", "staff_access_decision"),
         ("member_awards", "operation_id", "award_grant"),
         ("member_awards", "revoke_operation_id", "award_revoke"),
         ("withdrawal_requests", "operation_id", "withdrawal_request"),
@@ -3275,7 +3514,7 @@ async def _normalize_media_bounded(normalizer):
 
 async def _save_image(
     data_url, *, purpose="task_proof", upload_operation_id=None, request_hash=None,
-    admin_id=None,
+    admin_id=None, required_capability=None,
 ):
     """Декодирует, ограничивает и перекодирует фото без EXIF."""
     if not data_url:
@@ -3348,7 +3587,10 @@ async def _save_image(
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if admin_id is not None and not await _admin_active_in_tx(db, admin_id):
+        if admin_id is not None and (
+            not required_capability
+            or not await _has_capability_in_tx(db, admin_id, required_capability)
+        ):
             await db.rollback()
             raise PermissionError("admin_revoked")
         existing = await (await db.execute(
@@ -3479,6 +3721,21 @@ async def is_admin(uid):
         return await _admin_active_in_tx(db, uid)
 
 
+_DEFAULT_IS_ADMIN = is_admin
+
+
+async def _has_command_capability(user_id, capability):
+    allowed = await _has_capability(user_id, capability)
+    # Existing isolated command tests replace the legacy checker. Production
+    # always uses the persisted capability snapshot.
+    if (
+        not allowed and BIBITASKS_ENVIRONMENT == "test"
+        and is_admin is not _DEFAULT_IS_ADMIN
+    ):
+        return bool(await is_admin(user_id))
+    return allowed
+
+
 async def upsert_member(uid, **fields):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         await db.execute(
@@ -3500,6 +3757,10 @@ async def upsert_member(uid, **fields):
                     "VALUES (?,'manual','test-bootstrap',?) "
                     "ON CONFLICT(user_id,origin) DO NOTHING",
                     (uid, now_iso()),
+                )
+                await _insert_access_grant_snapshot_in_tx(
+                    db, uid, "owner", "manual",
+                    operation_id=f"test-bootstrap:{int(uid)}",
                 )
         await db.commit()
 
@@ -3902,12 +4163,18 @@ async def _enqueue_outbox_in_tx(
 
 
 async def _enqueue_admins_in_tx(db, event_key, text, *, start=None):
-    sql = "SELECT m.user_id FROM members m WHERE m.role='admin' AND m.status='approved'"
-    if BIBITASKS_ENVIRONMENT == "production":
-        sql += " AND EXISTS (SELECT 1 FROM admin_authorities aa WHERE aa.user_id=m.user_id)"
-    rows = await (await db.execute(sql)).fetchall()
-    admin_ids = {int(row[0]) for row in rows}
-    for admin_id in admin_ids:
+    """Compatibility broadcast for owner-only legacy events."""
+    return await _enqueue_capability_holders_in_tx(
+        db, event_key, text, "access.view", start=start,
+    )
+
+
+async def _enqueue_capability_holders_in_tx(
+    db, event_key, text, capability, *, start=None,
+):
+    """Notify only approved staff whose immutable snapshot includes capability."""
+    holder_ids = await _active_capability_holder_ids_in_tx(db, capability)
+    for admin_id in holder_ids:
         await _enqueue_outbox_in_tx(
             db, f"{event_key}:admin:{admin_id}", "direct",
             {"text": text, "start": start}, recipient_id=admin_id,
@@ -4694,7 +4961,8 @@ async def api_state(request):
         m = await get_member(uid)
     referral = await get_referral_progress(uid)
     referral_url = await get_referral_url(uid)
-    admin = await is_admin(uid)
+    staff_access = await _effective_staff_access(uid)
+    admin = bool(staff_access["capabilities"])
     can_work = admin or (m["status"] == "approved" and m["role"] in ("helper", "employee", "admin"))
     return _json({
         "ok": True,
@@ -4703,6 +4971,7 @@ async def api_state(request):
         "bot_username": BOT_USERNAME,
         "me": _member_public(m),
         "is_admin": admin,
+        "staff_access": staff_access,
         "can_work": can_work,
         "task_types": [
             {"key": k, **v} for k, v in TASK_TYPES.items()
@@ -4819,12 +5088,13 @@ async def api_apply(request):
             "backend", user_id=uid,
             dedupe_key=f"application:{uid}:{applied_at}",
         )
-        await _enqueue_admins_in_tx(
+        await _enqueue_capability_holders_in_tx(
             db, f"application:{uid}:{applied_at}",
             f"{'🔁 Повторная' if is_resubmit else '🆕 Новая'} заявка на помощь\n"
             f"Имя: {name}\nГород: {city}\nЧем полезен: {about}\n"
             f"Ник: @{tg.get('username','') or '—'}\nID: {uid}\n\n"
             f"Открой приложение → Модерация, чтобы одобрить.",
+            "application.review",
         )
         await db.commit()
     return _json({"ok": True, "resubmitted": is_resubmit})
@@ -4880,9 +5150,10 @@ async def api_profile_city(request):
                 db, "city_change_decided", "miniapp", user_id=uid,
                 outcome="cancel", dedupe_key=f"city_change_cancel:{uid}:{expected_at}",
             )
-            await _enqueue_admins_in_tx(
+            await _enqueue_capability_holders_in_tx(
                 db, f"city_change:{uid}:{expected_at}:cancelled",
                 f"📍 Участник ID {uid} отменил запрос на смену города.",
+                "member.city.review",
             )
             await db.commit()
             return _json({"ok": True, "city": member["city"] or "", "pending": False})
@@ -4924,11 +5195,12 @@ async def api_profile_city(request):
             db, "city_change_requested", "miniapp", user_id=uid,
             outcome="pending", dedupe_key=f"city_change:{uid}:{requested_at}",
         )
-        await _enqueue_admins_in_tx(
+        await _enqueue_capability_holders_in_tx(
             db, f"city_change:{uid}:{requested_at}",
             f"📍 Запрос на смену города\nУчастник: ID {uid}\n"
             f"Было: {member['city'] or 'не указан'}\nНовый город: {city}\n\n"
             "Подтверди изменение в разделе «Скаут».",
+            "member.city.review",
         )
         await db.commit()
     return _json({
@@ -5761,10 +6033,10 @@ async def api_task_release(request):
             assignment_id=assignment["id"], outcome="released",
             dedupe_key=f"task_release:{operation_id}",
         )
-        await _enqueue_admins_in_tx(
+        await _enqueue_capability_holders_in_tx(
             db, f"assignment:{assignment['id']}:released",
             f"↩️ Исполнитель отказался от задания #{tid}: {task['title']}\n"
-            f"Причина: {reason}",
+            f"Причина: {reason}", "task.view",
         )
         await db.commit()
     return _json({
@@ -5775,7 +6047,7 @@ async def api_task_release(request):
 
 async def api_admin_task_cancel(request):
     """Ответственный отменяет оффер; submitted review сначала надо решить."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "task.cancel")
     if err is not None:
         return err
     body = await _body(request)
@@ -5794,7 +6066,7 @@ async def api_admin_task_cancel(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "task.cancel"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         task = await (await db.execute(
@@ -6179,12 +6451,13 @@ async def api_task_complete(request):
                 properties={"photo_count_bucket": photo_bucket},
                 dedupe_key=f"proof:{operation_id}",
             )
-            await _enqueue_admins_in_tx(
+            await _enqueue_capability_holders_in_tx(
                 db, f"assignment:{assignment_id}:proof:{operation_id}",
                 f"✅ Задание #{tid} отправлено на проверку.\n"
                 f"Комментарий: {note or '—'}\n"
                 f"Фото результата: {len(saved)}\n"
                 f"Открой Модерацию, чтобы подтвердить и начислить бонусы.",
+                "task.review.queue",
             )
             await db.commit()
     except Exception:
@@ -6439,13 +6712,14 @@ async def api_withdraw_request(request):
             db, "withdrawal_requested", "backend", user_id=uid,
             outcome="pending", dedupe_key=f"withdrawal:{operation_id}:requested",
         )
-        await _enqueue_admins_in_tx(
+        await _enqueue_capability_holders_in_tx(
             db, f"withdrawal:{request_id}:requested",
             f"💸 Новая заявка на перевод в приложение #{request_id}\n"
             f"Участник: {member['full_name'] or '—'}\n"
             f"Сумма: {amount} бибибонусов\n"
             f"Аккаунт: {masked}\n"
             f"Открой приложение → Модерация → Выводы.",
+            "withdrawal.queue.view",
         )
         await db.commit()
     return _json({
@@ -6502,6 +6776,30 @@ async def _require_admin(request):
     return tg["id"], None
 
 
+_DEFAULT_REQUIRE_ADMIN = _require_admin
+
+
+async def _require_capability(request, capability):
+    """Authenticate staff and require one effective immutable capability."""
+    if capability not in ALL_STAFF_CAPABILITIES:
+        return None, _json({"error": "capability_unknown"}, status=500)
+    uid, err = await _require_admin(request)
+    if err is not None:
+        return uid, err
+    # Existing unit tests replace the authentication seam with a trusted actor.
+    # This compatibility is test-only; production can never bypass DB grants.
+    if (
+        BIBITASKS_ENVIRONMENT == "test"
+        and _require_admin is not _DEFAULT_REQUIRE_ADMIN
+    ):
+        return uid, None
+    if not await _has_capability(uid, capability):
+        return None, _json({
+            "error": "capability_required", "capability": capability,
+        }, status=403)
+    return uid, None
+
+
 async def _manual_grants_for_overview_in_tx(db):
     """Return every active correction plus 100 most recent inactive grants."""
     return await (await db.execute(
@@ -6540,6 +6838,10 @@ async def api_admin_overview(request):
     uid, err = await _require_admin(request)
     if err is not None:
         return err
+    staff_access = await _effective_staff_access(uid)
+    capabilities = set(staff_access["capabilities"])
+    if BIBITASKS_ENVIRONMENT == "test" and _require_admin is not _DEFAULT_REQUIRE_ADMIN:
+        capabilities = set(ALL_STAFF_CAPABILITIES)
     await _expire_due_tasks()
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
@@ -6705,36 +7007,44 @@ async def api_admin_overview(request):
     pending_dispute_tasks = [dict(r) for r in pending_disputes]
     recent_decision_tasks = [dict(r) for r in recent_decisions]
     open_task_items = [dict(r) for r in open_tasks]
-    await _attach_task_evidence([
-        *review_tasks, *pending_dispute_tasks, *recent_decision_tasks, *open_task_items,
-    ])
+    evidence_tasks = []
+    if capabilities & {"task.review.queue", "task.review", "task.dispute.request", "task.dispute.decide"}:
+        evidence_tasks.extend([*review_tasks, *pending_dispute_tasks, *recent_decision_tasks])
+    if "task.view" in capabilities:
+        evidence_tasks.extend(open_task_items)
+    if evidence_tasks:
+        await _attach_task_evidence(evidence_tasks)
     return _json({
         "ok": True,
-        "pending": [dict(r) for r in pending],
-        "pending_total": pending_total,
-        "rejected": [dict(r) for r in rejected],
-        "city_changes": [dict(r) for r in city_changes],
-        "review": [_admin_task_public(r, uid) for r in review_tasks],
-        "review_total": review_total,
+        "pending": [dict(r) for r in pending] if "application.queue.view" in capabilities else [],
+        "pending_total": pending_total if "application.queue.view" in capabilities else 0,
+        "rejected": [dict(r) for r in rejected] if "application.queue.view" in capabilities else [],
+        "city_changes": [dict(r) for r in city_changes] if "member.city.review" in capabilities else [],
+        "review": [_admin_task_public(r, uid) for r in review_tasks] if "task.review.queue" in capabilities else [],
+        "review_total": review_total if "task.review.queue" in capabilities else 0,
         "recent_decisions": [
             _admin_decision_public(r, uid, active_admin_ids)
             for r in [*pending_dispute_tasks, *recent_decision_tasks]
-        ],
-        "pending_dispute_total": len(pending_dispute_tasks),
-        "open_tasks": [_task_public(r) for r in open_task_items],
+        ] if capabilities & {"task.dispute.request", "task.dispute.decide"} else [],
+        "pending_dispute_total": len(pending_dispute_tasks) if "task.dispute.decide" in capabilities else 0,
+        "open_tasks": [_task_public(r) for r in open_task_items] if "task.view" in capabilities else [],
         "team": [{
             "user_id": r["user_id"], "name": r["full_name"], "role": r["role"],
-            "bonus": r["bonus"], "done_count": r["done_count"],
+            "bonus": (
+                r["bonus"]
+                if "member.financial_summary.view" in capabilities else None
+            ),
+            "done_count": r["done_count"],
             "chat_xp": r["chat_xp"] or 0,
             "city": r["city"] or "", "username": r["username"] or "",
             "about": r["about"] or "", "tags": _tags_list(r["tags"]),
             "created_at": r["created_at"],
             "trust_name": trust_for(trust_score(r["done_count"], r["chat_xp"]))[1],
             "trust_emoji": trust_for(trust_score(r["done_count"], r["chat_xp"]))[2],
-        } for r in team],
-        "withdrawals": [_withdrawal_public(dict(r), viewer_id=uid) for r in withdrawals],
-        "awards": [_award_public(dict(r)) for r in awards],
-        "granted": [dict(r) for r in granted],
+        } for r in team] if "member.search" in capabilities else [],
+        "withdrawals": [_withdrawal_public(dict(r), viewer_id=uid) for r in withdrawals] if "withdrawal.queue.view" in capabilities else [],
+        "awards": [_award_public(dict(r)) for r in awards] if capabilities & {"award.view", "award.catalog.manage", "award.grant", "award.revoke"} else [],
+        "granted": [dict(r) for r in granted] if capabilities & {"award.grant", "award.revoke"} else [],
         "manual_grants": [{
             **dict(r),
             "can_request_reversal": (
@@ -6756,7 +7066,7 @@ async def api_admin_overview(request):
                 if (r["reversal_status"] or "") in {"pending", "manual_required"}
                 and int(r["user_id"]) == int(uid) else ""
             ),
-        } for r in manual_grants],
+        } for r in manual_grants] if capabilities & {"bonus.grant.small", "bonus.reversal.request", "bonus.reversal.decide"} else [],
         "role_changes": [{
             **dict(r),
             "can_decide": (
@@ -6769,15 +7079,17 @@ async def api_admin_overview(request):
                 "Нельзя подтверждать изменение собственной роли."
                 if int(r["user_id"]) == int(uid) else ""
             ),
-        } for r in role_changes],
-        "join_requests": [dict(r) for r in join_requests],
-        "task_templates": TASK_TEMPLATES,
+        } for r in role_changes] if "access.view" in capabilities else [],
+        "join_requests": [dict(r) for r in join_requests] if "admission.view" in capabilities else [],
+        "task_templates": TASK_TEMPLATES if "task.template.manage" in capabilities else [],
     })
 
 
 async def api_admin_queue(request):
     """Пагинация и поиск двух растущих очередей скаута."""
-    admin_id, err = await _require_admin(request)
+    kind = str(request.rel_url.query.get("kind") or "applications")
+    capability = "task.review.queue" if kind == "reviews" else "application.queue.view"
+    admin_id, err = await _require_capability(request, capability)
     if err is not None:
         return err
     params = request.rel_url.query
@@ -6858,7 +7170,7 @@ async def api_admin_queue(request):
 
 async def api_admin_task_announcement_retry(request):
     """Повторяет только окончательно упавшую доставку задания в private OPS."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "task.delivery.retry")
     if err is not None:
         return err
     body = await _body(request)
@@ -6869,7 +7181,7 @@ async def api_admin_task_announcement_retry(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "task.delivery.retry"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         row = await (await db.execute(
@@ -6909,7 +7221,7 @@ async def api_admin_task_announcement_retry(request):
 
 async def api_admin_join_request_retry(request):
     """Requeue a failed/manual Telegram admission decision idempotently."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "admission.retry")
     if err is not None:
         return err
     body = await _body(request)
@@ -6934,7 +7246,7 @@ async def api_admin_join_request_retry(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "admission.retry"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         replay = bool(await (await db.execute(
@@ -6996,7 +7308,7 @@ async def api_admin_join_request_retry(request):
 
 async def api_admin_task_announcement_status(request):
     """Лёгкий опрос доставки объявлений без перезагрузки всей админской сводки."""
-    _, err = await _require_admin(request)
+    _, err = await _require_capability(request, "task.delivery.view")
     if err is not None:
         return err
     raw_ids = str(request.rel_url.query.get("ids", "")).strip()
@@ -7045,9 +7357,17 @@ async def api_admin_task_announcement_status(request):
 
 async def api_admin_members(request):
     """Серверный поиск и пагинация команды без ограничения overview в 500 строк."""
-    _, err = await _require_admin(request)
+    viewer_id, err = await _require_capability(request, "member.search")
     if err is not None:
         return err
+    can_view_finances = await _has_capability(
+        viewer_id, "member.financial_summary.view",
+    )
+    if (
+        BIBITASKS_ENVIRONMENT == "test"
+        and _require_admin is not _DEFAULT_REQUIRE_ADMIN
+    ):
+        can_view_finances = True
     params = request.rel_url.query
     query = str(params.get("q", "")).strip()[:100].lstrip("@#").casefold()
     tag = str(params.get("tag", "")).strip()[:30].lstrip("#").casefold()
@@ -7063,12 +7383,15 @@ async def api_admin_members(request):
             "error": "cursor",
             "message": "Курсор списка пользователей устарел. Обнови поиск.",
         }, status=400)
+    requested_sort = str(params.get("sort", "done"))
+    if requested_sort == "bonus" and not can_view_finances:
+        requested_sort = "done"
     sort_sql = {
         "done": "done_count DESC, chat_xp DESC, user_id",
         "name": "CASEFOLD(full_name), user_id",
         "city": "CASEFOLD(city), CASEFOLD(full_name), user_id",
         "bonus": "bonus DESC, user_id",
-    }.get(params.get("sort", "done"), "done_count DESC, chat_xp DESC, user_id")
+    }.get(requested_sort, "done_count DESC, chat_xp DESC, user_id")
     where = ["status='approved'"]
     values = []
     if query:
@@ -7105,7 +7428,8 @@ async def api_admin_members(request):
         )).fetchall()
     items = [{
         "user_id": row["user_id"], "name": row["full_name"] or "",
-        "role": row["role"], "bonus": row["bonus"],
+        "role": row["role"],
+        "bonus": row["bonus"] if can_view_finances else None,
         "done_count": row["done_count"], "chat_xp": row["chat_xp"] or 0,
         "city": row["city"] or "", "username": row["username"] or "",
         "about": row["about"] or "", "tags": _tags_list(row["tags"]),
@@ -7125,7 +7449,7 @@ async def api_admin_members(request):
 
 async def api_admin_member_tags_catalog(request):
     """Unique tags across the entire approved team, not the current page."""
-    _, err = await _require_admin(request)
+    _, err = await _require_capability(request, "member.tags.view")
     if err is not None:
         return err
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
@@ -7146,7 +7470,7 @@ async def api_admin_member_tags_catalog(request):
 
 async def api_admin_member_city_decide(request):
     """Approve or reject a participant's pending city-gate correction."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "member.city.review")
     if err is not None:
         return err
     body = await _body(request)
@@ -7158,7 +7482,7 @@ async def api_admin_member_city_decide(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "member.city.review"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         member = await (await db.execute(
@@ -7228,7 +7552,7 @@ async def api_admin_member_city_decide(request):
 
 async def api_admin_decide(request):
     """Одобрить или отклонить заявку кандидата."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "application.review")
     if err is not None:
         return err
     body = await _body(request)
@@ -7246,7 +7570,7 @@ async def api_admin_decide(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "application.review"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         row = await (await db.execute(
@@ -7337,7 +7661,7 @@ async def api_admin_decide(request):
 
 
 async def api_admin_task_create(request):
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "task.create")
     if err is not None:
         return err
     body = await _body(request)
@@ -7506,6 +7830,7 @@ async def api_admin_task_create(request):
                 upload_operation_id=f"task:{operation_id}:brief",
                 request_hash=request_hash,
                 admin_id=admin_id,
+                required_capability="task.create",
             )
         except PermissionError:
             return _json({"error": "admin_revoked"}, status=403)
@@ -7517,7 +7842,7 @@ async def api_admin_task_create(request):
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
-            if not await _admin_active_in_tx(db, admin_id):
+            if not await _has_capability_in_tx(db, admin_id, "task.create"):
                 await db.rollback()
                 return _json({"error": "admin_revoked"}, status=403)
             existing = await (await db.execute(
@@ -7692,7 +8017,7 @@ async def api_admin_task_create(request):
 
 async def api_admin_task_approve(request):
     """Решение по конкретному assignment; выплата привязана к нему навсегда."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "task.review")
     if err is not None:
         return err
     body = await _body(request)
@@ -7726,7 +8051,7 @@ async def api_admin_task_approve(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "task.review"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -7938,11 +8263,14 @@ async def api_admin_task_approve(request):
 
 async def api_admin_task_dispute(request):
     """Two-person, idempotent correction of an incorrectly approved task."""
-    admin_id, err = await _require_admin(request)
-    if err is not None:
-        return err
     body = await _body(request)
     action = str(body.get("action") or "").strip().lower()
+    capability = (
+        "task.dispute.request" if action == "open" else "task.dispute.decide"
+    )
+    admin_id, err = await _require_capability(request, capability)
+    if err is not None:
+        return err
     operation_id = _operation_uuid(body.get("operation_id"))
     if action not in {"open", "decide"} or not operation_id:
         return _json({
@@ -7964,7 +8292,7 @@ async def api_admin_task_dispute(request):
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
-            if not await _admin_active_in_tx(db, admin_id):
+            if not await _has_capability_in_tx(db, admin_id, "task.dispute.request"):
                 await db.rollback()
                 return _json({"error": "admin_revoked"}, status=403)
             if not await _claim_operation_in_tx(
@@ -8097,12 +8425,13 @@ async def api_admin_task_dispute(request):
                 assignment_id=assignment_id, outcome=dispute_status,
                 dedupe_key=f"task_dispute_open:{operation_id}",
             )
-            await _enqueue_admins_in_tx(
+            await _enqueue_capability_holders_in_tx(
                 db, f"task_dispute:{dispute_id}:opened",
                 "⚠️ Открыт спор по подтверждённому заданию\n"
                 f"Задание: {assignment['title']}\nПричина: {reason}\n"
                 + ((manual_reconciliation_reason + " Нужна ручная сверка с Бибибайком.\n") if manual_reconciliation_reason else "")
                 + "Нужен второй ответственный в приложении.",
+                "task.dispute.decide",
             )
             await db.commit()
         return _json({
@@ -8142,7 +8471,7 @@ async def api_admin_task_dispute(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "task.dispute.decide"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         if not await _claim_operation_in_tx(
@@ -8412,7 +8741,7 @@ async def api_admin_task_dispute(request):
 
 async def api_admin_grant(request):
     """Small positive-only thanks with idempotency and rolling limits."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "bonus.grant.small")
     if err is not None:
         return err
     body = await _body(request)
@@ -8459,7 +8788,7 @@ async def api_admin_grant(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "bonus.grant.small"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -8501,7 +8830,9 @@ async def api_admin_grant(request):
             await db.rollback()
             return _json({"error": "not_found"}, status=404)
         if member["role"] == "admin" and await _admin_active_in_tx(db, uid):
-            eligible_checkers = await _active_admin_ids_in_tx(db)
+            eligible_checkers = await _active_capability_holder_ids_in_tx(
+                db, "bonus.reversal.decide",
+            )
             eligible_checkers.difference_update({int(admin_id), int(uid)})
             if not eligible_checkers:
                 await db.rollback()
@@ -8594,7 +8925,7 @@ async def _api_admin_grant_reversal_request(admin_id, body, operation_id):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "bonus.reversal.request"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -8692,7 +9023,9 @@ async def _api_admin_grant_reversal_request(admin_id, body, operation_id):
                 "status": pending["status"],
                 "message": "Исправление уже ждёт второго ответственного.",
             }, status=409)
-        eligible = await _active_admin_ids_in_tx(db)
+        eligible = await _active_capability_holder_ids_in_tx(
+            db, "bonus.reversal.decide",
+        )
         eligible.difference_update({int(admin_id), int(grant["user_id"])})
         if not eligible:
             await db.rollback()
@@ -8728,11 +9061,12 @@ async def _api_admin_grant_reversal_request(admin_id, body, operation_id):
             user_id=grant["user_id"], outcome=status_value,
             dedupe_key=f"manual_grant_reversal_request:{operation_id}",
         )
-        await _enqueue_admins_in_tx(
+        await _enqueue_capability_holders_in_tx(
             db, f"manual_grant_reversal:{reversal_id}:requested",
             f"⚠️ Нужна проверка исправления начисления #{reversal_id}\n"
             f"Участник: {grant['full_name'] or '—'}\n"
             f"Сумма: {grant['amount']} бибибонусов\nПричина: {reason}",
+            "bonus.reversal.decide",
         )
         await _enqueue_outbox_in_tx(
             db, f"manual_grant_reversal:{reversal_id}:participant", "direct",
@@ -8767,7 +9101,7 @@ async def _api_admin_grant_reversal_decide(admin_id, body, operation_id):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "bonus.reversal.decide"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -8825,8 +9159,8 @@ async def _api_admin_grant_reversal_decide(admin_id, body, operation_id):
                 "error": "self_correction",
                 "message": "Получатель не может решать исправление своей выплаты.",
             }, status=403)
-        if decision == "approve" and not await _admin_active_in_tx(
-            db, reversal["requested_by"],
+        if decision == "approve" and not await _has_capability_in_tx(
+            db, reversal["requested_by"], "bonus.reversal.request",
         ):
             await db.rollback()
             return _json({"error": "maker_revoked"}, status=409)
@@ -8947,11 +9281,15 @@ async def _api_admin_grant_reversal_decide(admin_id, body, operation_id):
 
 
 async def api_admin_grant_reversal(request):
-    admin_id, err = await _require_admin(request)
-    if err is not None:
-        return err
     body = await _body(request)
     action = str(body.get("action") or "").strip().lower()
+    capability = (
+        "bonus.reversal.request" if action == "request"
+        else "bonus.reversal.decide"
+    )
+    admin_id, err = await _require_capability(request, capability)
+    if err is not None:
+        return err
     operation_id = _operation_uuid(body.get("operation_id"))
     if action not in {"request", "decide"} or not operation_id:
         return _json({
@@ -8967,7 +9305,7 @@ async def api_admin_grant_reversal(request):
 
 async def api_admin_withdraw_account(request):
     """Показывает полный ID только ответственному и журналирует доступ."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "withdrawal.account.reveal")
     if err is not None:
         return err
     body = await _body(request)
@@ -8977,7 +9315,7 @@ async def api_admin_withdraw_account(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "withdrawal.account.reveal"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         item = await (await db.execute(
@@ -9055,7 +9393,7 @@ async def api_admin_withdraw_account(request):
 
 async def api_admin_withdraw_handoff(request):
     """Освобождает свою заявку или забирает просроченную processing-lease."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "withdrawal.handoff")
     if err is not None:
         return err
     body = await _body(request)
@@ -9076,7 +9414,7 @@ async def api_admin_withdraw_handoff(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "withdrawal.handoff"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         if not await _claim_operation_in_tx(
@@ -9170,7 +9508,7 @@ async def api_admin_withdraw_handoff(request):
 
 async def api_admin_withdraw_decide(request):
     """Идемпотентно завершает внешний перевод или делает ровно один возврат."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "withdrawal.decide")
     if err is not None:
         return err
     body = await _body(request)
@@ -9204,7 +9542,7 @@ async def api_admin_withdraw_decide(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "withdrawal.decide"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         if not await _claim_operation_in_tx(
@@ -9511,13 +9849,305 @@ async def _admin_demotion_block_in_tx(db, user_id):
     return ""
 
 
-async def api_admin_set_role(request):
-    """Immediate ordinary roles; admin elevation/demotion uses maker-checker."""
-    admin_id, err = await _require_admin(request)
+async def _active_access_grant_in_tx(db, user_id, preset, origin="manual"):
+    return await (await db.execute(
+        "SELECT * FROM staff_access_grants WHERE user_id=? AND preset=? "
+        "AND origin=? AND status='active'",
+        (int(user_id), preset, origin),
+    )).fetchone()
+
+
+async def _access_generation_in_tx(db, user_id, preset, origin="manual"):
+    return int((await (await db.execute(
+        "SELECT COALESCE(MAX(generation),0) FROM staff_access_grants "
+        "WHERE user_id=? AND preset=? AND origin=?",
+        (int(user_id), preset, origin),
+    )).fetchone())[0])
+
+
+async def _api_admin_access_request(owner_id, body):
+    change_action = str(body.get("change_action") or "").strip().lower()
+    target_id = _as_int(body.get("target_user_id"))
+    preset = str(body.get("preset") or "").strip().lower()
+    expected_generation = _as_int(body.get("expected_generation"))
+    reason = " ".join(str(body.get("reason") or "").split())[:300]
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if (
+        change_action not in {"assign", "revoke"} or target_id is None
+        or target_id <= 0 or preset not in CAPABILITY_PRESETS
+        or expected_generation is None or expected_generation < 0
+        or len(reason) < 5 or not operation_id
+    ):
+        return _json({"error": "access_request"}, status=400)
+    if int(target_id) == int(owner_id):
+        return _json({"error": "self_access_change"}, status=403)
+    canonical = {
+        "change_action": change_action, "target_user_id": int(target_id),
+        "preset": preset, "expected_generation": int(expected_generation),
+        "reason": reason, "requested_by": int(owner_id),
+    }
+    request_hash = _request_fingerprint(canonical)
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, owner_id, "access.request"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        replay = await (await db.execute(
+            "SELECT * FROM staff_access_changes WHERE request_operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if replay:
+            await db.rollback()
+            if replay["request_hash"] != request_hash:
+                return _json({"error": "operation_conflict"}, status=409)
+            return _json({
+                "ok": True, "queued": True, "change_id": replay["id"],
+                "status": replay["status"], "idempotent": True,
+            })
+        if not await _claim_operation_in_tx(
+            db, operation_id, "staff_access_request", request_hash, owner_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        member = await (await db.execute(
+            "SELECT status,role FROM members WHERE user_id=?", (target_id,),
+        )).fetchone()
+        if not member or member["status"] != "approved" or member["role"] not in ROLE_TITLES:
+            await db.rollback()
+            return _json({"error": "target_not_approved"}, status=409)
+        generation = await _access_generation_in_tx(db, target_id, preset)
+        active = await _active_access_grant_in_tx(db, target_id, preset)
+        if generation != int(expected_generation):
+            await db.rollback()
+            return _json({"error": "access_generation_conflict", "generation": generation}, status=409)
+        if (change_action == "assign" and active) or (change_action == "revoke" and not active):
+            await db.rollback()
+            return _json({
+                "error": "access_already_assigned" if active else "access_not_assigned"
+            }, status=409)
+        checkers = await _active_capability_holder_ids_in_tx(db, "access.decide")
+        checkers.difference_update({int(owner_id), int(target_id)})
+        if not checkers:
+            await db.rollback()
+            return _json({"error": "no_independent_checker"}, status=409)
+        try:
+            cursor = await db.execute(
+                "INSERT INTO staff_access_changes "
+                "(target_user_id,change_action,preset,expected_generation,reason,status,"
+                "requested_by,requested_at,request_operation_id,request_hash) "
+                "VALUES (?,?,?,?,?,'pending',?,?,?,?)",
+                (target_id, change_action, preset, expected_generation, reason,
+                 owner_id, now_iso(), operation_id, request_hash),
+            )
+        except sqlite3.IntegrityError:
+            await db.rollback()
+            return _json({"error": "access_change_pending"}, status=409)
+        change_id = int(cursor.lastrowid)
+        await _enqueue_capability_holders_in_tx(
+            db, f"staff_access:{change_id}:requested",
+            f"Нужна проверка изменения доступа #{change_id}: {change_action} {preset}.",
+            "access.view",
+        )
+        await db.commit()
+    return _json({"ok": True, "queued": True, "change_id": change_id,
+                  "status": "pending", "idempotent": False})
+
+
+async def _api_admin_access_decide(owner_id, body):
+    change_id = _as_int(body.get("change_id"))
+    decision = str(body.get("decision") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if change_id is None or decision not in {"approve", "reject"} or len(note) < 3 or not operation_id:
+        return _json({"error": "access_decision"}, status=400)
+    decision_hash = _request_fingerprint({
+        "change_id": int(change_id), "decision": decision,
+        "note": note, "decided_by": int(owner_id),
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, owner_id, "access.decide"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        replay = await (await db.execute(
+            "SELECT * FROM staff_access_changes WHERE decision_operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if replay:
+            await db.rollback()
+            if replay["decision_hash"] != decision_hash:
+                return _json({"error": "operation_conflict"}, status=409)
+            return _json({**json.loads(replay["result_json"] or "{}"), "idempotent": True})
+        if not await _claim_operation_in_tx(
+            db, operation_id, "staff_access_decision", decision_hash, owner_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        change = await (await db.execute(
+            "SELECT * FROM staff_access_changes WHERE id=?", (change_id,),
+        )).fetchone()
+        if not change:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if change["status"] != "pending":
+            await db.rollback()
+            return _json({"error": "already_decided"}, status=409)
+        target_id = int(change["target_user_id"])
+        if int(change["requested_by"]) == int(owner_id) or target_id == int(owner_id):
+            await db.rollback()
+            return _json({"error": "two_person_rule"}, status=403)
+        if decision == "approve" and not await _has_capability_in_tx(
+            db, change["requested_by"], "access.request",
+        ):
+            await db.rollback()
+            return _json({"error": "maker_revoked"}, status=409)
+        preset = str(change["preset"])
+        active = await _active_access_grant_in_tx(db, target_id, preset)
+        generation = await _access_generation_in_tx(db, target_id, preset)
+        if decision == "approve" and generation != int(change["expected_generation"]):
+            await db.rollback()
+            return _json({"error": "access_generation_conflict"}, status=409)
+        if decision == "approve" and (
+            (change["change_action"] == "assign" and active)
+            or (change["change_action"] == "revoke" and not active)
+        ):
+            await db.rollback()
+            return _json({"error": "access_state_changed"}, status=409)
+        if decision == "approve" and change["change_action"] == "revoke" and preset == "owner":
+            owners = await _active_capability_holder_ids_in_tx(db, "access.view")
+            other = await (await db.execute(
+                "SELECT 1 FROM staff_access_grants WHERE user_id=? AND preset='owner' "
+                "AND status='active' AND id<>? LIMIT 1", (target_id, active["id"]),
+            )).fetchone()
+            if len(owners if other else owners - {target_id}) < 2:
+                await db.rollback()
+                return _json({"error": "minimum_owners"}, status=409)
+        before = await _effective_staff_access_in_tx(db, target_id)
+        status_value = "applied" if decision == "approve" else "rejected"
+        if decision == "approve" and change["change_action"] == "assign":
+            await _insert_access_grant_snapshot_in_tx(
+                db, target_id, preset, "manual", operation_id=operation_id,
+                granted_by=change["requested_by"], approved_by=owner_id,
+            )
+            if preset == "owner":
+                await db.execute(
+                    "INSERT INTO admin_authorities (user_id,origin,granted_operation_id,granted_at) "
+                    "VALUES (?,'manual',?,?) ON CONFLICT(user_id,origin) DO UPDATE SET "
+                    "granted_operation_id=excluded.granted_operation_id,granted_at=excluded.granted_at",
+                    (target_id, operation_id, now_iso()),
+                )
+                await db.execute("UPDATE members SET role='admin' WHERE user_id=?", (target_id,))
+        elif decision == "approve":
+            await db.execute(
+                "UPDATE staff_access_grants SET status='revoked',revoked_by=?,"
+                "revoke_operation_id=?,revoked_at=? WHERE id=? AND status='active'",
+                (owner_id, operation_id, now_iso(), active["id"]),
+            )
+            if preset == "owner":
+                await db.execute(
+                    "DELETE FROM admin_authorities WHERE user_id=? AND origin='manual'", (target_id,),
+                )
+                still_owner = await (await db.execute(
+                    "SELECT 1 FROM staff_access_grants WHERE user_id=? AND preset='owner' "
+                    "AND status='active' LIMIT 1", (target_id,),
+                )).fetchone()
+                if not still_owner:
+                    await db.execute(
+                        "UPDATE members SET role='employee' WHERE user_id=? AND role='admin'", (target_id,),
+                    )
+        after = await _effective_staff_access_in_tx(db, target_id)
+        result = {"ok": True, "change_id": int(change_id), "status": status_value,
+                  "target_user_id": target_id, "preset": preset,
+                  "change_action": change["change_action"], "idempotent": False}
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        await db.execute(
+            "UPDATE staff_access_changes SET status=?,decided_by=?,decided_at=?,"
+            "decision_note=?,decision_operation_id=?,decision_hash=?,result_json=? "
+            "WHERE id=? AND status='pending'",
+            (status_value, owner_id, now_iso(), note, operation_id,
+             decision_hash, result_json, change_id),
+        )
+        await db.execute(
+            "INSERT INTO staff_access_events (target_user_id,preset,event_type,actor_id,"
+            "operation_id,policy_version,before_json,after_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (target_id, preset, f"{change['change_action']}_{status_value}", owner_id,
+             operation_id, RBAC_POLICY_VERSION,
+             json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+             json.dumps(after, ensure_ascii=False, sort_keys=True, separators=(",", ":")), now_iso()),
+        )
+        await _enqueue_outbox_in_tx(
+            db, f"staff_access:{change_id}:target", "direct",
+            {"text": f"Изменение доступа {preset}: {status_value}."}, recipient_id=target_id,
+        )
+        await _enqueue_capability_holders_in_tx(
+            db, f"staff_access:{change_id}:resolved",
+            f"Изменение доступа #{change_id}: {status_value}.", "access.view",
+        )
+        await db.commit()
+    return _json(result)
+
+
+async def api_admin_access_get(request):
+    owner_id, err = await _require_capability(request, "access.view")
     if err is not None:
         return err
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        grants = await (await db.execute(
+            "SELECT * FROM staff_access_grants WHERE status='active' "
+            "ORDER BY user_id,preset,origin"
+        )).fetchall()
+        changes = await (await db.execute(
+            "SELECT * FROM staff_access_changes "
+            "ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,id DESC LIMIT 200"
+        )).fetchall()
+        result_grants = []
+        for grant in grants:
+            caps = await (await db.execute(
+                "SELECT capability FROM staff_grant_capabilities "
+                "WHERE grant_id=? ORDER BY capability", (grant["id"],),
+            )).fetchall()
+            result_grants.append({
+                **dict(grant), "capabilities": [str(row[0]) for row in caps],
+            })
+    return _json({
+        "ok": True, "viewer_id": int(owner_id),
+        "policy_version": RBAC_POLICY_VERSION,
+        "presets": {key: sorted(value) for key, value in CAPABILITY_PRESETS.items()},
+        "grants": result_grants, "changes": [dict(row) for row in changes],
+    })
+
+
+async def api_admin_access_post(request):
+    body = await _body(request)
+    action = str(body.get("action") or "").strip().lower()
+    if action not in {"request", "decide"}:
+        return _json({"error": "access_action"}, status=400)
+    capability = "access.request" if action == "request" else "access.decide"
+    owner_id, err = await _require_capability(request, capability)
+    if err is not None:
+        return err
+    if action == "request":
+        return await _api_admin_access_request(owner_id, body)
+    return await _api_admin_access_decide(owner_id, body)
+
+
+async def api_admin_set_role(request):
+    """Immediate ordinary roles; admin elevation/demotion uses maker-checker."""
     body = await _body(request)
     action = str(body.get("action") or "request").strip().lower()
+    requested_role = str(body.get("role") or "")
+    capability = (
+        "access.decide" if action == "decide" else
+        "access.request" if requested_role == "admin" else
+        "member.role.manage_basic"
+    )
+    admin_id, err = await _require_capability(request, capability)
+    if err is not None:
+        return err
     if action == "decide":
         change_id = _as_int(body.get("change_id"))
         decision = str(body.get("decision") or "").strip().lower()
@@ -9536,7 +10166,7 @@ async def api_admin_set_role(request):
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
-            if not await _admin_active_in_tx(db, admin_id):
+            if not await _has_capability_in_tx(db, admin_id, "access.decide"):
                 await db.rollback()
                 return _json({"error": "admin_revoked"}, status=403)
             if not await _claim_operation_in_tx(
@@ -9574,8 +10204,8 @@ async def api_admin_set_role(request):
             if change["status"] != "pending":
                 await db.rollback()
                 return _json({"error": "already_decided"}, status=409)
-            if decision == "approve" and not await _admin_active_in_tx(
-                db, change["requested_by"],
+            if decision == "approve" and not await _has_capability_in_tx(
+                db, change["requested_by"], "access.request",
             ):
                 await db.rollback()
                 return _json({"error": "maker_revoked"}, status=409)
@@ -9619,7 +10249,18 @@ async def api_admin_set_role(request):
                         "granted_at=excluded.granted_at",
                         (change["user_id"], operation_id, now_iso()),
                     )
+                    await _insert_access_grant_snapshot_in_tx(
+                        db, change["user_id"], "owner", "manual",
+                        operation_id=operation_id,
+                        granted_by=change["requested_by"], approved_by=admin_id,
+                    )
                 elif change["from_role"] == "admin":
+                    await db.execute(
+                        "UPDATE staff_access_grants SET status='revoked',revoked_by=?,"
+                        "revoke_operation_id=?,revoked_at=? WHERE user_id=? "
+                        "AND preset='owner' AND origin='manual' AND status='active'",
+                        (admin_id, operation_id, now_iso(), change["user_id"]),
+                    )
                     await db.execute(
                         "DELETE FROM admin_authorities WHERE user_id=? AND origin='manual'",
                         (change["user_id"],),
@@ -9681,12 +10322,16 @@ async def api_admin_set_role(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
-            await db.rollback()
-            return _json({"error": "admin_revoked"}, status=403)
         row = await (await db.execute(
             "SELECT role, status, full_name FROM members WHERE user_id=?",
             (uid,))).fetchone()
+        required_role_capability = (
+            "access.request" if row and (row["role"] == "admin" or role == "admin")
+            else "member.role.manage_basic"
+        )
+        if not await _has_capability_in_tx(db, admin_id, required_role_capability):
+            await db.rollback()
+            return _json({"error": "admin_revoked"}, status=403)
         if not row:
             await db.rollback()
             return _json({"error": "not_found"}, status=404)
@@ -9761,14 +10406,10 @@ async def api_admin_set_role(request):
             if collision:
                 await db.rollback()
                 return _json({"error": "operation_conflict"}, status=409)
-            active_admins = {
-                int(item[0]) for item in await (await db.execute(
-                    "SELECT m.user_id FROM members m "
-                    "WHERE m.role='admin' AND m.status='approved' AND EXISTS "
-                    "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=m.user_id)"
-                )).fetchall()
-            }
-            eligible_checkers = active_admins - {int(admin_id), int(uid)}
+            eligible_checkers = await _active_capability_holder_ids_in_tx(
+                db, "access.decide",
+            )
+            eligible_checkers.difference_update({int(admin_id), int(uid)})
             if not eligible_checkers:
                 await db.rollback()
                 return _json({
@@ -9827,7 +10468,7 @@ async def api_admin_set_role(request):
 
 async def api_admin_member_tags(request):
     """Сохраняет короткие теги, по которым ответственный ищет людей."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "member.tags.manage")
     if err is not None:
         return err
     body = await _body(request)
@@ -9838,7 +10479,7 @@ async def api_admin_member_tags(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "member.tags.manage"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         cur = await db.execute(
@@ -9904,7 +10545,7 @@ async def api_awards(request):
 
 async def api_admin_award_save(request):
     """Создать награду или отредактировать существующую."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "award.catalog.manage")
     if err is not None:
         return err
     body = await _body(request)
@@ -9933,7 +10574,7 @@ async def api_admin_award_save(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "award.catalog.manage"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         if award_id:
@@ -9960,7 +10601,7 @@ async def api_admin_award_save(request):
 
 async def api_admin_award_grant(request):
     """Выдаёт награду участнику и сразу начисляет её бонус."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "award.grant")
     if err is not None:
         return err
     body = await _body(request)
@@ -9988,7 +10629,7 @@ async def api_admin_award_grant(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "award.grant"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -10141,7 +10782,7 @@ async def api_admin_award_grant(request):
 
 async def api_admin_award_revoke(request):
     """Снимает выданную награду и забирает её бонус обратно."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "award.revoke")
     if err is not None:
         return err
     body = await _body(request)
@@ -10158,7 +10799,7 @@ async def api_admin_award_revoke(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "award.revoke"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         registered = await (await db.execute(
@@ -10259,7 +10900,7 @@ async def api_admin_award_revoke(request):
 
 async def api_admin_telegram_inbox_redrive(request):
     """Return one dead Telegram update to the durable queue with an audit trail."""
-    admin_id, err = await _require_admin(request)
+    admin_id, err = await _require_capability(request, "telegram.inbox.redrive")
     if err is not None:
         return err
     body = await _body(request)
@@ -10278,7 +10919,7 @@ async def api_admin_telegram_inbox_redrive(request):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _admin_active_in_tx(db, admin_id):
+        if not await _has_capability_in_tx(db, admin_id, "telegram.inbox.redrive"):
             await db.rollback()
             return _json({"error": "admin_revoked"}, status=403)
         by_operation = await (await db.execute(
@@ -10837,6 +11478,8 @@ async def start_api_server():
         app.router.add_get("/api/wallet", api_wallet)
         app.router.add_post("/api/withdraw/request", api_withdraw_request)
         app.router.add_post("/api/admin/login", api_admin_login)
+        app.router.add_get("/api/admin/access", api_admin_access_get)
+        app.router.add_post("/api/admin/access", api_admin_access_post)
         app.router.add_get("/api/admin/overview", api_admin_overview)
         app.router.add_get("/api/admin/queue", api_admin_queue)
         app.router.add_get("/api/admin/members", api_admin_members)
@@ -11553,11 +12196,12 @@ async def _run_publication_cleanup(operation_id):
                 (final_status, now_iso(), operation_id),
             )
             if final_status == "cleanup_failed":
-                await _enqueue_admins_in_tx(
+                await _enqueue_capability_holders_in_tx(
                     db, f"publication-cleanup-failed:{operation_id}",
                     "⚠️ Не удалось удалить старое сообщение после 10 попыток. "
                     "Новая публикация сохранена; старое сообщение нужно удалить вручную. "
                     f"Операция: {operation_id}",
+                    "telegram.publication.manage",
                 )
         await db.commit()
 
@@ -11599,7 +12243,9 @@ def _wants_repost(message):
 
 async def _publish(message, parts, topic, kind):
     """Публикует пост в подтему. Один раз — повтор только по «заново»."""
-    if not await is_admin(message.from_user.id):
+    if not await _has_command_capability(
+        message.from_user.id, "telegram.publication.manage",
+    ):
         return
     target = message.chat.id
     if message.chat.type == "private":
@@ -11777,10 +12423,11 @@ async def handle_chat_join_request(request: ChatJoinRequest):
         )).fetchone()
         status = member["status"] if member else "pending"
         if source != "bot_invite":
-            await _enqueue_admins_in_tx(
+            await _enqueue_capability_holders_in_tx(
                 db, f"join_request:{request_key}:unverified",
                 "⚠️ Получена заявка в сообщество не через управляемую ссылку. "
                 "Автоматическое решение заблокировано; проверь настройки входа.",
+                "admission.view",
             )
         elif status == "approved":
             await _queue_join_request_decision_in_tx(db, request_key, "approve")
@@ -11806,10 +12453,11 @@ async def handle_chat_join_request(request: ChatJoinRequest):
                     },
                     recipient_id=user_chat_id,
                 )
-            await _enqueue_admins_in_tx(
+            await _enqueue_capability_holders_in_tx(
                 db, f"join_request:{request_key}:admins",
                 "Новая заявка на вступление в сообщество. "
                 + ("Анкета уже ожидает проверки." if applied else "Анкета ещё не заполнена."),
+                "admission.view",
             )
         await _track_event_in_tx(
             db, "group_join_requested", "group", user_id=int(user.id),
@@ -11970,7 +12618,9 @@ async def show_profile(message: Message):
 @dp.message(F.text.regexp(r"(?i)^/(подтема|topic|id)"))
 async def show_topic_id(message: Message):
     """Показывает настоящие id чата и подтемы — для настройки."""
-    if not await is_admin(message.from_user.id):
+    if not await _has_command_capability(
+        message.from_user.id, "operations.health.view",
+    ):
         return
     thread = getattr(message, "message_thread_id", None)
     known = {
@@ -12070,7 +12720,9 @@ async def show_commands(message: Message):
     nav = _nav_line()
     if nav:
         text += "\n\n" + nav
-    if await is_admin(message.from_user.id):
+    if await _has_command_capability(
+        message.from_user.id, "telegram.publication.manage",
+    ):
         text += (
             "\n\n🛡 <b>Для ответственных</b>\n"
             "<code>/инструкция</code> — опубликовать инструкцию в «Работу»\n"

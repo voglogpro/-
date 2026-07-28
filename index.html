@@ -757,10 +757,11 @@ select.tinput{appearance:none;background-image:
   <!-- ═══════════ МОДЕРАЦИЯ ═══════════ -->
   <div id="tab-admin" class="page tabview hidden">
     <div class="segwrap"><div class="seg scroll" role="group" aria-label="Разделы скаута">
-      <button data-asub="adSubQueue" class="on" aria-pressed="true">Сводка</button>
-      <button data-asub="adSubCreate" aria-pressed="false">Задания</button>
-      <button data-asub="adSubTeam" aria-pressed="false">Люди</button>
-      <button data-asub="adSubAwards" aria-pressed="false">Бонусы и выплаты</button>
+      <button data-asub="adSubQueue" data-staff-section="queue" class="on" aria-pressed="true">Сводка</button>
+      <button data-asub="adSubCreate" data-staff-section="create" aria-pressed="false">Задания</button>
+      <button data-asub="adSubTeam" data-staff-section="team" aria-pressed="false">Люди</button>
+      <button data-asub="adSubAwards" data-staff-section="awards" aria-pressed="false">Бонусы и выплаты</button>
+      <button data-asub="adSubAccess" data-staff-section="access" aria-pressed="false">Доступ</button>
     </div></div>
 
     <div id="adSubQueue" style="display:flex;flex-direction:column;gap:12px">
@@ -768,31 +769,31 @@ select.tinput{appearance:none;background-image:
         <div class="section-title"><div><div class="eyebrow"><b></b>Режим скаута</div>
           <h2>Требует внимания</h2></div><span class="role-switch">Бибибайк</span></div>
         <div class="statgrid" id="adStats" aria-live="polite">
-          <div class="stat"><b id="adStatPending">—</b><span>новые заявки</span></div>
-          <div class="stat"><b id="adStatReview">—</b><span>отчёты на проверке</span></div>
-          <div class="stat"><b id="adStatOpen">—</b><span>активные задания</span></div>
-          <div class="stat"><b id="adStatWithdraw">—</b><span>переводы ожидают</span></div>
+          <div class="stat" data-cap-any="application.queue.view,application.review"><b id="adStatPending">—</b><span>новые заявки</span></div>
+          <div class="stat" data-cap-any="task.review.queue,task.review,task.dispute.request,task.dispute.decide"><b id="adStatReview">—</b><span>отчёты на проверке</span></div>
+          <div class="stat" data-cap-any="task.view,task.create,task.cancel,task.delivery.view,task.template.manage"><b id="adStatOpen">—</b><span>активные задания</span></div>
+          <div class="stat" data-cap-any="withdrawal.queue.view,withdrawal.account.reveal,withdrawal.handoff,withdrawal.decide"><b id="adStatWithdraw">—</b><span>переводы ожидают</span></div>
         </div>
       </div>
-      <div class="card"><div class="eyebrow"><b></b>Заявки в команду<span class="cnt" id="adPendingCnt"></span></div>
+      <div class="card" data-cap-any="application.queue.view,application.review"><div class="eyebrow"><b></b>Заявки в команду<span class="cnt" id="adPendingCnt"></span></div>
         <div class="field"><label for="adPendingSearch">Быстрый поиск заявок</label><input class="tinput" id="adPendingSearch" placeholder="Имя, город или комментарий"></div>
         <div id="adPending" aria-live="polite"><div class="empty">Загружаю…</div></div>
         <button class="mini hidden" id="adPendingMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button></div>
-      <div class="card"><div class="eyebrow"><b></b>Вступление в сообщество<span class="cnt" id="adJoinCnt"></span></div>
+      <div class="card" data-cap-any="admission.view,admission.retry"><div class="eyebrow"><b></b>Вступление в сообщество<span class="cnt" id="adJoinCnt"></span></div>
         <p class="sub" style="margin-bottom:12px">Здесь отдельно видны анкета, решение Telegram и фактическое вступление. Ошибку доставки можно повторить без двойного эффекта.</p>
         <div id="adJoinRequests" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Отклонённые заявки<span class="cnt" id="adRejectedCnt"></span></div>
+      <div class="card" data-cap-any="application.queue.view,application.review"><div class="eyebrow"><b></b>Отклонённые заявки<span class="cnt" id="adRejectedCnt"></span></div>
         <div id="adRejected" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Смена города<span class="cnt" id="adCityCnt"></span></div>
+      <div class="card" data-cap-any="member.city.review"><div class="eyebrow"><b></b>Смена города<span class="cnt" id="adCityCnt"></span></div>
         <p class="sub" style="margin-bottom:12px">Проверь запрос: до подтверждения участник продолжает видеть задания прежнего города.</p>
         <div id="adCityChanges" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card lit"><div class="eyebrow"><b></b>На проверке<span class="cnt" id="adReviewCnt"></span></div>
+      <div class="card lit" data-cap-any="task.review.queue,task.review,task.dispute.request,task.dispute.decide"><div class="eyebrow"><b></b>На проверке<span class="cnt" id="adReviewCnt"></span></div>
         <div class="field"><label for="adReviewSearch">Быстрый поиск отчётов</label><input class="tinput" id="adReviewSearch" placeholder="Задание, город или исполнитель"></div>
         <div id="adReview" aria-live="polite"><div class="empty">Загружаю…</div></div>
         <button class="mini hidden" id="adReviewMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button></div>
-      <div class="card"><div class="eyebrow"><b></b>Активные задания<span class="cnt" id="adOpenCnt"></span></div>
+      <div class="card" data-cap-any="task.view,task.create,task.cancel,task.delivery.view,task.template.manage"><div class="eyebrow"><b></b>Активные задания<span class="cnt" id="adOpenCnt"></span></div>
         <div id="adOpen" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Недавние решения<span class="cnt" id="adDecisionCnt"></span></div>
+      <div class="card" data-cap-any="task.review.queue,task.review,task.dispute.request,task.dispute.decide"><div class="eyebrow"><b></b>Недавние решения<span class="cnt" id="adDecisionCnt"></span></div>
         <p class="sub" style="margin-bottom:12px">Ошибочную выплату сначала оспаривает один ответственный, затем независимо подтверждает второй.</p>
         <div id="adDecisions" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
     </div>
@@ -877,32 +878,32 @@ select.tinput{appearance:none;background-image:
       <div class="field-error" id="ntError" role="alert"></div>
       <div class="wizard-actions">
         <button class="mini hidden" id="ntBack" type="button">Назад</button>
-        <button class="btn btn-volt" id="ntCreate" type="button">Продолжить</button>
+        <button class="btn btn-volt" id="ntCreate" data-cap-any="task.create" type="button">Продолжить</button>
       </div>
     </div>
 
     <div id="adSubAwards" class="hidden" style="display:flex;flex-direction:column;gap:12px">
-      <div class="card warm">
+      <div class="card warm" data-cap-any="award.view,award.grant,award.catalog.manage">
         <div class="eyebrow"><b></b>Бонусы и награды<span class="cnt" id="awCnt"></span></div>
         <p class="sub" style="margin-bottom:13px">Награда — это бонус за поступок,
           который не оформить заданием: вышел ночью, вытащил байк, помог новичку.
           Выдаёшь вручную, бонус начисляется сразу.</p>
-        <button class="btn btn-amber" id="awNew">＋ Новая награда</button>
+        <button class="btn btn-amber" id="awNew" data-cap-any="award.catalog.manage">＋ Новая награда</button>
       </div>
-      <div class="card"><div class="eyebrow"><b></b>Награды</div>
+      <div class="card" data-cap-any="award.view,award.grant,award.catalog.manage"><div class="eyebrow"><b></b>Награды</div>
         <div id="awList" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Последние выдачи</div>
+      <div class="card" data-cap-any="award.view,award.grant,award.revoke"><div class="eyebrow"><b></b>Последние выдачи</div>
         <div id="awGranted" aria-live="polite"><div class="empty">Пока никого не награждали.</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Ручные начисления и исправления</div>
+      <div class="card" data-cap-any="bonus.grant.small,bonus.reversal.request,bonus.reversal.decide"><div class="eyebrow"><b></b>Ручные начисления и исправления</div>
         <p class="sub" style="margin-bottom:12px">Ошибочное начисление не списывается сразу: один ответственный создаёт запрос, второй независимо подтверждает полное сторно.</p>
         <div id="manualGrantHistory" aria-live="polite"><div class="empty">Ручных начислений пока нет.</div></div></div>
-      <div class="card"><div class="eyebrow"><b></b>Заявки на перевод</div>
+      <div class="card" data-cap-any="withdrawal.queue.view,withdrawal.account.reveal,withdrawal.handoff,withdrawal.decide"><div class="eyebrow"><b></b>Заявки на перевод</div>
         <div id="adWithdrawals" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
     </div>
 
     <div id="adSubTeam" class="card hidden">
       <div class="eyebrow"><b></b>Люди<span class="cnt" id="adTeamCnt"></span></div>
-      <div class="card lit" style="margin-bottom:12px">
+      <div class="card lit" data-cap-any="access.view" style="margin-bottom:12px">
         <div class="eyebrow"><b></b>Изменения роли ответственного<span class="cnt" id="adRoleChangeCnt"></span></div>
         <p class="sub" style="margin-bottom:10px">Выдачу или снятие доступа всегда подтверждает второй ответственный.</p>
         <div id="adRoleChanges" aria-live="polite"><div class="empty">Ожидающих запросов нет.</div></div>
@@ -911,16 +912,47 @@ select.tinput{appearance:none;background-image:
         <div class="field"><input class="tinput" id="adTeamSearch"
           placeholder="Имя, @username, город, ID или #тег" aria-label="Поиск людей" autocomplete="off"></div>
         <div class="field"><select class="tinput" id="adTeamSort" aria-label="Сортировка пользователей">
-          <option value="done">По делам</option>
+          <option value="done" data-cap-any="member.task_summary.view">По делам</option>
           <option value="name">По имени</option>
           <option value="city">По городу</option>
-          <option value="bonus">По бонусам</option>
+          <option value="bonus" data-cap-any="member.financial_summary.view">По бонусам</option>
         </select></div>
       </div>
       <div class="tagbar" id="adTagFilters"></div>
       <div class="search-meta" id="adTeamMeta" aria-live="polite">Поиск работает по всей команде</div>
       <div id="adTeam" aria-live="polite"><div class="empty">Загружаю…</div></div>
       <button class="mini hidden" id="adTeamMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button>
+    </div>
+
+    <div id="adSubAccess" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card warm">
+        <div class="eyebrow"><b></b>Доступ сотрудников</div>
+        <h2>Роли без общего пароля</h2>
+        <p class="sub">Приложение показывает права, выданные сервером. Изменение создаёт один ответственный, а подтверждает другой.</p>
+      </div>
+      <div class="card" id="staffAccessRequestCard" data-cap-any="access.request">
+        <div class="eyebrow"><b></b>Запросить изменение</div>
+        <div class="field"><label for="staffAccessTarget">Сотрудник</label><select class="tinput" id="staffAccessTarget"></select></div>
+        <div class="two">
+          <div class="field"><label for="staffAccessAction">Действие</label><select class="tinput" id="staffAccessAction"><option value="assign">Выдать роль</option><option value="revoke">Снять роль</option></select></div>
+          <div class="field"><label for="staffAccessPreset">Роль</label><select class="tinput" id="staffAccessPreset"></select></div>
+        </div>
+        <div class="field"><label for="staffAccessReason">Причина</label><textarea class="tinput" id="staffAccessReason" rows="3" placeholder="Зачем сотруднику нужен этот доступ"></textarea></div>
+        <div class="hint" id="staffAccessGeneration">Версия доступа: —</div>
+        <button class="btn btn-volt" id="staffAccessRequest" type="button">Создать запрос</button>
+      </div>
+      <div class="card">
+        <div class="eyebrow"><b></b>Ожидают второго ответственного<span class="cnt" id="staffAccessPendingCnt"></span></div>
+        <div id="staffAccessPending" aria-live="polite"><div class="empty">Загружаю…</div></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow"><b></b>Текущие роли</div>
+        <div id="staffAccessGrants" aria-live="polite"><div class="empty">Загружаю…</div></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow"><b></b>История изменений</div>
+        <div id="staffAccessHistory" aria-live="polite"><div class="empty">Загружаю…</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1089,15 +1121,15 @@ select.tinput{appearance:none;background-image:
   <div class="mshead">
     <span class="mava" id="msAva">🌱</span>
     <span class="mtx"><b id="msName">—</b><small id="msMeta">—</small></span>
-    <span class="mbal" id="msBal">0⚡</span>
+    <span class="mbal" id="msBal" data-cap-any="member.financial_summary.view">0⚡</span>
   </div>
   <p class="lead" id="msInfo"></p>
-  <div class="meta" id="msTags" style="margin:0 0 14px"></div>
+  <div class="meta" id="msTags" data-cap-any="member.tags.view,member.tags.manage" style="margin:0 0 14px"></div>
   <div class="mgrid">
-    <button class="mini" id="msPlus">＋ Поблагодарить</button>
-    <button class="mini" id="msAward">🏅 Награда</button>
-    <button class="mini" id="msRole">🛡️ Роль</button>
-    <button class="mini" id="msEditTags">🏷️ Теги</button>
+    <button class="mini" id="msPlus" data-cap-any="bonus.grant.small">＋ Поблагодарить</button>
+    <button class="mini" id="msAward" data-cap-any="award.grant">🏅 Награда</button>
+    <button class="mini" id="msRole" data-cap-any="member.role.manage_basic,access.request">🛡️ Роль</button>
+    <button class="mini" id="msEditTags" data-cap-any="member.tags.manage">🏷️ Теги</button>
   </div>
   <div class="acts"><button class="mini" id="msClose" style="flex:1">Закрыть</button></div>
 </div></div>
@@ -1163,6 +1195,61 @@ try{
 }catch(e){}
 
 let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
+let STAFF_CAPABILITIES = new Set(), STAFF_PRESETS = [], STAFF_ACCESS_CONFIGURED = false;
+const STAFF_SECTIONS = {
+  queue: [
+    'application.queue.view','application.review','admission.view','admission.retry',
+    'task.view','task.create','task.cancel','task.delivery.view','task.template.manage',
+    'task.review.queue','task.review','task.dispute.request','task.dispute.decide','member.city.review'
+  ],
+  create: ['task.view','task.create','task.cancel','task.delivery.view','task.template.manage'],
+  team: [
+    'member.search','member.tags.view','member.tags.manage','member.city.review',
+    'member.role.manage_basic','member.task_summary.view','member.financial_summary.view'
+  ],
+  awards: [
+    'bonus.grant.small','bonus.reversal.request','bonus.reversal.decide',
+    'award.view','award.grant','award.revoke','award.catalog.manage',
+    'withdrawal.queue.view','withdrawal.account.reveal','withdrawal.handoff','withdrawal.decide'
+  ],
+  access: ['access.view']
+};
+const LEGACY_FIXTURE_CAPABILITIES = Array.from(new Set(Object.values(STAFF_SECTIONS).flat().concat([
+  'telegram.publication.manage','telegram.inbox.redrive','operations.health.view','access.request','access.decide'
+])));
+function configureStaffAccess(){
+  const access=STATE&&Object.prototype.hasOwnProperty.call(STATE,'staff_access')?STATE.staff_access:null;
+  STAFF_ACCESS_CONFIGURED=!!access;
+  STAFF_PRESETS=access&&Array.isArray(access.presets)?access.presets:[];
+  if(access){
+    STAFF_CAPABILITIES=new Set(Array.isArray(access.capabilities)?access.capabilities:[]);
+    return;
+  }
+  const fixture=!!(STATE&&(
+    STATE.build_version==='browser-test'||
+    (typeof STATE.environment==='string'&&STATE.environment!=='production')
+  ));
+  STAFF_CAPABILITIES=new Set(fixture&&STATE.is_admin?LEGACY_FIXTURE_CAPABILITIES:[]);
+}
+const hasCap=cap=>STAFF_CAPABILITIES.has(cap);
+const hasAny=caps=>(caps||[]).some(hasCap);
+const hasStaffShell=()=>STAFF_CAPABILITIES.size>0;
+function sectionAllowed(section){ return hasAny(STAFF_SECTIONS[section]||[]); }
+function applyStaffVisibility(){
+  document.querySelectorAll('[data-cap-any]').forEach(el=>{
+    const allowed=hasAny((el.dataset.capAny||'').split(',').filter(Boolean));
+    el.classList.toggle('hidden',!allowed);
+    el.setAttribute('aria-hidden',allowed?'false':'true');
+  });
+  document.querySelectorAll('[data-staff-section]').forEach(el=>{
+    const allowed=sectionAllowed(el.dataset.staffSection);
+    el.classList.toggle('hidden',!allowed);
+    el.setAttribute('aria-hidden',allowed?'false':'true');
+  });
+  const visible=Array.from(document.querySelectorAll('[data-asub]')).filter(b=>!b.classList.contains('hidden'));
+  const selected=visible.find(b=>b.classList.contains('on'))||visible[0];
+  if(selected) activateAdminSubsection(selected,false);
+}
 let TEAM_TAG_FILTER = '', TEAM_REMOTE = null, TEAM_CURSOR = null, TEAM_SEARCH_TIMER = null,
     TEAM_TAG_CATALOG = [], TEAM_SEARCH_SEQUENCE = 0;
 let PENDING_ITEMS=[],PENDING_CURSOR=null,REVIEW_ITEMS=[],REVIEW_CURSOR=null,QUEUE_SEARCH_TIMER=null;
@@ -1445,19 +1532,22 @@ document.querySelectorAll('#nav .tab').forEach(btn=>{
     }
   };
 });
+function activateAdminSubsection(btn,withEffects=true){
+  if(!btn||btn.classList.contains('hidden')) return;
+  if(withEffects) buzz('tap');
+  document.querySelectorAll('[data-asub]').forEach(b=>{
+    const selected=b===btn;
+    b.classList.toggle('on',selected);
+    b.setAttribute('aria-pressed',selected?'true':'false');
+  });
+  ['adSubQueue','adSubCreate','adSubAwards','adSubTeam','adSubAccess'].forEach(
+    s=>$(s).classList.toggle('hidden',s!==btn.dataset.asub));
+  if(btn.dataset.asub==='adSubAwards'&&hasAny(['award.view','award.grant','award.catalog.manage'])) loadAwards();
+  if(btn.dataset.asub==='adSubAccess'&&hasCap('access.view')) loadAccessManagement();
+  if(withEffects) window.scrollTo(0,0);
+}
 document.querySelectorAll('[data-asub]').forEach(btn=>{
-  btn.onclick = ()=>{
-    buzz('tap');
-    document.querySelectorAll('[data-asub]').forEach(b=>{
-      const selected=b===btn;
-      b.classList.toggle('on',selected);
-      b.setAttribute('aria-pressed',selected?'true':'false');
-    });
-    ['adSubQueue','adSubCreate','adSubAwards','adSubTeam'].forEach(
-      s=>$(s).classList.toggle('hidden', s!==btn.dataset.asub));
-    if(btn.dataset.asub==='adSubAwards') loadAwards();
-    window.scrollTo(0,0);
-  };
+  btn.onclick=()=>activateAdminSubsection(btn,true);
 });
 
 /* ── состояние ─────────────────────────────────────────────── */
@@ -1494,6 +1584,7 @@ async function load(){
     renderLoadFailure(e);
     return;
   }
+  configureStaffAccess();
   const me = STATE.me;
   $('hName').textContent = me.name || 'Гость';
   $('hRole').textContent = 'БибиЗадачи · ' + roleLabel(me);
@@ -1552,13 +1643,14 @@ async function load(){
 
   renderTasksTab();
   document.querySelectorAll('.admin-only').forEach(el=>{
-    el.style.display = STATE.is_admin ? 'flex' : 'none';
+    el.style.display = hasStaffShell() ? 'flex' : 'none';
   });
-  $('nav').classList.toggle('has-admin', !!STATE.is_admin);
+  $('nav').classList.toggle('has-admin',hasStaffShell());
+  applyStaffVisibility();
 
   $('loading').classList.add('hidden');
   $('app').classList.remove('hidden');
-  const navigationReady=!!(STATE.can_work||STATE.is_admin);
+  const navigationReady=!!(STATE.can_work||hasStaffShell());
   if(!navigationReady){
     document.querySelectorAll('#nav .tab').forEach(button=>{
       const selected=button.dataset.tab==='tab-tasks';
@@ -2285,10 +2377,13 @@ function renderTeam(){
   const fullTeam = (ADMIN && ADMIN.team) || [];
   const team = TEAM_REMOTE || fullTeam;
   const query = ($('adTeamSearch').value||'').trim().toLocaleLowerCase('ru-RU').replace(/^#/,'');
-  const sort = $('adTeamSort').value;
-  const tags = TEAM_TAG_CATALOG.length
+  let sort = $('adTeamSort').value;
+  if(sort==='done'&&!hasCap('member.task_summary.view')) sort='name';
+  if(sort==='bonus'&&!hasCap('member.financial_summary.view')) sort='name';
+  const canSeeTags=hasAny(['member.tags.view','member.tags.manage']);
+  const tags = canSeeTags&&TEAM_TAG_CATALOG.length
     ? TEAM_TAG_CATALOG.map(item=>item.tag)
-    : Array.from(new Set(team.flatMap(m=>m.tags||[]))).sort((a,b)=>a.localeCompare(b,'ru'));
+    : canSeeTags?Array.from(new Set(team.flatMap(m=>m.tags||[]))).sort((a,b)=>a.localeCompare(b,'ru')):[];
   $('adTagFilters').innerHTML = tags.length
     ? '<button class="mini '+(!TEAM_TAG_FILTER?'on':'')+'" aria-pressed="'+(!TEAM_TAG_FILTER?'true':'false')+'" data-teamtag="">Все</button>'+tags.map(t=>
       '<button class="mini '+(TEAM_TAG_FILTER===t?'on':'')+'" aria-pressed="'+(TEAM_TAG_FILTER===t?'true':'false')+'" data-teamtag="'+esc(t)+'">#'+esc(t)+'</button>').join('')
@@ -2319,11 +2414,11 @@ function renderTeam(){
     '<button class="member" data-member="'+m.user_id+'">'+
     '<span class="mava">'+esc(m.trust_emoji)+'</span>'+
     '<span class="mtx"><b>'+esc(m.name||'—')+'</b>'+
-    '<small>'+roleEmoji(m.role)+' '+esc(roleTitle(m.role))+' · '+esc(m.city||'город не указан')+' · '+
-    m.done_count+' '+plural(m.done_count,'задание','задания','заданий')+'</small>'+
-    ((m.tags||[]).length?'<span class="member-tags">'+(m.tags||[]).map(t=>
+    '<small>'+roleEmoji(m.role)+' '+esc(roleTitle(m.role))+' · '+esc(m.city||'город не указан')+
+    (hasCap('member.task_summary.view')?' · '+m.done_count+' '+plural(m.done_count,'задание','задания','заданий'):'')+'</small>'+
+    (canSeeTags&&(m.tags||[]).length?'<span class="member-tags">'+(m.tags||[]).map(t=>
       '<span class="pill">#'+esc(t)+'</span>').join('')+'</span>':'')+'</span>'+
-    '<span class="mbal">'+m.bonus+'⚡</span></button>').join('')
+    (hasCap('member.financial_summary.view')?'<span class="mbal">'+m.bonus+'⚡</span>':'')+'</button>').join('')
     : '<div class="empty">'+(team.length?'Никого не найдено. Измени поиск или тег.':'В команде пока никого. Одобри первую заявку.')+'</div>';
   $('adTeam').querySelectorAll('[data-member]').forEach(b=>{
     b.onclick = ()=>openMember(Number(b.dataset.member));
@@ -2365,7 +2460,8 @@ function renderPendingQueue(items,total,next){
   PENDING_ITEMS=items; PENDING_CURSOR=next;
   $('adPendingCnt').textContent=Number(total)||'';
   $('adPending').innerHTML=items.length?items.map(p=>
-    '<div class="task"><div class="row1"><div class="tico">🙋</div><div><div class="tt">'+esc(p.full_name||'Без имени')+'</div><div class="ty">📍 '+esc(p.city||'город не указан')+(p.username?' · @'+esc(p.username):'')+'</div></div></div><div class="dt">'+esc(p.about||'Комментарий не указан')+'</div><div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить</button><button class="mini warn" data-rej="'+p.user_id+'">Отклонить</button></div></div>').join('')
+    '<div class="task"><div class="row1"><div class="tico">🙋</div><div><div class="tt">'+esc(p.full_name||'Без имени')+'</div><div class="ty">📍 '+esc(p.city||'город не указан')+(p.username?' · @'+esc(p.username):'')+'</div></div></div><div class="dt">'+esc(p.about||'Комментарий не указан')+'</div>'+
+    (hasCap('application.review')?'<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить</button><button class="mini warn" data-rej="'+p.user_id+'">Отклонить</button></div>':'')+'</div>').join('')
     :'<div class="empty">Новых заявок нет.</div>';
   $('adPendingMore').classList.toggle('hidden',!next);
 }
@@ -2373,15 +2469,15 @@ function renderReviewQueue(items,total,next){
   REVIEW_ITEMS=items; REVIEW_CURSOR=next;
   $('adReviewCnt').textContent=Number(total)||'';
   $('adReview').innerHTML=items.length?items.map(t=>{
-    const approve=t.can_approve===false
+    const approve=!hasCap('task.review')?'' : t.can_approve===false
       ? '<button class="btn sm" type="button" disabled title="'+esc(t.approval_block_reason||'Нужен другой ответственный')+'">Нужен второй ответственный</button>'
       : '<button class="btn btn-volt sm" data-tok="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Подтвердить +'+Number(t.reward||0)+'⚡</button>';
     return '<div class="task">'+taskBody(t)+
       (t.claimed_name?'<div class="meta"><span class="pill on">'+esc(t.claimed_name)+'</span></div>':'')+
       (t.proof_note?'<div class="dt">💬 '+esc(t.proof_note)+'</div>':'')+
-      renderReviewEvidence(t)+'<div class="acts">'+approve+
+      renderReviewEvidence(t)+(hasCap('task.review')?'<div class="acts">'+approve+
       '<button class="mini" data-tno="'+t.id+'" data-as="'+(t.assignment_id||'')+'" data-expired="'+(t.task_status==='expired'?'1':'0')+'">Вернуть</button>'+
-      '<button class="mini warn" data-treject="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Отклонить</button></div></div>';
+      '<button class="mini warn" data-treject="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Отклонить</button></div>':'')+'</div>';
   }).join('')
     :'<div class="empty">Проверять нечего — все задания закрыты.</div>';
   $('adReviewMore').classList.toggle('hidden',!next);
@@ -2493,7 +2589,7 @@ function scheduleAdminDeliveryRefresh(tasks){
 }
 
 async function loadAdmin(){
-  if(!STATE || !STATE.is_admin) return;
+  if(!STATE||!hasStaffShell()) return;
   setBusy('tab-admin',true);
   try{
     const d = await api('/api/admin/overview');
@@ -2501,7 +2597,7 @@ async function loadAdmin(){
     const roleChanges=d.role_changes||[];
     $('adRoleChangeCnt').textContent=roleChanges.length||'';
     $('adRoleChanges').innerHTML=roleChanges.length?roleChanges.map(change=>{
-      const actions=change.can_decide
+      const actions=change.can_decide&&hasCap('access.decide')
         ? '<div class="acts"><button class="btn btn-volt sm" data-role-change="'+change.id+'" data-role-decision="approve">Подтвердить</button><button class="mini warn" data-role-change="'+change.id+'" data-role-decision="reject">Отклонить</button></div>'
         : '<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Ожидается второй ответственный')+'</button></div>';
       return '<div class="task"><div class="tt">'+esc(change.user_name||('ID '+change.user_id))+'</div>'+
@@ -2535,7 +2631,7 @@ async function loadAdmin(){
         '<div class="ty">Запрос: '+esc(fmtDate(j.requested_at))+'</div>'+
         (j.last_error?'<div class="dt">Доставка: '+esc(j.last_error)+'</div>':'')+
         (j.manual_retry_reason?'<div class="dt">Последний повтор: '+esc(j.manual_retry_reason)+'</div>':'')+
-        (canRetry?'<div class="acts"><button class="mini" data-join-retry="'+esc(j.request_key)+'" data-join-decision="'+retryDecision+'">'+(retryDecision==='approve'?'Повторить одобрение':'Повторить отклонение')+'</button></div>':'')+
+        (canRetry&&hasCap('admission.retry')?'<div class="acts"><button class="mini" data-join-retry="'+esc(j.request_key)+'" data-join-decision="'+retryDecision+'">'+(retryDecision==='approve'?'Повторить одобрение':'Повторить отклонение')+'</button></div>':'')+
         '</div>';
     }).join(''):'<div class="empty">Заявок на вступление пока нет.</div>';
 
@@ -2548,7 +2644,7 @@ async function loadAdmin(){
       (p.username?' · @'+esc(p.username):'')+'</div></div></div>'+
       (p.about?'<div class="dt">'+esc(p.about)+'</div>':'')+
       (p.application_note?'<div class="dt">Причина: '+esc(p.application_note)+'</div>':'')+
-      '<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить сейчас</button></div></div>').join('')
+      (hasCap('application.review')?'<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить сейчас</button></div>':'')+'</div>').join('')
       : '<div class="empty">Отклонённых заявок нет.</div>';
 
     const cityChanges=d.city_changes||[];
@@ -2557,8 +2653,8 @@ async function loadAdmin(){
       '<div class="task"><div class="row1"><div class="tico">📍</div><div>'+
       '<div class="tt">'+esc(item.full_name||('ID '+item.user_id))+'</div>'+
       '<div class="ty">'+esc(item.city||'город не указан')+' → '+esc(item.city_change_requested)+'</div></div></div>'+
-      '<div class="acts"><button class="btn btn-volt sm" data-city-approve="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Подтвердить</button>'+
-      '<button class="mini warn" data-city-reject="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Отклонить</button></div></div>'
+      (hasCap('member.city.review')?'<div class="acts"><button class="btn btn-volt sm" data-city-approve="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Подтвердить</button>'+
+      '<button class="mini warn" data-city-reject="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Отклонить</button></div>':'')+'</div>'
     ).join(''):'<div class="empty">Запросов на смену города нет.</div>';
 
     const rev = d.review || [];
@@ -2581,9 +2677,9 @@ async function loadAdmin(){
       '<div class="meta"><span class="pill '+(t.status==='claimed'?'hot':'on')+'">'+
       (t.status==='claimed'?'Взято':'Открыто')+'</span>'+
       (t.assigned_name?'<span class="pill">'+esc(t.assigned_name)+'</span>':'')+announcementState(t)+
-      '</div><div class="acts">'+(t.announcement_url?'<button class="mini" data-topen="'+esc(t.announcement_url)+'">Открыть сообщение в OPS</button>':'')+
-      (t.announcement_status==='dead'?'<button class="mini" data-tretry="'+t.id+'">Повторить доставку в OPS</button>':'')+
-      '<button class="mini warn" data-tcancel="'+t.id+'">Отменить задание</button></div></div>').join('')
+      '</div><div class="acts">'+(t.announcement_url&&hasCap('task.delivery.view')?'<button class="mini" data-topen="'+esc(t.announcement_url)+'">Открыть сообщение в OPS</button>':'')+
+      (t.announcement_status==='dead'&&hasCap('telegram.publication.manage')?'<button class="mini" data-tretry="'+t.id+'">Повторить доставку в OPS</button>':'')+
+      (hasCap('task.cancel')?'<button class="mini warn" data-tcancel="'+t.id+'">Отменить задание</button>':'')+'</div></div>').join('')
       : '<div class="empty">Активных заданий нет. Создай первое на вкладке «Задание».</div>';
 
     const decisions=d.recent_decisions||[];
@@ -2597,10 +2693,10 @@ async function loadAdmin(){
     $('adDecisionCnt').textContent=decisions.length||'';
     $('adDecisions').innerHTML=decisions.length?decisions.map(t=>{
       let actions='';
-      if(t.can_open_dispute) actions='<button class="mini warn" data-dopen="'+t.assignment_id+'">Оспорить решение</button>';
+      if(t.can_open_dispute&&hasCap('task.dispute.request')) actions='<button class="mini warn" data-dopen="'+t.assignment_id+'">Оспорить решение</button>';
       else if(t.dispute_open_block_reason) actions='<button class="mini" type="button" disabled title="'+esc(t.dispute_open_block_reason)+'">Нужен ещё один ответственный</button>';
-      else if(t.can_decide_dispute&&t.dispute_status==='manual_required') actions='<button class="btn btn-volt sm" data-dmanual-reverse="'+t.dispute_id+'">Выплату исправили</button><button class="mini" data-dmanual-keep="'+t.dispute_id+'">Исходное решение верно</button>';
-      else if(t.can_decide_dispute) actions='<button class="btn btn-volt sm" data-dapprove="'+t.dispute_id+'">Подтвердить сторно</button><button class="mini" data-dreject="'+t.dispute_id+'">Оставить решение</button>';
+      else if(t.can_decide_dispute&&hasCap('task.dispute.decide')&&t.dispute_status==='manual_required') actions='<button class="btn btn-volt sm" data-dmanual-reverse="'+t.dispute_id+'">Выплату исправили</button><button class="mini" data-dmanual-keep="'+t.dispute_id+'">Исходное решение верно</button>';
+      else if(t.can_decide_dispute&&hasCap('task.dispute.decide')) actions='<button class="btn btn-volt sm" data-dapprove="'+t.dispute_id+'">Подтвердить сторно</button><button class="mini" data-dreject="'+t.dispute_id+'">Оставить решение</button>';
       else if(t.dispute_waits_for_second) actions='<button class="mini" type="button" disabled>Ожидается второй ответственный</button>';
       return '<div class="task">'+taskBody(t)+
         (t.claimed_name?'<div class="dt">Исполнитель: '+esc(t.claimed_name)+'</div>':'')+
@@ -2618,7 +2714,7 @@ async function loadAdmin(){
 
     const team = d.team || [];
     renderTeam();
-    await Promise.all([loadTeamSearch(false),loadTeamTags()]);
+    if(hasCap('member.search')) await Promise.all([loadTeamSearch(false),hasCap('member.tags.view')?loadTeamTags():Promise.resolve()]);
 
     const ws = d.withdrawals || [];
     const label = {pending:'⏳ На рассмотрении',processing:'🔎 В работе',completed:'✅ Переведено',rejected_refunded:'↩️ Возвращено'};
@@ -2638,13 +2734,16 @@ async function loadAdmin(){
         '<b data-lease-seconds="'+seconds+'" aria-live="off" aria-hidden="true">'+leaseClock(seconds)+'</b></div>';
     };
     const withdrawalActions=w=>{
-      if(w.status==='pending') return '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Провести перевод</button><button class="mini warn" data-wno="'+w.id+'">Отклонить</button></div>';
+      if(w.status==='pending') return '<div class="acts">'+
+        (hasCap('withdrawal.account.reveal')&&hasCap('withdrawal.decide')?'<button class="btn btn-volt sm" data-wok="'+w.id+'">Провести перевод</button>':'')+
+        (hasCap('withdrawal.decide')?'<button class="mini warn" data-wno="'+w.id+'">Отклонить</button>':'')+'</div>';
       if(w.status!=='processing') return '';
-      if(w.can_continue) return '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Продолжить перевод</button>'+
-        (w.can_reject?'<button class="mini warn" data-wno="'+w.id+'">Отклонить</button>':'')+
-        (w.can_release?'<button class="mini" data-whandoff="'+w.id+'" data-waction="release">Передать смене</button>':'')+'</div>';
-      if(w.can_takeover) return '<div class="acts"><button class="mini" data-whandoff="'+w.id+'" data-waction="takeover" aria-describedby="lease-'+w.id+'">Забрать заявку</button></div>';
-      return '<div class="acts"><button class="mini" type="button" aria-describedby="lease-'+w.id+'" disabled>Забрать после тайм-аута</button></div>';
+      if(w.can_continue) return '<div class="acts">'+
+        (hasCap('withdrawal.account.reveal')&&hasCap('withdrawal.decide')?'<button class="btn btn-volt sm" data-wok="'+w.id+'">Продолжить перевод</button>':'')+
+        (w.can_reject&&hasCap('withdrawal.decide')?'<button class="mini warn" data-wno="'+w.id+'">Отклонить</button>':'')+
+        (w.can_release&&hasCap('withdrawal.handoff')?'<button class="mini" data-whandoff="'+w.id+'" data-waction="release">Передать смене</button>':'')+'</div>';
+      if(w.can_takeover&&hasCap('withdrawal.handoff')) return '<div class="acts"><button class="mini" data-whandoff="'+w.id+'" data-waction="takeover" aria-describedby="lease-'+w.id+'">Забрать заявку</button></div>';
+      return hasCap('withdrawal.handoff')?'<div class="acts"><button class="mini" type="button" aria-describedby="lease-'+w.id+'" disabled>Забрать после тайм-аута</button></div>':'';
     };
     $('adWithdrawals').innerHTML = ws.length ? ws.map(w=>
       '<div class="task"><div class="row1"><div class="tico">⚡</div>'+
@@ -3042,15 +3141,16 @@ function openMember(uid){
   memberTarget = m;
   $('msAva').textContent = m.trust_emoji;
   $('msName').textContent = m.name || ('ID ' + m.user_id);
-  $('msMeta').textContent = roleEmoji(m.role) + ' ' + roleTitle(m.role) + ' · ' +
-    m.trust_name + ' · ' + m.done_count + ' ' +
-    plural(m.done_count,'задание','задания','заданий');
-  $('msBal').textContent = m.bonus + '⚡';
+  $('msMeta').textContent = roleEmoji(m.role) + ' ' + roleTitle(m.role) + ' · ' + m.trust_name+
+    (hasCap('member.task_summary.view')?' · '+m.done_count+' '+plural(m.done_count,'задание','задания','заданий'):'');
+  $('msBal').textContent = hasCap('member.financial_summary.view')?m.bonus+'⚡':'';
   $('msInfo').textContent = '📍 ' + (m.city||'город не указан') +
     (m.username?' · @'+m.username:'') + (m.about?'\n'+m.about:'');
   $('msTags').innerHTML = (m.tags||[]).length ? (m.tags||[]).map(t=>
     '<span class="pill on">#'+esc(t)+'</span>').join('') : '<span class="ty">Тегов пока нет</span>';
   $('memberSheet').classList.remove('hidden');
+  applyStaffVisibility();
+  $('msRole').classList.toggle('hidden',m.role==='admin'?!hasCap('access.request'):!hasAny(['member.role.manage_basic','access.request']));
   buzz('tap');
 }
 
@@ -3116,6 +3216,8 @@ function openRole(uid, name, current){
   $('roleTitle').textContent = 'Роль — ' + (name || 'участник');
   document.querySelectorAll('#roleSheet .pick').forEach(p=>{
     const selected=p.dataset.role===current;
+    const needsAccess=p.dataset.role==='admin'||current==='admin';
+    p.classList.toggle('hidden',needsAccess?!hasCap('access.request'):!hasCap('member.role.manage_basic'));
     p.classList.toggle('on',selected);
     p.setAttribute('aria-pressed',selected?'true':'false');
   });
@@ -3129,6 +3231,8 @@ document.querySelectorAll('#roleSheet .pick').forEach(p=>{
   // поэтому блокируем кнопки, а надпись не трогаем.
   p.onclick = async ()=>{
     const requestedRole=p.dataset.role;
+    const needed=requestedRole==='admin'||roleCurrent==='admin'?'access.request':'member.role.manage_basic';
+    if(!hasCap(needed)) return;
     if(requestedRole===roleCurrent){ toast('Роль уже такая.'); return; }
     let reason='';
     if(requestedRole==='admin'||roleCurrent==='admin'){
@@ -3439,9 +3543,9 @@ function renderManualGrantHistory(list){
   };
   $('manualGrantHistory').innerHTML=list.length?list.map(g=>{
     let actions='';
-    if(g.can_request_reversal){
+    if(g.can_request_reversal&&hasCap('bonus.reversal.request')){
       actions='<button class="mini warn" data-mg-request="'+esc(g.operation_id)+'">Запросить исправление</button>';
-    }else if(g.can_decide_reversal){
+    }else if(g.can_decide_reversal&&hasCap('bonus.reversal.decide')){
       actions='<button class="btn btn-volt sm" data-mg-decide="'+g.reversal_id+'" data-mg-decision="approve">'+
         (g.reversal_status==='manual_required'?'Проверить и сторнировать полностью':'Подтвердить полное сторно')+'</button>'+
         '<button class="mini" data-mg-decide="'+g.reversal_id+'" data-mg-decision="reject">Оставить начисление</button>';
@@ -3540,10 +3644,153 @@ $('manualCorrectionConfirm').onclick=async()=>{
   }finally{ button.disabled=false; button.textContent=original; }
 };
 
+/* ── доступ сотрудников: запрос создаёт один, подтверждает другой ── */
+let STAFF_ACCESS_DATA=null;
+const ACCESS_PRESET_TITLES={scout:'Скаут',reviewer:'Ревьюер',cashier:'Кассир',owner:'Владелец'};
+function accessPresetKey(p){ return String(typeof p==='string'?p:(p.key||p.preset||p.name||'')); }
+function accessPresetTitle(p){
+  const key=accessPresetKey(p);
+  return String((typeof p==='object'&&p&&(p.title||p.label))||ACCESS_PRESET_TITLES[key]||key);
+}
+function accessPresetList(value){
+  if(Array.isArray(value)) return value;
+  return value&&typeof value==='object'?Object.keys(value).map(key=>({key:key,title:accessPresetTitle(key)})):[];
+}
+function accessUserId(item){ return Number(item.target_user_id!=null?item.target_user_id:item.user_id); }
+function accessUserName(item){
+  const uid=accessUserId(item);
+  const member=((ADMIN&&ADMIN.team)||[]).find(m=>Number(m.user_id)===uid);
+  return item.target_name||item.full_name||item.name||(member&&member.name)||('ID '+uid);
+}
+function accessGenerationFor(uid,preset){
+  const grants=(STAFF_ACCESS_DATA&&STAFF_ACCESS_DATA.grants)||[];
+  const matching=grants.filter(g=>accessUserId(g)===Number(uid)&&accessPresetKey(g.preset||g.preset_key)===String(preset||''));
+  return matching.reduce((max,g)=>Math.max(max,Number(g.generation!=null?g.generation:g.access_generation)||0),0);
+}
+function accessOperation(scope,value){
+  const key='bibitasks_access_'+scope;
+  try{
+    const prior=JSON.parse(sessionStorage.getItem(key)||'null');
+    if(prior&&prior.value===value&&prior.id) return {key:key,id:prior.id,value:value};
+  }catch(e){}
+  const pending={key:key,id:newOperationId(),value:value};
+  try{ sessionStorage.setItem(key,JSON.stringify(pending)); }catch(e){}
+  return pending;
+}
+function clearAccessOperation(operation){
+  if(!operation) return;
+  try{ sessionStorage.removeItem(operation.key); }catch(e){}
+}
+function syncAccessGeneration(){
+  const generation=accessGenerationFor($('staffAccessTarget').value,$('staffAccessPreset').value);
+  $('staffAccessGeneration').textContent='Версия доступа: '+generation;
+  $('staffAccessGeneration').dataset.generation=String(generation);
+}
+function accessChangeRow(change,allowDecision){
+  const id=Number(change.id!=null?change.id:change.change_id);
+  const action=change.change_action||change.action;
+  const title=(action==='revoke'?'Снять ':'Выдать ')+accessPresetTitle(change.preset||change.preset_key||'роль');
+  const requester=Number(change.requested_by||change.requested_by_id||0);
+  const me=Number(STATE&&STATE.me&&STATE.me.user_id||0);
+  const inferredCanDecide=requester!==me&&accessUserId(change)!==me;
+  const canDecide=allowDecision&&(change.can_decide!=null?!!change.can_decide:inferredCanDecide);
+  const pending=String(change.status||'pending')==='pending';
+  const actions=pending&&canDecide
+    ? '<div class="acts"><button class="btn btn-volt sm" data-access-decide="'+id+'" data-access-decision="approve">Подтвердить</button><button class="mini warn" data-access-decide="'+id+'" data-access-decision="reject">Отклонить</button></div>'
+    : pending?'<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Нужен второй ответственный')+'</button></div>':'';
+  return '<div class="task"><div class="tt">'+esc(accessUserName(change))+'</div><div class="dt">'+esc(title)+'</div>'+
+    (change.reason?'<div class="dt">Причина: '+esc(change.reason)+'</div>':'')+
+    '<div class="ty">Запросил: '+esc(change.requested_by_name||'ответственный')+(change.requested_at?' · '+fmtDate(change.requested_at):'')+'</div>'+actions+'</div>';
+}
+function bindAccessDecisions(changes){
+  $('staffAccessPending').querySelectorAll('[data-access-decide]').forEach(button=>{
+    button.onclick=async()=>{
+      if(!hasCap('access.decide')) return;
+      const changeId=Number(button.dataset.accessDecide),decision=button.dataset.accessDecision;
+      const note=await askText({
+        title:decision==='approve'?'Подтвердить изменение доступа':'Отклонить изменение доступа',
+        lead:'Проверь сотрудника, роль и причину запроса. Решение сохранится в журнале.',
+        placeholder:decision==='approve'?'Права и сотрудник проверены':'Почему доступ не меняем',
+        required:true,okLabel:decision==='approve'?'Подтвердить':'Отклонить'});
+      if(note===null) return;
+      const value=[changeId,decision,note].join('|');
+      const operation=accessOperation('decide_'+changeId+'_'+decision,value);
+      press(button,'…',async()=>{
+        await api('/api/admin/access',{method:'POST',body:JSON.stringify({
+          action:'decide',change_id:changeId,decision:decision,note:note,operation_id:operation.id
+        })});
+        clearAccessOperation(operation); toast(decision==='approve'?'Доступ изменён.':'Запрос доступа отклонён.');
+        await loadAccessManagement();
+      });
+    };
+  });
+}
+function renderAccessManagement(data){
+  STAFF_ACCESS_DATA=data||{};
+  const grants=Array.isArray(STAFF_ACCESS_DATA.grants)?STAFF_ACCESS_DATA.grants:[];
+  const changes=Array.isArray(STAFF_ACCESS_DATA.changes)?STAFF_ACCESS_DATA.changes:[];
+  const remotePresets=accessPresetList(STAFF_ACCESS_DATA.presets);
+  const presets=remotePresets.length?remotePresets:accessPresetList(STAFF_PRESETS);
+  const people=new Map();
+  ((ADMIN&&ADMIN.team)||[]).concat(grants).forEach(item=>{
+    const uid=accessUserId(item); if(uid) people.set(uid,accessUserName(item));
+  });
+  $('staffAccessTarget').innerHTML=Array.from(people.entries()).map(([uid,name])=>
+    '<option value="'+uid+'">'+esc(name)+'</option>').join('')||'<option value="">Нет доступных сотрудников</option>';
+  $('staffAccessPreset').innerHTML=(presets||[]).map(p=>
+    '<option value="'+esc(accessPresetKey(p))+'">'+esc(accessPresetTitle(p))+'</option>').join('')||'<option value="">Нет доступных ролей</option>';
+  syncAccessGeneration();
+  const active=grants.filter(g=>g.active!==false&&g.status!=='revoked');
+  $('staffAccessGrants').innerHTML=active.length?active.map(g=>
+    '<div class="ledger"><div style="flex:1"><div class="rs">'+esc(accessUserName(g))+'</div><div class="dtm">'+
+    esc(accessPresetTitle(g.preset||g.preset_key||g.role||'роль'))+' · версия '+accessGenerationFor(accessUserId(g),g.preset||g.preset_key)+'</div></div></div>').join(''):
+    '<div class="empty">Активных служебных ролей нет.</div>';
+  const pending=changes.filter(c=>String(c.status||'pending')==='pending');
+  const history=changes.filter(c=>String(c.status||'pending')!=='pending');
+  $('staffAccessPendingCnt').textContent=pending.length||'';
+  $('staffAccessPending').innerHTML=pending.length?pending.map(c=>accessChangeRow(c,hasCap('access.decide'))).join(''):
+    '<div class="empty">Ожидающих запросов нет.</div>';
+  $('staffAccessHistory').innerHTML=history.length?history.map(c=>{
+    const status={applied:'Подтверждено',approved:'Подтверждено',rejected:'Отклонено',cancelled:'Отменено'}[c.status]||c.status;
+    return '<div class="task"><div class="tt">'+esc(accessUserName(c))+'</div><div class="dt">'+
+      esc(status)+' · '+esc(accessPresetTitle(c.preset||c.preset_key||'роль'))+'</div>'+
+      (c.decided_by_name?'<div class="ty">Проверил: '+esc(c.decided_by_name)+(c.decided_at?' · '+fmtDate(c.decided_at):'')+'</div>':'')+'</div>';
+  }).join(''):'<div class="empty">История пока пуста.</div>';
+  bindAccessDecisions(pending);
+}
+async function loadAccessManagement(){
+  if(!hasCap('access.view')) return;
+  setBusy('adSubAccess',true);
+  try{ renderAccessManagement(await api('/api/admin/access')); }
+  catch(e){ showRetry('staffAccessPending',e.message,loadAccessManagement); }
+  finally{ setBusy('adSubAccess',false); }
+}
+$('staffAccessTarget').onchange=syncAccessGeneration;
+$('staffAccessPreset').onchange=syncAccessGeneration;
+$('staffAccessRequest').onclick=()=>{
+  if(!hasCap('access.request')) return;
+  const target=Number($('staffAccessTarget').value),preset=$('staffAccessPreset').value;
+  const changeAction=$('staffAccessAction').value,reason=$('staffAccessReason').value.trim();
+  const generation=Number($('staffAccessGeneration').dataset.generation||0);
+  if(!target||!preset){ toast('Выбери сотрудника и роль.'); return; }
+  if(reason.length<3){ toast('Коротко укажи причину изменения доступа.'); $('staffAccessReason').focus(); return; }
+  const value=[changeAction,target,preset,generation,reason].join('|');
+  const operation=accessOperation('request_'+target,value),button=$('staffAccessRequest');
+  press(button,'Создаю…',async()=>{
+    await api('/api/admin/access',{method:'POST',body:JSON.stringify({
+      action:'request',change_action:changeAction,target_user_id:target,preset:preset,
+      expected_generation:generation,reason:reason,operation_id:operation.id
+    })});
+    clearAccessOperation(operation); $('staffAccessReason').value='';
+    toast('Запрос создан. Его должен подтвердить другой ответственный.'); await loadAccessManagement();
+  });
+};
+
 /* ── награды: каталог, редактор, выдача ────────────────────── */
 const EMOJI_SET = ['⚡','🏅','👑','🛠','🌙','🚀','🔥','💎','🥇','📸','🤝','🌱','🐺','🎯'];
 
 async function loadAwards(){
+  if(!hasAny(['award.view','award.grant','award.catalog.manage'])) return;
   setBusy('adSubAwards',true);
   try{
     const d = await api('/api/awards');
@@ -3560,8 +3807,8 @@ async function loadAwards(){
         (a.active?'':'<span class="pill">выключена</span>')+
       '</div>'+
       '<div class="acts">'+
-        '<button class="mini" data-awgrant="'+a.id+'">Выдать</button>'+
-        '<button class="mini" data-awedit="'+a.id+'">Изменить</button>'+
+        (hasCap('award.grant')?'<button class="mini" data-awgrant="'+a.id+'">Выдать</button>':'')+
+        (hasCap('award.catalog.manage')?'<button class="mini" data-awedit="'+a.id+'">Изменить</button>':'')+
       '</div></div></div>').join('')
       : '<div class="empty">Каталог пуст. Создай первую награду.</div>';
     $('awList').querySelectorAll('[data-awgrant]').forEach(b=>{
@@ -3581,7 +3828,7 @@ function renderGrantedList(list){
     '<div class="rs">'+esc(g.title)+' → '+esc(g.full_name||('ID '+g.user_id))+'</div>'+
     '<div class="dtm">'+fmtDate(g.granted_at)+(g.note?' · '+esc(g.note):'')+'</div></div>'+
     (g.bonus?'<div class="amt plus">+'+g.bonus+'⚡</div>':'')+
-    '<button class="mini warn" data-awrev="'+g.id+'" style="margin-left:8px">Снять</button>'+
+    (hasCap('award.revoke')?'<button class="mini warn" data-awrev="'+g.id+'" style="margin-left:8px">Снять</button>':'')+
     '</div>').join('')
     : '<div class="empty">Пока никого не награждали.</div>';
   $('awGranted').querySelectorAll('[data-awrev]').forEach(b=>{
@@ -3649,6 +3896,7 @@ $('awEmojiRow').querySelectorAll('[data-e]').forEach(b=>{
 });
 
 function openAward(a){
+  if(!hasCap('award.catalog.manage')) return;
   awardEditId = a ? a.id : null;
   $('awardSheetTitle').textContent = a ? 'Изменить награду' : 'Новая награда';
   $('awEmoji').value = a ? a.emoji : '🏅';
@@ -3671,6 +3919,7 @@ $('awNew').onclick = ()=>openAward(null);
 $('awCancel').onclick = ()=>$('awardSheet').classList.add('hidden');
 $('awardSheet').onclick = e=>{ if(e.target===$('awardSheet')) $('awardSheet').classList.add('hidden'); };
 $('awSave').onclick = ()=>{
+  if(!hasCap('award.catalog.manage')) return;
   clearInvalid(['awTitle'],'awError');
   const title = $('awTitle').value.trim();
   const awardBonus=Number(($('awBonus').value||'').replace(/\D/g,''))||0;
@@ -3692,6 +3941,7 @@ $('awSave').onclick = ()=>{
 };
 
 function openGrant(userId, awardId){
+  if(!hasCap('award.grant')) return;
   const team = (ADMIN && ADMIN.team) || [];
   const cat = (AWARDS || (ADMIN && ADMIN.awards) || []).filter(a=>a.active);
   if(!team.length){ toast('Сначала одобри хотя бы одного участника'); return; }

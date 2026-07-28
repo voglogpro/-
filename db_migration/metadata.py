@@ -26,6 +26,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
+from .access_contract import ACCESS_PRESETS, CAPABILITIES_V1, sql_literals
+
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_name)s",
@@ -392,6 +394,125 @@ admin_authorities = Table(
     Column("granted_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("user_id", "origin", name="pk_admin_authorities"),
     CheckConstraint("origin IN ('env','manual')", name="admin_authority_origin"),
+)
+
+staff_access_grants = Table(
+    "staff_access_grants", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("preset", Text, nullable=False),
+    Column("origin", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("policy_version", Integer, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("granted_by", BigInteger),
+    Column("approved_by", BigInteger),
+    Column("grant_operation_id", Text, nullable=False),
+    Column("granted_at", DateTime(timezone=True), nullable=False),
+    Column("revoked_by", BigInteger),
+    Column("revoke_operation_id", Text),
+    Column("revoked_at", DateTime(timezone=True)),
+    UniqueConstraint(
+        "grant_operation_id", name="uq_staff_access_grants_grant_operation",
+    ),
+    UniqueConstraint(
+        "revoke_operation_id", name="uq_staff_access_grants_revoke_operation",
+    ),
+    UniqueConstraint(
+        "user_id", "preset", "origin", "generation",
+        name="uq_staff_access_grants_generation",
+    ),
+    CheckConstraint(
+        f"preset IN ({sql_literals(ACCESS_PRESETS)})",
+        name="staff_access_grants_preset",
+    ),
+    CheckConstraint("origin IN ('env','manual')", name="staff_access_grants_origin"),
+    CheckConstraint("status IN ('active','revoked')", name="staff_access_grants_status"),
+    CheckConstraint("generation > 0", name="staff_access_grants_generation"),
+    CheckConstraint(
+        "approved_by IS NULL OR granted_by IS NULL OR approved_by<>granted_by",
+        name="staff_access_grants_approver_distinct",
+    ),
+)
+
+staff_grant_capabilities = Table(
+    "staff_grant_capabilities", metadata,
+    Column(
+        "grant_id", BigInteger, fk("staff_access_grants.id"), nullable=False,
+    ),
+    Column("capability", Text, nullable=False),
+    PrimaryKeyConstraint(
+        "grant_id", "capability", name="pk_staff_grant_capabilities",
+    ),
+    CheckConstraint(
+        f"capability IN ({sql_literals(CAPABILITIES_V1)})",
+        name="staff_grant_capabilities_capability",
+    ),
+)
+
+staff_access_changes = Table(
+    "staff_access_changes", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("target_user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("change_action", Text, nullable=False),
+    Column("preset", Text, nullable=False),
+    Column("expected_generation", Integer, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("requested_by", BigInteger, nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("request_operation_id", Text, nullable=False),
+    Column("request_hash", Text, nullable=False),
+    Column("decided_by", BigInteger),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decision_note", Text),
+    Column("decision_operation_id", Text),
+    Column("decision_hash", Text),
+    Column("result_json", JSONB),
+    UniqueConstraint(
+        "request_operation_id", name="uq_staff_access_changes_request_operation",
+    ),
+    UniqueConstraint(
+        "decision_operation_id", name="uq_staff_access_changes_decision_operation",
+    ),
+    CheckConstraint(
+        "change_action IN ('assign','revoke')", name="staff_access_changes_action",
+    ),
+    CheckConstraint(
+        f"preset IN ({sql_literals(ACCESS_PRESETS)})",
+        name="staff_access_changes_preset",
+    ),
+    CheckConstraint(
+        "status IN ('pending','applied','rejected')",
+        name="staff_access_changes_status",
+    ),
+    CheckConstraint(
+        "expected_generation >= 0", name="staff_access_changes_expected_generation",
+    ),
+    CheckConstraint(
+        "requested_by<>target_user_id",
+        name="staff_access_changes_requester_target",
+    ),
+    CheckConstraint(
+        "decided_by IS NULL OR (decided_by<>requested_by "
+        "AND decided_by<>target_user_id)",
+        name="staff_access_changes_checker_distinct",
+    ),
+)
+
+staff_access_events = Table(
+    "staff_access_events", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("target_user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("preset", Text, nullable=False),
+    Column("event_type", Text, nullable=False),
+    Column("actor_id", BigInteger),
+    Column("operation_id", Text, nullable=False),
+    Column("policy_version", Integer, nullable=False),
+    Column("before_json", JSONB, nullable=False),
+    Column("after_json", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("operation_id", name="uq_staff_access_events_operation"),
 )
 
 task_disputes = Table(
@@ -769,6 +890,25 @@ Index(
 )
 Index("idx_media_gc", media_objects.c.state, media_objects.c.delete_after)
 Index(
+    "idx_staff_access_one_active",
+    staff_access_grants.c.user_id, staff_access_grants.c.preset,
+    staff_access_grants.c.origin, unique=True,
+    postgresql_where=staff_access_grants.c.status == "active",
+)
+Index(
+    "idx_staff_grant_capability", staff_grant_capabilities.c.capability,
+    staff_grant_capabilities.c.grant_id,
+)
+Index(
+    "idx_staff_access_one_pending",
+    staff_access_changes.c.target_user_id, staff_access_changes.c.preset,
+    unique=True, postgresql_where=staff_access_changes.c.status == "pending",
+)
+Index(
+    "idx_staff_access_changes_status", staff_access_changes.c.status,
+    staff_access_changes.c.requested_at, staff_access_changes.c.id,
+)
+Index(
     "idx_product_events_dedupe", product_events.c.dedupe_key, unique=True,
     postgresql_where=product_events.c.dedupe_key.is_not(None),
 )
@@ -787,9 +927,10 @@ IDENTITY_TABLES = (
     "admin_role_changes", "manual_grant_reversals",
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
+    "staff_access_grants", "staff_access_changes", "staff_access_events",
 )
 
-if len(metadata.tables) != 34:
-    raise RuntimeError(f"Expected 34 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 43:
-    raise RuntimeError("Expected exactly 43 semantic indexes")
+if len(metadata.tables) != 38:
+    raise RuntimeError(f"Expected 38 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 47:
+    raise RuntimeError("Expected exactly 47 semantic indexes")

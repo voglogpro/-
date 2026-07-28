@@ -31,6 +31,10 @@ SOURCE_COLUMNS = {
     "admin_role_changes": "id user_id from_role to_role reason status requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash".split(),
     "operation_registry": "operation_id command_type request_hash actor_id created_at".split(),
     "admin_authorities": "user_id origin granted_operation_id granted_at".split(),
+    "staff_access_grants": "id user_id preset origin status policy_version generation granted_by approved_by grant_operation_id granted_at revoked_by revoke_operation_id revoked_at".split(),
+    "staff_grant_capabilities": "grant_id capability".split(),
+    "staff_access_changes": "id target_user_id change_action preset expected_generation reason status requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash result_json".split(),
+    "staff_access_events": "id target_user_id preset event_type actor_id operation_id policy_version before_json after_json created_at".split(),
     "member_awards": "id user_id award_id slot bonus note granted_by granted_at operation_id balance_after revoked_at revoked_by revoke_note revoke_operation_id revoke_request_hash".split(),
     "task_review_commands": "operation_id assignment_id request_hash result_status created_at".split(),
     "task_disputes": "id assignment_id task_id user_id reward reason reconciliation_reason reconciliation_reference status opened_by opened_at open_operation_id open_request_hash decided_by decided_at decision_note decision_operation_id decision_request_hash".split(),
@@ -53,6 +57,7 @@ IDENTITY_TABLES = {
     "withdrawal_requests", "withdrawal_events", "bonus_ledger",
     "member_awards", "task_outbox", "product_events", "task_disputes",
     "admin_role_changes", "manual_grant_reversals",
+    "staff_access_grants", "staff_access_changes", "staff_access_events",
 }
 
 EXPECTED_SOURCE_INDEXES = {
@@ -75,6 +80,8 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_member_awards_maker_time",
     "idx_task_outbox_delivery",
     "idx_join_requests_user_status",
+    "idx_staff_access_one_active", "idx_staff_grant_capability",
+    "idx_staff_access_one_pending", "idx_staff_access_changes_status",
     "idx_telegram_inbox_delivery", "idx_telegram_inbox_redrive_operation",
     "idx_media_gc", "idx_product_events_dedupe", "idx_product_events_funnel",
     "idx_product_events_subject", "idx_product_events_task",
@@ -84,8 +91,8 @@ EXPECTED_SOURCE_INDEXES = {
 # Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
 # PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
 # rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "3a3f57d30f91d9644008319dab7afc29399bc87b8bd0091b8089417fbe2b06ac"
-EXPECTED_SOURCE_USER_VERSION = 297
+EXPECTED_SOURCE_SCHEMA_SHA256 = "0bcf5cfc4a5de781f885394e843f35e8ae6f2905a1ce9b81e3780c8d42e68ed3"
+EXPECTED_SOURCE_USER_VERSION = 298
 
 
 class HarnessError(RuntimeError):

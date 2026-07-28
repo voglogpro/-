@@ -22,6 +22,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from db_migration import ALEMBIC_HEAD
+from db_migration.access_contract import CAPABILITIES_V1
 from db_migration.metadata import metadata
 from scripts.migrate_sqlite_to_postgres import (
     _primary_key_order, validate_database_endpoint,
@@ -253,6 +254,27 @@ def reconcile(
                     SELECT COUNT(*) FROM telegram_update_inbox
                     WHERE status='processing' AND (locked_by IS NULL OR locked_at IS NULL)
                 """,
+                "staff_capability_orphan": """
+                    SELECT COUNT(*) FROM staff_grant_capabilities c
+                    LEFT JOIN staff_access_grants g ON g.id=c.grant_id
+                    WHERE g.id IS NULL
+                """,
+                "staff_owner_v1_snapshot": f"""
+                    SELECT COUNT(*) FROM staff_access_grants g
+                    WHERE g.preset='owner' AND g.policy_version=1
+                      AND (SELECT COUNT(*) FROM staff_grant_capabilities c
+                           WHERE c.grant_id=g.id) <> {len(CAPABILITIES_V1)}
+                """,
+                "admin_authority_access_projection": """
+                    SELECT COUNT(*) FROM admin_authorities aa
+                    JOIN members m ON m.user_id=aa.user_id AND m.status='approved'
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM staff_access_grants g
+                      WHERE g.user_id=aa.user_id AND g.preset='owner'
+                        AND g.origin=aa.origin AND g.status='active'
+                        AND g.policy_version=1
+                    )
+                """,
                 }
                 invariant_results = {}
                 for name, sql in checks.items():
@@ -325,6 +347,8 @@ def reconcile(
                 "withdrawal_requests", "withdrawal_events", "bonus_ledger",
                 "member_awards", "task_outbox", "product_events",
                 "admin_role_changes",
+                "staff_access_grants", "staff_access_changes",
+                "staff_access_events",
                 ):
                     sequence_name = target.execute(text(
                     "SELECT pg_get_serial_sequence(:table_name,'id')"

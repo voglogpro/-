@@ -63,7 +63,9 @@ PASS:
 - readiness отвечает `200`, critical workers живы, dead-очереди пусты;
 - `GROUP_ID` и `OPS_GROUP_ID` различаются;
 - OPS — private forum supergroup без публичного username;
-- в `ADMIN_IDS` минимум два действующих скаута;
+- в `ADMIN_IDS` минимум два действующих владельца с preset `owner`;
+- отдельные аккаунты с preset `scout`, `reviewer` и `cashier` видят только
+  свои разделы; скаут не получает баланс участника даже через API;
 - menu button ведёт на production HTTPS origin.
 - имя бота точно «БибиЗадачи · Бибибайк», а аватар — зелёный персонаж из `logo.jpg`, без
   старого «BibiПомощник» и букв «ББ»;
@@ -71,7 +73,7 @@ PASS:
   `https://t.me/BbGalterbot/bibibike` открывается отдельно;
 - каждый topic ID взят из реальной темы, а не из примера или старой группы.
 
-Любой `fail`, readiness `503`, публичная OPS или один скаут — NO-GO.
+Любой `fail`, readiness `503`, публичная OPS или меньше двух владельцев — NO-GO.
 
 ## 1a. Canary alert и recovery monitor
 
