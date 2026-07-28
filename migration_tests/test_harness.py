@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from db_migration.metadata import metadata
+from db_migration import ALEMBIC_HEAD
 from db_migration.types import ConversionError, parse_bigint, parse_json
 from scripts.migrate_sqlite_to_postgres import (
     iter_transformed_rows, validate_database_endpoint,
@@ -23,6 +24,7 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
+        self.assertEqual(ALEMBIC_HEAD, "0002_pilot_reliability")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
         self.assertEqual(len(metadata.tables), 28)
         self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 34)

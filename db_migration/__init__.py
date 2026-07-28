@@ -2,6 +2,6 @@
 
 from .metadata import metadata
 
-ALEMBIC_HEAD = "0001_pg_baseline"
+ALEMBIC_HEAD = "0002_pilot_reliability"
 
 __all__ = ["ALEMBIC_HEAD", "metadata"]
