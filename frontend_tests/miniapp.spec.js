@@ -359,6 +359,8 @@ test('новичок отправляет заявку без номера те�
   const harness = await openMiniApp(page);
 
   await expect(page.locator('#applyBox')).toBeVisible();
+  await expect(page.locator('#nav')).toBeHidden();
+  await expect(page.locator('label[for="apAbout"]')).toContainText('обязательно');
   await page.locator('#apName').fill('');
   await page.locator('#apCity').fill('');
   await page.locator('#apSend').click();
@@ -382,7 +384,32 @@ test('новичок отправляет заявку без номера те�
   await expect(page.locator('#privacyNotice')).toContainText('заявки и подбора заданий');
   await expect(page.locator('#privacyNotice')).toContainText('Финансовая история сохраняется');
   await expect(page.locator('#privacyNotice a')).toHaveCount(0);
+  await expect(page.locator('#waitMessage')).toContainText('72 часов');
+  await expect(page.locator('#nav')).toBeHidden();
   await expect(page.locator('#waitMessage')).not.toContainText('до одного дня');
+});
+
+test('реферальный новичок проходит вступление до анкеты', async ({ page }) => {
+  const initial = state({
+    referral_gate: {
+      required: true, invited: true, confirmed: false,
+      url: 'https://t.me/+join-request',
+    },
+  });
+  const harness = await openMiniApp(page, { initialState: initial });
+
+  await expect(page.locator('#subBox')).toBeVisible();
+  await expect(page.locator('#subBox')).toContainText('Шаг 1 · вступление');
+  await expect(page.locator('#subCheck')).toHaveText('Проверить вступление');
+  await expect(page.locator('#applyBox')).toBeHidden();
+  await expect(page.locator('#nav')).toBeHidden();
+
+  harness.setState(state({
+    referral_gate: { ...initial.referral_gate, confirmed: true },
+  }));
+  await page.evaluate(() => load());
+  await expect(page.locator('#subBox')).toBeHidden();
+  await expect(page.locator('#applyBox')).toBeVisible();
 });
 
 test('неоднозначная отправка анкеты восстанавливается через application_pending', async ({ page }) => {
@@ -407,10 +434,12 @@ test('ожидающий участник может вручную обнови
     initialState: state({ me: { applied: true, status: 'pending', role: 'applicant' } }),
   });
   await expect(page.locator('#waitRefresh')).toBeVisible();
+  await expect(page.locator('#nav')).toBeHidden();
   harness.setState(state({ can_work: true, me: { applied: true, status: 'approved' } }));
   await page.locator('#waitRefresh').click();
   await expect(page.locator('#worksBox')).toBeVisible();
   await expect(page.locator('#waitBox')).toBeHidden();
+  await expect(page.locator('#nav')).toBeVisible();
 });
 
 test('поля анкеты показывают и соблюдают пределы', async ({ page }) => {
@@ -518,6 +547,24 @@ test('светлая и тёмная темы меняют фон и цвет т
     return (Math.max(foreground, background) + .05) / (Math.min(foreground, background) + .05);
   });
   expect(contrast).toBeGreaterThanOrEqual(4.5);
+});
+
+test('на мобильной ширине 375–390px рабочие формы складываются в одну колонку', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openMiniApp(page);
+  await page.evaluate(() => {
+    document.getElementById('tab-admin').classList.remove('hidden');
+    document.getElementById('adSubCreate').classList.remove('hidden');
+    setWizardStep(2, false);
+  });
+  const fields = page.locator('.wizard-step[data-wstep="2"] .two').first();
+  for (const width of [375, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    const columns = await fields.evaluate(
+      element => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/)
+    );
+    expect(columns).toHaveLength(1);
+  }
 });
 
 test('исполнитель до взятия видит формат отчёта, а после возврата — причину', async ({ page }) => {
@@ -802,7 +849,10 @@ test('загрузка заданий меняет aria-busy с true на false'
 });
 
 test('ошибка кошелька оставляет перевод выключенным и показывает один alert с retry', async ({ page }) => {
-  await openMiniApp(page, { walletFailure: true });
+  await openMiniApp(page, {
+    walletFailure: true,
+    initialState: state({ can_work: true, me: { status: 'approved' } }),
+  });
   await page.locator('#nav [data-tab="tab-wallet"]').click();
 
   await expect(page.locator('#wWithdraw')).toBeDisabled();

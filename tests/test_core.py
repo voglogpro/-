@@ -579,6 +579,102 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             for name, value in original.items():
                 setattr(main, name, value)
 
+    async def test_bot_identity_must_match_configured_username(self):
+        original = main.BOT_USERNAME
+        try:
+            main.BOT_USERNAME = "BbGalterbot"
+            main._validate_bot_identity(SimpleNamespace(
+                username="bbgalterBOT", is_bot=True,
+            ))
+            with self.assertRaisesRegex(RuntimeError, "different bot"):
+                main._validate_bot_identity(SimpleNamespace(
+                    username="AnotherBot", is_bot=True,
+                ))
+            with self.assertRaisesRegex(RuntimeError, "valid bot identity"):
+                main._validate_bot_identity(SimpleNamespace(
+                    username="", is_bot=True,
+                ))
+        finally:
+            main.BOT_USERNAME = original
+
+    async def test_mismatched_bot_identity_stops_before_api_and_workers(self):
+        calls = []
+
+        class FakeSession:
+            async def close(self):
+                calls.append("session_closed")
+
+        class FakeBot:
+            session = FakeSession()
+
+            async def get_me(self):
+                calls.append("get_me")
+                return SimpleNamespace(username="AnotherBot", is_bot=True)
+
+        names = (
+            "bot", "BOT_USERNAME", "_validate_update_receiver_config",
+            "ensure_recovery_key_canary", "init_db", "start_api_server",
+        )
+        original = {name: getattr(main, name) for name in names}
+
+        def must_not_run(*_args, **_kwargs):
+            calls.append("local_setup")
+            raise AssertionError("local setup ran before bot identity verification")
+
+        async def must_not_start():
+            calls.append("api_started")
+            raise AssertionError("API started for a mismatched bot identity")
+
+        try:
+            main.bot = FakeBot()
+            main.BOT_USERNAME = "BbGalterbot"
+            main._validate_update_receiver_config = lambda: None
+            main.ensure_recovery_key_canary = must_not_run
+            main.init_db = must_not_start
+            main.start_api_server = must_not_start
+            with self.assertRaisesRegex(RuntimeError, "different bot"):
+                await main.main()
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+            main._shutdown_event.clear()
+
+        self.assertEqual(calls, ["get_me", "session_closed"])
+
+    async def test_user_names_are_escaped_in_rank_and_level_html(self):
+        injected_name = 'Анна <a href="https://evil.example">нажми</a>'
+        user = SimpleNamespace(
+            id=910_000_001, full_name=injected_name, username="safe_user",
+        )
+
+        class FakeMessage:
+            from_user = user
+
+            def __init__(self):
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append((text, kwargs))
+
+        message = FakeMessage()
+        original_ensure = main._ensure_member
+
+        async def member(_user):
+            return {"done_count": 0, "chat_xp": 0}
+
+        try:
+            main._ensure_member = member
+            await main.show_rank(message)
+            await main._announce_level(message, user, main.TRUST_LEVELS[0])
+        finally:
+            main._ensure_member = original_ensure
+
+        self.assertEqual(len(message.answers), 2)
+        for text, kwargs in message.answers:
+            self.assertEqual(kwargs.get("parse_mode"), "HTML")
+            self.assertNotIn('<a href="https://evil.example">', text)
+            self.assertIn("&lt;a href=", text)
+
     async def test_staging_retry_is_accelerated_but_production_override_fails_closed(self):
         names = (
             "BIBITASKS_ENVIRONMENT", "TELEGRAM_RETRY_BASE_SECONDS",
@@ -672,7 +768,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             main.dp.feed_raw_update = fake_feed
             worker = asyncio.create_task(main.telegram_inbox_worker())
             status = "pending"
-            for _ in range(200):
+            for _ in range(500):
                 with sqlite3.connect(main.DB_PATH) as db:
                     status = db.execute(
                         "SELECT status FROM telegram_update_inbox WHERE update_id=7001"
@@ -2624,6 +2720,87 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main._require_admin = original
         self.assertEqual(conflict_response.status, 409)
+
+    async def test_admin_assignee_requires_independent_review_path_at_create(self):
+        creator_id, performer_id, reviewer_id = 902_200_001, 902_200_002, 902_200_003
+        for admin_id in (creator_id, performer_id):
+            await self._seed_admin(admin_id)
+            await main.upsert_member(admin_id, city="Краснодар")
+
+        original_admin = main._require_admin
+
+        async def allow_creator(_request):
+            return creator_id, None
+
+        main._require_admin = allow_creator
+        body = {
+            "operation_id": str(uuid.uuid4()),
+            "type": "fix_zone",
+            "title": "Администратор поправляет парковку",
+            "details": "Освободить проход",
+            "city": "Краснодар",
+            "address": "ул. Красная, 1",
+            "reward": 80,
+            "assigned_to": performer_id,
+            "evidence_policy": "after_required",
+            "repeatable": False,
+            "announce": False,
+        }
+        try:
+            blocked = await main.api_admin_task_create(DummyRequest(body))
+            await self._seed_admin(reviewer_id)
+            allowed = await main.api_admin_task_create(DummyRequest({
+                **body, "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_admin = original_admin
+
+        self.assertEqual(blocked.status, 409)
+        self.assertEqual(
+            response_json(blocked)["error"], "admin_task_independence",
+        )
+        self.assertEqual(allowed.status, 200)
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 1)
+
+    async def test_admin_claim_requires_later_dispute_decider(self):
+        performer_id, reviewer_id, decider_id = 902_300_001, 902_300_002, 902_300_003
+        for admin_id in (performer_id, reviewer_id):
+            await self._seed_admin(admin_id)
+        await main.upsert_member(performer_id, city="Краснодар")
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_by,created_at,budget_cap) "
+                "VALUES ('fix_zone','Самостоятельная проверка','Краснодар','Адрес',"
+                "80,'open',?,?,80)",
+                (performer_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+
+        original_worker = main._require_worker
+
+        async def allow_performer(_request):
+            return performer_id, None
+
+        main._require_worker = allow_performer
+        try:
+            blocked = await main.api_task_claim(DummyRequest({"task_id": task_id}))
+            await self._seed_admin(decider_id)
+            allowed = await main.api_task_claim(DummyRequest({"task_id": task_id}))
+        finally:
+            main._require_worker = original_worker
+
+        self.assertEqual(blocked.status, 409)
+        self.assertEqual(
+            response_json(blocked)["error"], "admin_task_independence",
+        )
+        self.assertEqual(allowed.status, 200)
+        with sqlite3.connect(main.DB_PATH) as db:
+            assignments = db.execute(
+                "SELECT COUNT(*) FROM task_assignments WHERE task_id=?", (task_id,),
+            ).fetchone()[0]
+        self.assertEqual(assignments, 1)
 
     async def test_task_with_expired_deadline_is_rejected_before_publish(self):
         original = main._require_admin

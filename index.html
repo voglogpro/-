@@ -527,6 +527,9 @@ select.tinput{appearance:none;background-image:
 .role-switch{font-size:12px;color:var(--brand-ink);font-weight:800}
 .search-meta{font-size:14px;color:var(--ink-2);margin:-2px 0 10px}
 
+@media (max-width:420px){
+  .two,.searchtools{grid-template-columns:1fr}
+}
 @media (max-width:360px){
   :root{--pad:12px;--r:20px}
   .head{gap:7px}
@@ -536,7 +539,6 @@ select.tinput{appearance:none;background-image:
   .who .rl{max-width:100px}
   .wallet-mini .v{font-size:22px}
   .wallet-mini .l{display:none}
-  .two,.searchtools{grid-template-columns:1fr}
   .evidence-grid{grid-template-columns:1fr 1fr}
 }
 </style>
@@ -575,13 +577,13 @@ select.tinput{appearance:none;background-image:
 
     <!-- подписка на канал -->
     <div id="subBox" class="card warm hidden">
-      <div class="eyebrow"><b></b>Подписка</div>
+      <div class="eyebrow"><b></b>Шаг 1 · вступление</div>
       <h2 class="big">Вступи в сообщество</h2>
-      <p class="sub">Ты пришёл по ссылке друга. Вступи в сообщество и подай заявку.
-        После одобрения другу засчитается приглашение, а тебе откроются задания.</p>
+      <p class="sub">Ты пришёл по ссылке друга. Вступи в сообщество.
+        После запроса вернись сюда — следующим шагом заполнишь короткую анкету.</p>
       <div class="acts">
         <button class="btn btn-volt sm" id="subOpen">Открыть сообщество</button>
-        <button class="mini" id="subCheck">Я подписался</button>
+        <button class="mini" id="subCheck">Проверить вступление</button>
       </div>
     </div>
 
@@ -601,7 +603,7 @@ select.tinput{appearance:none;background-image:
             autocomplete="name" maxlength="80"></div>
         <div class="field"><label for="apCity">Город</label>
           <input class="tinput" id="apCity" placeholder="Краснодар" inputmode="text" maxlength="80"></div>
-        <div class="field"><label for="apAbout">Как можешь быть полезен</label>
+        <div class="field"><label for="apAbout">Как можешь быть полезен · обязательно</label>
           <textarea class="tinput" id="apAbout" rows="4" maxlength="600"
             aria-describedby="apAboutCount privacyNotice"
             placeholder="Например: могу поправлять парковки, перевозить байки на машине и делать фото результата"></textarea>
@@ -617,7 +619,7 @@ select.tinput{appearance:none;background-image:
     <div id="waitBox" class="card warm hidden">
       <div class="eyebrow"><b></b>БибиЗадачи · статус заявки</div>
       <h2 class="big">⏳ Заявка на рассмотрении</h2>
-      <p class="sub" id="waitMessage">Ответственный рассмотрит заявку. После решения
+      <p class="sub" id="waitMessage">Ответственный рассмотрит заявку обычно в течение 72 часов. После решения
         статус изменится здесь, а уведомление придёт в чат с ботом.</p>
       <div class="charge warm" style="margin-top:13px"><i style="width:55%"></i></div>
       <button class="btn btn-ghost hidden" id="waitBot" style="margin-top:13px">Открыть чат с ботом</button>
@@ -1548,7 +1550,6 @@ async function load(){
     sel.dataset.filled = '1';
   }
 
-  renderSubscribeBox();
   renderTasksTab();
   document.querySelectorAll('.admin-only').forEach(el=>{
     el.style.display = STATE.is_admin ? 'flex' : 'none';
@@ -1557,7 +1558,18 @@ async function load(){
 
   $('loading').classList.add('hidden');
   $('app').classList.remove('hidden');
-  $('nav').classList.remove('hidden');
+  const navigationReady=!!(STATE.can_work||STATE.is_admin);
+  if(!navigationReady){
+    document.querySelectorAll('#nav .tab').forEach(button=>{
+      const selected=button.dataset.tab==='tab-tasks';
+      button.classList.toggle('on',selected);
+      if(selected) button.setAttribute('aria-current','page');
+      else button.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.tabview').forEach(view=>
+      view.classList.toggle('hidden',view.id!=='tab-tasks'));
+  }
+  $('nav').classList.toggle('hidden',!navigationReady);
 }
 
 function setBonus(v){
@@ -1587,6 +1599,7 @@ function renderSubscribeBox(){
   const show = !!(g.required && g.invited && !g.confirmed && !REFERRAL_PENDING_APPROVAL);
   $('subBox').classList.toggle('hidden', !show);
   $('subOpen').classList.toggle('hidden', !g.url);
+  return show;
 }
 $('subOpen').onclick = ()=>{
   const url = STATE && STATE.referral_gate && STATE.referral_gate.url;
@@ -1608,7 +1621,8 @@ function renderTasksTab(){
   const canWork = !!STATE.can_work;
   const blocked = me.status==='blocked';
   const waiting = !canWork && !blocked && !!me.applied;
-  const fresh   = !canWork && !blocked && !me.applied;
+  const communityStep = renderSubscribeBox();
+  const fresh   = !canWork && !blocked && !me.applied && !communityStep;
   $('applyBox').classList.toggle('hidden', !fresh);
   $('waitBox').classList.toggle('hidden', !waiting);
   $('blockedBox').classList.toggle('hidden', !blocked);
@@ -1622,8 +1636,8 @@ function renderTasksTab(){
     ? 'Исправить и отправить анкету снова можно через '+Math.max(1,Math.ceil(retryAfter/3600))+' ч.'
     : '';
   $('waitMessage').textContent=WRITE_ACCESS_STATE!==true
-    ? 'Заявка на рассмотрении. Telegram не разрешил уведомления — проверяй статус здесь или открой чат с ботом и нажми Start.'
-    : 'Ответственный рассмотрит заявку. После решения статус изменится здесь, а уведомление придёт в чат с ботом.';
+    ? 'Заявка на рассмотрении — обычно до 72 часов. Telegram не разрешил уведомления: проверяй статус здесь или открой чат с ботом и нажми Start.'
+    : 'Ответственный обычно рассмотрит заявку в течение 72 часов. После решения статус изменится здесь, а уведомление придёт в чат с ботом.';
   $('waitBot').classList.toggle('hidden', !waiting || WRITE_ACCESS_STATE===true);
   $('waitRefresh').classList.toggle('hidden', !waiting);
   $('worksBox').classList.toggle('hidden', !canWork);

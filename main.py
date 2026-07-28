@@ -591,6 +591,19 @@ def _validate_update_receiver_config():
         raise RuntimeError("BOT_TOKEN and webhook/health secrets must all be independent")
 
 
+def _validate_bot_identity(me):
+    """Refuse to start when BOT_TOKEN belongs to a different Telegram bot."""
+    actual_username = _clean_username(getattr(me, "username", ""))
+    if not bool(getattr(me, "is_bot", False)) or not actual_username:
+        raise RuntimeError("Telegram getMe did not return a valid bot identity")
+    if not BOT_USERNAME or not hmac.compare_digest(
+        actual_username.casefold(), BOT_USERNAME.casefold(),
+    ):
+        raise RuntimeError(
+            "BOT_TOKEN belongs to a different bot than configured BOT_USERNAME"
+        )
+
+
 def _normalize_account_ref(value):
     value = " ".join(str(value or "").strip().split())
     if not 3 <= len(value) <= 100 or any(ord(char) < 32 for char in value):
@@ -2763,6 +2776,20 @@ async def _active_admin_ids_in_tx(db):
     return {
         int(row[0]) for row in await (await db.execute(sql)).fetchall()
     }
+
+
+async def _admin_task_has_independent_review_path_in_tx(
+    db, creator_id, performer_id,
+):
+    """Require distinct actors for review and a possible later dispute."""
+    active_admins = await _active_admin_ids_in_tx(db)
+    performer_id = int(performer_id)
+    creator_id = int(creator_id) if creator_id is not None else None
+    eligible_reviewers = active_admins - {performer_id, creator_id}
+    return any(
+        active_admins - {performer_id, reviewer_id}
+        for reviewer_id in eligible_reviewers
+    )
 
 
 async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, actor_id):
@@ -5501,7 +5528,7 @@ async def api_task_claim(request):
                 "message": "Это задание назначено другому сотруднику.",
             }, status=403)
         member = await (await db.execute(
-            "SELECT city FROM members WHERE user_id=? AND status='approved'",
+            "SELECT city,role FROM members WHERE user_id=? AND status='approved'",
             (uid,),
         )).fetchone()
         worker_city = _city_key(member["city"] if member else "")
@@ -5591,6 +5618,20 @@ async def api_task_claim(request):
             return _json({
                 "error": "budget_limit",
                 "message": "Бюджет этого задания уже распределён.",
+            }, status=409)
+        if (
+            member["role"] == "admin"
+            and not await _admin_task_has_independent_review_path_in_tx(
+                db, row["created_by"], uid,
+            )
+        ):
+            await db.rollback()
+            return _json({
+                "error": "admin_task_independence",
+                "message": (
+                    "Ответственный не может взять это задание: нужны два других "
+                    "действующих администратора для независимой проверки и возможного спора."
+                ),
             }, status=409)
         claimed_at = now_iso()
         try:
@@ -7507,6 +7548,35 @@ async def api_admin_task_create(request):
                     "idempotent": True,
                     "announcement_status": delivery[0] if delivery else "not_requested",
                 })
+            if assigned_to is not None:
+                current_assignee = await (await db.execute(
+                    "SELECT status,role FROM members WHERE user_id=?",
+                    (assigned_to,),
+                )).fetchone()
+                if (
+                    not current_assignee
+                    or current_assignee["status"] != "approved"
+                    or current_assignee["role"] not in ("helper", "employee", "admin")
+                ):
+                    await db.rollback()
+                    return _json({
+                        "error": "assignee_changed",
+                        "message": "Участник больше недоступен для назначения. Обнови список.",
+                    }, status=409)
+                if (
+                    current_assignee["role"] == "admin"
+                    and not await _admin_task_has_independent_review_path_in_tx(
+                        db, admin_id, assigned_to,
+                    )
+                ):
+                    await db.rollback()
+                    return _json({
+                        "error": "admin_task_independence",
+                        "message": (
+                            "Нельзя назначить задание ответственному: нужны два других "
+                            "действующих администратора для независимой проверки и возможного спора."
+                        ),
+                    }, status=409)
             if brief_image:
                 media_claim = await db.execute(
                     "UPDATE media_objects SET delete_after=NULL "
@@ -11072,7 +11142,7 @@ async def show_rank(message: Message):
     level = trust_for(score)
     nxt = next_trust(score)
     lines = [
-        f"{level[2]} <b>{user.full_name}</b> — {level[1]}",
+        f"{level[2]} <b>{_html(user.full_name)}</b> — {level[1]}",
         f"Заданий выполнено: {done}",
         f"Опыт в беседе: {xp} "
         f"(≈{xp // max(1, CHAT_XP_PER_TASK)} к уровню)",
@@ -12202,7 +12272,7 @@ async def _announce_level(message, user, level):
     """Короткое поздравление в той же подтеме."""
     try:
         await message.answer(
-            f"{level[2]} <b>{user.full_name}</b> — новый уровень доверия: "
+            f"{level[2]} <b>{_html(user.full_name)}</b> — новый уровень доверия: "
             f"<b>{level[1]}</b>",
             parse_mode="HTML")
     except Exception:
@@ -12459,12 +12529,13 @@ async def main():
     _shutdown_event.clear()
     try:
         _validate_update_receiver_config()
+        me = await bot.get_me()
+        _validate_bot_identity(me)
         ensure_recovery_key_canary(
             DATA_DIR, TELEGRAM_INBOX_FERNET, WITHDRAW_FERNET,
             production=BIBITASKS_ENVIRONMENT == "production",
         )
         await init_db()
-        me = await bot.get_me()
         runner = await start_api_server()
         _background_tasks["lifecycle"] = asyncio.create_task(lifecycle_worker())
         _background_tasks["outbox"] = asyncio.create_task(outbox_worker())
