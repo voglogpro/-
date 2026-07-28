@@ -30,7 +30,8 @@ def upgrade() -> None:
             granted_operation_id TEXT, granted_at TIMESTAMPTZ NOT NULL,
             CONSTRAINT pk_admin_authorities PRIMARY KEY (user_id, origin),
             CONSTRAINT fk_admin_authority_user FOREIGN KEY (user_id)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT ck_admin_authority_origin CHECK (origin IN ('env','manual'))
         )
     """)

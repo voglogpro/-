@@ -115,6 +115,7 @@ jobs:
                   "CREATE TABLE withdrawal_requests "
                   "(id INTEGER PRIMARY KEY,account_ciphertext TEXT,status TEXT)"
               )
+              db.commit()
           result = subprocess.run(
               [sys.executable, "scripts/backup.py", "--data-dir", str(data),
                "--output-dir", str(output)],

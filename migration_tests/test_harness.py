@@ -31,6 +31,20 @@ class MigrationHarnessTests(unittest.TestCase):
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
         self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 295)
 
+    def test_incremental_foreign_keys_match_canonical_deferrability(self):
+        versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
+        for filename in (
+            "0003_admin_financial_controls.py",
+            "0004_authority_operation_registry.py",
+        ):
+            ddl = (versions / filename).read_text(encoding="utf-8")
+            self.assertGreater(ddl.count("FOREIGN KEY"), 0, filename)
+            self.assertEqual(
+                ddl.count("FOREIGN KEY"),
+                ddl.count("DEFERRABLE INITIALLY DEFERRED"),
+                f"{filename} must mirror db_migration.metadata fk() semantics",
+            )
+
     def test_integer_and_json_conversion_are_lossless(self):
         self.assertEqual(parse_bigint(42), 42)
         for bad in (True, 1.0, 1.9, "1"):

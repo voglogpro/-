@@ -24,11 +24,14 @@ def upgrade() -> None:
             ledger_id BIGINT NOT NULL, result_balance BIGINT NOT NULL,
             CONSTRAINT pk_manual_grant_commands PRIMARY KEY (operation_id),
             CONSTRAINT fk_manual_grant_user FOREIGN KEY (user_id)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT fk_manual_grant_maker FOREIGN KEY (maker_id)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT fk_manual_grant_ledger FOREIGN KEY (ledger_id)
-                REFERENCES bonus_ledger (id) ON DELETE RESTRICT,
+                REFERENCES bonus_ledger (id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT ck_manual_grant_positive CHECK (amount BETWEEN 1 AND 200),
             CONSTRAINT ck_manual_grant_distinct CHECK (maker_id <> user_id)
         )
@@ -54,11 +57,14 @@ def upgrade() -> None:
             CONSTRAINT uq_admin_role_request_operation UNIQUE (request_operation_id),
             CONSTRAINT uq_admin_role_decision_operation UNIQUE (decision_operation_id),
             CONSTRAINT fk_admin_role_target FOREIGN KEY (user_id)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT fk_admin_role_maker FOREIGN KEY (requested_by)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT fk_admin_role_checker FOREIGN KEY (decided_by)
-                REFERENCES members (user_id) ON DELETE RESTRICT,
+                REFERENCES members (user_id) ON DELETE RESTRICT
+                DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT ck_admin_role_distinct CHECK (from_role <> to_role),
             CONSTRAINT ck_admin_role_status CHECK (status IN ('pending','applied','rejected')),
             CONSTRAINT ck_admin_role_maker_target CHECK (requested_by <> user_id),
