@@ -10,6 +10,7 @@ from scripts.bootstrap_production_env import (
     BootstrapConfig,
     build_environment,
     write_environment,
+    write_monitor_secrets,
 )
 
 
@@ -43,6 +44,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(values["MINI_APP_URL"], "https://tasks.example.test/")
         self.assertEqual(values["TOPIC_WORK"], "13")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
+        self.assertEqual(values["MANUAL_GRANT_DAILY_LIMIT"], "300")
         self.assertNotIn(token, "\n".join(values[name] for name in secret_names))
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as data_dir:
@@ -86,6 +88,31 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "HTTPS origin"):
             build_environment(config, token)
+
+    def test_monitor_secrets_are_separate_restricted_and_never_overwritten(self):
+        token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"
+        alert = "654321:" + "ZYXWVUTSRQPONMLKJIHGFEDCBA_abcdefghijklm"
+        values = build_environment(self.config(), token)
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            repo = root_path / "repo"
+            repo.mkdir()
+            secure = root_path / "secure"
+            paths = write_monitor_secrets(
+                secure, values, alert, repository_root=repo,
+            )
+            self.assertEqual(paths["alert_bot_token"].read_text("utf-8").strip(), alert)
+            self.assertEqual(
+                paths["health_token"].read_text("utf-8").strip(), values["HEALTH_TOKEN"],
+            )
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(paths["health_token"].stat().st_mode), 0o600)
+            with self.assertRaises(FileExistsError):
+                write_monitor_secrets(secure, values, alert, repository_root=repo)
+            with self.assertRaisesRegex(ValueError, "dedicated"):
+                write_monitor_secrets(root_path / "same", values, token, repository_root=repo)
+            with self.assertRaisesRegex(ValueError, "inside the repository"):
+                write_monitor_secrets(repo / "secrets", values, alert, repository_root=repo)
 
 
 if __name__ == "__main__":

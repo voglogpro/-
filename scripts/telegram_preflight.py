@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -133,8 +134,15 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
         "OPS_TOPIC_TASKS",
     )
     topic_ids = {name: _integer(env, name) for name in topic_names}
-    expected_bot_name = str(env.get("PREFLIGHT_EXPECTED_BOT_NAME", "Бибибайк")).strip()
-    expected_group_title = str(env.get("PREFLIGHT_EXPECTED_GROUP_TITLE", "Бибибайк")).strip()
+    expected_bot_name = str(
+        env.get("PREFLIGHT_EXPECTED_BOT_NAME", "БибиЗадачи · Бибибайк")
+    ).strip()
+    expected_group_title = str(
+        env.get("PREFLIGHT_EXPECTED_GROUP_TITLE", "Бибибайк | Сообщество помощников")
+    ).strip()
+    expected_group_description = str(
+        env.get("PREFLIGHT_EXPECTED_GROUP_DESCRIPTION", "")
+    ).strip()
     expected_description = str(env.get("BOT_PROFILE_DESCRIPTION", "")).strip()
     expected_short_description = str(env.get("BOT_PROFILE_SHORT_DESCRIPTION", "")).strip()
     expected_menu_text = str(env.get("BOT_MENU_TEXT", "")).strip()
@@ -148,6 +156,10 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     add("MINI_APP_URL", bool(mini_app_url and mini_app_url == public_origin + "/"), "matches deployment root", "must be the HTTPS deployment root")
     add("WEBAPP_SHORTNAME", bool(webapp_shortname), "configured", "missing")
     add("bot profile copy", bool(expected_description and expected_short_description and expected_menu_text), "configured", "description, short description or menu text is missing")
+    add(
+        "public group copy configured", bool(expected_group_description),
+        "configured", "public group description is missing",
+    )
     add(
         "topic IDs",
         all(value is not None and value > 0 for value in topic_ids.values())
@@ -233,6 +245,16 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
         add("public group username", actual_group_username == group_username, f"@{actual_group_username}", f"expected @{group_username}, got @{actual_group_username or 'private'}")
         title = str(public_chat.get("title", "")).strip()
         add("public group brand", expected_group_title.casefold() in title.casefold(), title, f"expected title containing {expected_group_title!r}, got {title!r}")
+        actual_group_description = str(
+            public_chat.get("description") or ""
+        ).strip()
+        add(
+            "public group route to bot",
+            bool(expected_group_description)
+            and actual_group_description == expected_group_description,
+            "group description matches the approved bot route and bonus copy",
+            "group description differs from the approved bot route and bonus copy",
+        )
     if ops_chat:
         add("OPS chat type", ops_chat.get("type") == "supergroup", "supergroup", f"unexpected type {ops_chat.get('type')!r}")
         add("OPS forum mode", bool(ops_chat.get("is_forum")), "topics enabled", "topics/forum mode is disabled")
@@ -277,6 +299,8 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
 def _report(checks):
     counts = {status: sum(item.status == status for item in checks) for status in ("pass", "warn", "fail")}
     return {
+        "report_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "ok": counts["fail"] == 0,
         "summary": counts,
         "checks": [asdict(item) for item in checks],

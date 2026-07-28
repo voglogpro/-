@@ -5,6 +5,13 @@ function state(overrides = {}) {
     build_version: 'browser-test',
     bot_username: 'BbGalterbot',
     support_username: 'bibitasks_support',
+    privacy_url: '',
+    help: {
+      community_url: 'https://t.me/bbbikefan',
+      work_topic_url: 'https://t.me/bbbikefan/4',
+      bot_url: 'https://t.me/BbGalterbot',
+      support_url: 'https://t.me/bibitasks_support',
+    },
     can_work: false,
     is_admin: false,
     task_types: [],
@@ -41,6 +48,8 @@ async function openMiniApp(page, options = {}) {
   let currentState = options.initialState || state();
   const requests = [];
   let announcementStatusCall = 0;
+  let approveCall = 0;
+  let awardGrantCall = 0;
 
   await page.route('https://telegram.org/js/telegram-web-app.js', route =>
     route.fulfill({ status: 200, contentType: 'application/javascript', body: '' })
@@ -160,6 +169,36 @@ async function openMiniApp(page, options = {}) {
         body: JSON.stringify(overview),
       });
     }
+    if (url.pathname === '/api/awards' && options.adminOverview) {
+      const overview = typeof options.adminOverview === 'function'
+        ? options.adminOverview()
+        : options.adminOverview;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ catalog: overview.awards || [], mine: [] }),
+      });
+    }
+    if (url.pathname === '/api/admin/task/approve' && options.approveResponses) {
+      const sequence = options.approveResponses;
+      const value = sequence[Math.min(approveCall, sequence.length - 1)];
+      approveCall += 1;
+      return route.fulfill({
+        status: value.status,
+        contentType: 'application/json',
+        body: JSON.stringify(value.body || {}),
+      });
+    }
+    if (url.pathname === '/api/admin/award/grant' && options.awardGrantResponses) {
+      const sequence = options.awardGrantResponses;
+      const value = sequence[Math.min(awardGrantCall, sequence.length - 1)];
+      awardGrantCall += 1;
+      return route.fulfill({
+        status: value.status,
+        contentType: 'application/json',
+        body: JSON.stringify(value.body || {}),
+      });
+    }
     return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
 
@@ -191,6 +230,75 @@ test('новичок отправляет заявку без номера те�
     about: 'Могу поправлять парковки и фотографировать результат',
   });
   expect(JSON.stringify(application.body)).not.toContain('phone');
+  await expect(page.locator('#participantRegister')).toContainText('1000 бонусов ≈ 118 минут');
+  await expect(page.locator('#privacyNotice')).toContainText('Имя, город и комментарий');
+  await expect(page.locator('#privacyNotice a')).toHaveCount(0);
+});
+
+test('отклонённую анкету можно явно исправить только после суточного лимита', async ({ page }) => {
+  const rejected = state({
+    me: {
+      status: 'blocked', role: 'applicant', applied: true,
+      application_note: 'Опиши конкретнее', about: 'Могу помогать',
+      can_resubmit: true, resubmit_retry_after: 0,
+    },
+  });
+  const harness = await openMiniApp(page, { initialState: rejected });
+
+  await expect(page.locator('#blockedBox')).toContainText('Опиши конкретнее');
+  await page.locator('#blockedReapply').click();
+  await expect(page.locator('#applyBox')).toBeVisible();
+  await expect(page.locator('#apName')).toHaveValue('Анна');
+  await expect(page.locator('#apCity')).toHaveValue('Краснодар');
+  await expect(page.locator('#apAbout')).toHaveValue('Могу помогать');
+  await expect(page.locator('#apSend')).toHaveText('Отправить повторную заявку');
+  await page.locator('#apAbout').fill('Могу поправлять парковки и делать фотоотчёт');
+  await page.locator('#apSend').click();
+  await expect(page.locator('#waitBox')).toBeVisible();
+  expect(harness.requests.filter(item => item.path === '/api/apply')).toHaveLength(1);
+
+  const cooldown = state({
+    me: {
+      status: 'blocked', role: 'applicant', applied: true,
+      can_resubmit: false, resubmit_retry_after: 7200,
+    },
+  });
+  harness.setState(cooldown);
+  await page.reload();
+  await expect(page.locator('#app')).toBeVisible();
+  await expect(page.locator('#blockedReapply')).toBeHidden();
+  await expect(page.locator('#blockedCooldown')).toContainText('через 2 ч');
+});
+
+test('помощь одобренного участника содержит безопасные рабочие ссылки', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: state({
+      can_work: true,
+      privacy_url: 'https://example.org/privacy',
+      me: { status: 'approved' },
+    }),
+    tasksData: { available: [], mine: [] },
+  });
+
+  await page.locator('#nav [data-tab="tab-profile"]').click();
+  await expect(page.locator('#pHelpCard')).toContainText('Как выполнять задания');
+  await expect(page.locator('#pHelpLinks')).toContainText('Рабочая тема');
+  await expect(page.locator('#pHelpLinks')).toContainText('Ответственный');
+  await expect(page.locator('#privacyNotice a')).toHaveAttribute('href', 'https://example.org/privacy');
+  await page.getByRole('button', { name: '🛠 Рабочая тема' }).click();
+  expect(await page.evaluate(() => window.__openedTelegramUrl)).toBe('https://t.me/bbbikefan/4');
+});
+
+test('пустой список заданий ведёт к инструкции и рабочей теме', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: state({ can_work: true, me: { status: 'approved' } }),
+    tasksData: { available: [], mine: [] },
+  });
+  await expect(page.locator('#availList')).toContainText('Свободных заданий сейчас нет');
+  await expect(page.locator('#emptyTasksWork')).toBeVisible();
+  await page.locator('#emptyTasksHelp').click();
+  await expect(page.locator('#tab-profile')).toBeVisible();
+  await expect(page.locator('#pHelpCard')).toContainText('Проверь город, адрес, срок');
 });
 
 test('светлая и тёмная темы меняют фон и цвет текста', async ({ page }) => {
@@ -657,5 +765,139 @@ test('снятие награды требует причину и идемпо�
   const request = harness.requests.find(item => item.path === '/api/admin/award/revoke');
   expect(request.body.entry_id).toBe(41);
   expect(request.body.note).toContain('не тому');
+  expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+});
+
+test('award grant has final confirmation and retries with the same operation id', async ({ page }) => {
+  const overview = {
+    pending: [], pending_total: 0, rejected: [], city_changes: [], review: [],
+    review_total: 0, recent_decisions: [], open_tasks: [], granted: [], withdrawals: [],
+    task_templates: [], role_changes: [],
+    team: [{ user_id: 501, name: 'Иван Петров', status: 'approved', role: 'helper' }],
+    awards: [{ id: 41, emoji: '🏅', title: 'Спас байк', description: 'Помощь', bonus: 50, repeatable: false, active: true }],
+  };
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }), adminOverview: overview,
+    awardGrantResponses: [
+      { status: 503, body: { message: 'Ответ сервера не подтверждён' } },
+      { status: 200, body: { ok: true, bonus: 50 } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await page.locator('[data-awgrant="41"]').click();
+  await page.locator('#grantSave').click();
+  await expect(page.locator('#grantSheet')).toBeVisible();
+  expect(harness.requests.filter(item => item.path === '/api/admin/award/grant')).toHaveLength(0);
+  await page.locator('#grantNote').fill('Поправил парковку и прислал фото');
+  await page.locator('#grantSave').click();
+  await expect(page.locator('#awardGrantConfirmSheet')).toBeVisible();
+  await expect(page.locator('#awardGrantConfirmBody')).toContainText('Иван Петров');
+  await expect(page.locator('#awardGrantConfirmBody')).toContainText('+50⚡');
+  expect(harness.requests.filter(item => item.path === '/api/admin/award/grant')).toHaveLength(0);
+  await page.locator('#awardGrantConfirm').click();
+  await expect.poll(() => harness.requests.filter(item => item.path === '/api/admin/award/grant').length).toBe(1);
+  const first = harness.requests.find(item => item.path === '/api/admin/award/grant');
+  expect(await page.evaluate(() => sessionStorage.getItem('bibitasks_award_grant_501_41'))).toContain(first.body.operation_id);
+  await page.locator('#awardGrantConfirm').click();
+  await expect.poll(() => harness.requests.filter(item => item.path === '/api/admin/award/grant').length).toBe(2);
+  const grants = harness.requests.filter(item => item.path === '/api/admin/award/grant');
+  expect(grants[1].body.operation_id).toBe(grants[0].body.operation_id);
+  await expect(page.locator('#awardGrantConfirmSheet')).toBeHidden();
+});
+
+test('подтверждение отчёта показывает сумму и повторяет неоднозначный ответ с тем же operation_id', async ({ page }) => {
+  const overview = {
+    pending: [], pending_total: 0, rejected: [], city_changes: [],
+    review_total: 1, recent_decisions: [], open_tasks: [], team: [],
+    awards: [], granted: [], withdrawals: [], task_templates: [], role_changes: [],
+    review: [{
+      id: 501, assignment_id: 701, title: 'Поправить парковку у вокзала',
+      type_title: 'Парковка', emoji: '🚲', reward: 120, status: 'review',
+      task_status: 'review', city: 'Краснодар', address: 'Вокзал',
+      claimed_name: 'Иван Петров', can_approve: true, evidence_policy: 'after_required',
+      after_photos: ['https://example.test/after.jpg'],
+    }],
+  };
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }), adminOverview: overview,
+    approveResponses: [
+      { status: 503, body: { message: 'Ответ сервера не подтверждён' } },
+      { status: 200, body: { ok: true, status: 'done' } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-tok="501"]').click();
+  await expect(page.locator('#approveSheet')).toBeVisible();
+  await expect(page.locator('#approveBody')).toContainText('Иван Петров');
+  await expect(page.locator('#approveBody')).toContainText('+120⚡');
+  expect(harness.requests.filter(item => item.path === '/api/admin/task/approve')).toHaveLength(0);
+
+  await page.locator('#approveConfirm').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/task/approve'
+  ).length).toBe(1);
+  const first = harness.requests.find(item => item.path === '/api/admin/task/approve');
+  const stored = await page.evaluate(() => sessionStorage.getItem('bibitasks_review_approve_701'));
+  expect(stored).toContain(first.body.operation_id);
+
+  await page.locator('#approveConfirm').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/task/approve'
+  ).length).toBe(2);
+  const approvals = harness.requests.filter(item => item.path === '/api/admin/task/approve');
+  expect(approvals[1].body.operation_id).toBe(approvals[0].body.operation_id);
+  await expect(page.locator('#approveSheet')).toBeHidden();
+  expect(await page.evaluate(() => sessionStorage.getItem('bibitasks_review_approve_701'))).toBeNull();
+});
+
+test('роль ответственного ставится в очередь и подтверждается вторым админом', async ({ page }) => {
+  const overview = {
+    pending: [], pending_total: 0, rejected: [], city_changes: [], review: [],
+    review_total: 0, recent_decisions: [], open_tasks: [], team: [], awards: [],
+    granted: [], withdrawals: [], task_templates: [],
+    role_changes: [{
+      id: 91, user_id: 303, user_name: 'Новый скаут', from_role: 'helper',
+      to_role: 'admin', reason: 'Будет проверять задания вечерней смены',
+      requested_by: 202, requested_by_name: 'Скаут один',
+      requested_at: '2026-07-28T12:00:00+00:00', can_decide: true,
+    }],
+  };
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }), adminOverview: overview,
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubTeam"]').click();
+  const queue = page.locator('#adRoleChanges');
+  await expect(queue).toContainText('Новый скаут');
+  await expect(queue).toContainText('Помощник → Ответственный');
+  await queue.getByRole('button', { name: 'Подтвердить' }).click();
+  await expect(page.locator('#askSheet')).toBeVisible();
+  await expect(page.locator('#askLead')).toContainText('личность участника');
+  await page.locator('#askText').fill('Личность и доступ проверены');
+  await page.locator('#askOk').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/role' && item.body?.action === 'decide'
+  ).length).toBe(1);
+  const decision = harness.requests.find(
+    item => item.path === '/api/admin/role' && item.body?.action === 'decide'
+  );
+  expect(decision.body.change_id).toBe(91);
+  expect(decision.body.decision).toBe('approve');
+  expect(decision.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+
+  await page.evaluate(() => openRole(303, 'Новый скаут', 'helper'));
+  await page.locator('#roleSheet [data-role="admin"]').click();
+  await expect(page.locator('#askTitle')).toHaveText('Запросить доступ ответственного');
+  await page.locator('#askText').fill('Будет проверять задания вечерней смены');
+  await page.locator('#askOk').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/role' && item.body?.action === 'request'
+  ).length).toBe(1);
+  const request = harness.requests.find(
+    item => item.path === '/api/admin/role' && item.body?.action === 'request'
+  );
+  expect(request.body.user_id).toBe(303);
+  expect(request.body.reason).toContain('вечерней смены');
   expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
 });

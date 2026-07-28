@@ -45,12 +45,13 @@ services:
       BIBITASKS_DEPLOYMENT_IMAGE: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
       BACKUP_DATA_DIR: /app/data
       BACKUP_OUTPUT_DIR: /app/backups
-      BACKUP_STATUS_FILE: /tmp/backup-status.json
+      BACKUP_STATUS_FILE: /run/bibitasks-backup/status.json
       BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-600}"
       BACKUP_RPO_SECONDS: "${BACKUP_RPO_SECONDS:-900}"
       BACKUP_MAX_CONSECUTIVE_FAILURES: "3"
     volumes:
       - bibitasks_data:/app/data:ro
+      - backup_status:/run/bibitasks-backup
       - type: bind
         source: "${BACKUP_DIR:?Mount an encrypted off-host backup destination}"
         target: /app/backups
@@ -76,6 +77,59 @@ services:
       interval: 60s
       timeout: 10s
       start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  monitor:
+    image: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
+    command: ["python", "scripts/deployment_guard.py", "python", "scripts/pilot_monitor_launcher.py", "python", "scripts/pilot_monitor.py"]
+    restart: "unless-stopped"
+    user: "0:0"
+    environment:
+      BIBITASKS_DEPLOYMENT_IMAGE: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
+      BIBITASKS_ENVIRONMENT: production
+      MONITOR_READINESS_URL: http://bibitasks:3000/health/ready
+      MONITOR_ALERT_TOKEN_FILE: /run/bibitasks-monitor-private/alert-token
+      MONITOR_HEALTH_TOKEN_FILE: /run/bibitasks-monitor-private/health-token
+      MONITOR_BACKUP_STATUS_FILE: /run/bibitasks-backup/status.json
+      MONITOR_STATE_FILE: /var/lib/bibitasks-monitor/state.json
+      MONITOR_ALERT_CHAT_ID: "${MONITOR_ALERT_CHAT_ID:?Set the private Telegram alert supergroup ID}"
+      MONITOR_INSTANCE_LABEL: "${MONITOR_INSTANCE_LABEL:-pilot-1}"
+      MONITOR_INTERVAL_SECONDS: "${MONITOR_INTERVAL_SECONDS:-30}"
+      MONITOR_TIMEOUT_SECONDS: "${MONITOR_TIMEOUT_SECONDS:-5}"
+      MONITOR_FAILURE_THRESHOLD: "${MONITOR_FAILURE_THRESHOLD:-2}"
+      MONITOR_DELIVERY_FAILURE_THRESHOLD: "${MONITOR_DELIVERY_FAILURE_THRESHOLD:-3}"
+      MONITOR_REMINDER_SECONDS: "${MONITOR_REMINDER_SECONDS:-3600}"
+      BACKUP_RPO_SECONDS: "${BACKUP_RPO_SECONDS:-900}"
+    secrets:
+      - monitor_alert_bot_token
+      - monitor_health_token
+    volumes:
+      - backup_status:/run/bibitasks-backup:ro
+      - monitor_state:/var/lib/bibitasks-monitor
+    networks: [pilot]
+    depends_on:
+      bibitasks:
+        condition: service_started
+      backup:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+      - /run/bibitasks-monitor-private:size=16k,mode=0700
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "SETGID", "SETUID"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "python", "scripts/pilot_monitor_launcher.py", "--drop-only", "python", "scripts/pilot_monitor.py", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
       retries: 3
     logging:
       driver: json-file
@@ -122,3 +176,11 @@ volumes:
     name: "${BIBITASKS_DATA_VOLUME:-bibitasks_data}"
   caddy_data:
   caddy_config:
+  backup_status:
+  monitor_state:
+
+secrets:
+  monitor_alert_bot_token:
+    file: "${MONITOR_ALERT_BOT_TOKEN_FILE:?Point to a root-owned 0600 Telegram bot token file}"
+  monitor_health_token:
+    file: "${MONITOR_HEALTH_TOKEN_FILE:?Point to a root-owned 0600 health token file}"

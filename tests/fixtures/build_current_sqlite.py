@@ -54,6 +54,11 @@ def main():
             (stamp, stamp, 101, stamp),
         )
         db.execute(
+            "INSERT INTO admin_authorities "
+            "(user_id,origin,granted_operation_id,granted_at) "
+            "VALUES (101,'manual','fixture-authority',?)", (stamp,),
+        )
+        db.execute(
             "INSERT INTO media_objects "
             "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
             "upload_operation_id,request_hash,created_at,ready_at,reconcile_attempts) "
@@ -214,6 +219,12 @@ def main():
             "(id,user_id,award_id,slot,bonus,note,granted_by,granted_at,operation_id,"
             "balance_after) VALUES (8001,101,?,'fixture',0,'Тест',101,?,"
             "'award-fixture',0)", (award_id, stamp),
+        )
+        db.execute(
+            "INSERT INTO operation_registry "
+            "(operation_id,command_type,request_hash,actor_id,created_at) "
+            "VALUES ('award-fixture','award_grant',?,101,?)",
+            ("f" * 64, stamp),
         )
         db.commit()
     print(application.DB_PATH)

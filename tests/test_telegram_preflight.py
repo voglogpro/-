@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import datetime
 
 from scripts.telegram_preflight import BOT_COMMANDS, run_preflight
 
@@ -18,7 +19,8 @@ def base_env():
         "TELEGRAM_UPDATE_MODE": "webhook",
         "WEBHOOK_ROUTE_ID": "route_" + "x" * 40,
         "PREFLIGHT_EXPECTED_BOT_NAME": "Бибибайк",
-        "PREFLIGHT_EXPECTED_GROUP_TITLE": "Бибибайк",
+        "PREFLIGHT_EXPECTED_GROUP_TITLE": "Бибибайк | Сообщество помощников",
+        "PREFLIGHT_EXPECTED_GROUP_DESCRIPTION": "Помогаем Бибибайку в своём городе и получаем бибибонусы на поездки. Задания: @BbGalterbot → «Открыть задания». 1 бонус = 1 ₽, минута — 8,5 ₽.",
         "BOT_PROFILE_DESCRIPTION": "Полное описание",
         "BOT_PROFILE_SHORT_DESCRIPTION": "Короткое описание",
         "BOT_MENU_TEXT": "Открыть задания",
@@ -46,7 +48,12 @@ def good_api(method, params=None):
         return {"value": list(BOT_COMMANDS)}
     if method == "getChat":
         if params["chat_id"] == -1001111111111:
-            return {"type": "supergroup", "is_forum": True, "username": "bbbikefan", "title": "Бибибайк · Команда"}
+            return {
+                "type": "supergroup", "is_forum": True,
+                "username": "bbbikefan",
+                "title": "Бибибайк | Сообщество помощников",
+                "description": base_env()["PREFLIGHT_EXPECTED_GROUP_DESCRIPTION"],
+            }
         return {"type": "supergroup", "is_forum": True, "title": "БибиЗадачи OPS"}
     if method == "getChatMember":
         if params["chat_id"] == -1001111111111:
@@ -70,6 +77,8 @@ class TelegramPreflightTests(unittest.TestCase):
         env = base_env()
         report = run_preflight(env, good_api)
         self.assertTrue(report["ok"])
+        self.assertEqual(report["report_version"], 1)
+        self.assertIsNotNone(datetime.fromisoformat(report["generated_at"]).tzinfo)
         self.assertEqual(report["summary"]["fail"], 0)
         self.assertNotIn(env["BOT_TOKEN"], json.dumps(report, ensure_ascii=False))
 

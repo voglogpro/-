@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+try:
+    from .recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+except ImportError:  # direct ``python scripts/restore.py`` execution
+    from recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
 
 
 def _load_environment(env_file: Path | None) -> None:
@@ -48,6 +52,32 @@ def _verified_file(root: Path, relative_value: str, expected_size: int, digest: 
     if source.stat().st_size != int(expected_size) or sha256(source) != str(digest):
         raise RuntimeError(f"Backup checksum mismatch: {relative.as_posix()}")
     return source
+
+
+def _recovery_key_counts(db: sqlite3.Connection) -> dict[str, int]:
+    try:
+        return {
+            "telegram_ciphertext_count": int(db.execute(
+                "SELECT COUNT(*) FROM telegram_update_inbox "
+                "WHERE payload_json IS NOT NULL"
+            ).fetchone()[0]),
+            "telegram_active_null_count": int(db.execute(
+                "SELECT COUNT(*) FROM telegram_update_inbox "
+                "WHERE status IN ('pending','processing') AND payload_json IS NULL"
+            ).fetchone()[0]),
+            "withdrawal_ciphertext_count": int(db.execute(
+                "SELECT COUNT(*) FROM withdrawal_requests "
+                "WHERE account_ciphertext IS NOT NULL"
+            ).fetchone()[0]),
+            "withdrawal_active_null_count": int(db.execute(
+                "SELECT COUNT(*) FROM withdrawal_requests "
+                "WHERE status IN ('pending','processing') AND account_ciphertext IS NULL"
+            ).fetchone()[0]),
+        }
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            "Restored database lacks the encrypted recovery-count contract"
+        ) from exc
 
 
 def _missing_s3(exc: Exception) -> bool:
@@ -119,6 +149,19 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
         backup_dir, database_meta.get("path", ""),
         database_meta.get("bytes", -1), database_meta.get("sha256", ""),
     )
+    canary_meta = manifest.get("recovery_key_canary") or {}
+    if set(canary_meta) != {"path", "bytes", "sha256"}:
+        raise ValueError("Backup manifest lacks the recovery-key canary contract")
+    if canary_meta.get("path") != CANARY_FILENAME:
+        raise ValueError("Backup manifest contains an invalid recovery-key canary path")
+    canary_source = _verified_file(
+        backup_dir, canary_meta["path"], canary_meta["bytes"],
+        canary_meta["sha256"],
+    )
+    if canary_source.stat().st_nlink != 1:
+        raise ValueError("Backup recovery-key canary must have exactly one hard link")
+    canary_raw = canary_source.read_bytes()
+    validate_canary_bytes(canary_raw)
 
     staging = restore_dir.parent / f".{restore_dir.name}.{uuid.uuid4().hex}.tmp"
     staging.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -128,12 +171,32 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
         shutil.copy2(database_source, database_target)
         if os.name != "nt":
             database_target.chmod(0o600)
+        canary_target = staging / CANARY_FILENAME
+        canary_target.write_bytes(canary_raw)
+        if os.name != "nt":
+            canary_target.chmod(0o600)
         with closing(sqlite3.connect(database_target)) as db:
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeError("Restored database failed integrity_check")
             restored_schema_version = int(
                 db.execute("PRAGMA user_version").fetchone()[0]
             )
+            restored_recovery_counts = _recovery_key_counts(db)
+        expected_recovery_counts = {}
+        for name in (
+            "telegram_ciphertext_count", "telegram_active_null_count",
+            "withdrawal_ciphertext_count", "withdrawal_active_null_count",
+        ):
+            value = database_meta.get(name)
+            if type(value) is not int or value < 0:
+                raise ValueError("Backup manifest contains invalid recovery counts")
+            expected_recovery_counts[name] = value
+        if (
+            expected_recovery_counts["telegram_active_null_count"] != 0
+            or expected_recovery_counts["withdrawal_active_null_count"] != 0
+            or restored_recovery_counts != expected_recovery_counts
+        ):
+            raise RuntimeError("Restored encrypted recovery counts differ from manifest")
         expected_schema_version = database_meta.get("schema_version")
         if (
             expected_schema_version is not None
@@ -214,6 +277,10 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
             "schema_version": restored_schema_version,
             "s3_versions_rewritten": len(restored_versions),
             "integrity_check": "ok",
+            "recovery_key_canary": {
+                "sha256": hashlib.sha256(canary_raw).hexdigest(),
+                "ok": True,
+            },
         }
         (staging / "restore-report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",

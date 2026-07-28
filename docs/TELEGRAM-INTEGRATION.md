@@ -161,11 +161,11 @@ Backend публикует proof в теме `Проверка` ответом �
 
 Владелец должен вручную проверить:
 
-- имя бота: `Бибибайк`;
+- имя бота: `БибиЗадачи · Бибибайк`;
 - username: `@BbGalterbot`;
 - актуальные avatar, description и short description;
 - команды через `/setcommands`: `start`, `tasks`, `profile`, `balance`, `instruction`, `help`;
-- `/setmenubutton`: текст `Открыть БибиЗадачи`, production HTTPS URL Mini App;
+- `/setmenubutton`: текст `Открыть задания`, production HTTPS URL Mini App;
 - `Configure Mini App`: short name `bibibike`, production HTTPS URL, иконка и loading colors;
 - `Main Mini App`: включён, добавлены скриншоты или видео для профиля;
 - добавление бота в группы разрешено;
@@ -179,6 +179,8 @@ Backend публикует proof в теме `Проверка` ответом �
 ### Публичная `@bbbikefan`
 
 - Тип: public supergroup.
+- Название: `Бибибайк | Сообщество помощников`.
+- Описание: `Помогаем Бибибайку в своём городе и получаем бибибонусы на поездки. Задания: @BbGalterbot → «Открыть задания». 1 бонус = 1 ₽, минута — 8,5 ₽.`
 - Forum topics: включены.
 - Сохранены числовой `chat_id` и реальные `message_thread_id`.
 - Бот назначен администратором, не анонимным.

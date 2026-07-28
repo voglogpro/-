@@ -24,6 +24,10 @@ DEFAULT_BOT_SHORT_DESCRIPTION = (
     "Задания Бибибайка: помогайте городу и получайте бибибонусы на поездки."
 )
 DEFAULT_BOT_MENU_TEXT = "Открыть задания"
+DEFAULT_GROUP_DESCRIPTION = (
+    "Помогаем Бибибайку в своём городе и получаем бибибонусы на поездки. "
+    "Задания: @BbGalterbot → «Открыть задания». 1 бонус = 1 ₽, минута — 8,5 ₽."
+)
 
 
 @dataclass(frozen=True)
@@ -40,8 +44,8 @@ class BootstrapConfig:
     ops_topic_tasks: int
     bot_username: str = "BbGalterbot"
     group_username: str = "bbbikefan"
-    expected_bot_name: str = "Бибибайк"
-    expected_group_title: str = "Бибибайк"
+    expected_bot_name: str = "БибиЗадачи · Бибибайк"
+    expected_group_title: str = "Бибибайк | Сообщество помощников"
     withdraw_contact: str = "KiriLegenda"
 
 
@@ -124,6 +128,7 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "PREFLIGHT_EXPECTED_BOT_NAME": config.expected_bot_name,
         "PREFLIGHT_EXPECTED_GROUP_TITLE": config.expected_group_title,
+        "PREFLIGHT_EXPECTED_GROUP_DESCRIPTION": DEFAULT_GROUP_DESCRIPTION,
         "BOT_PROFILE_DESCRIPTION": DEFAULT_BOT_DESCRIPTION,
         "BOT_PROFILE_SHORT_DESCRIPTION": DEFAULT_BOT_SHORT_DESCRIPTION,
         "BOT_MENU_TEXT": DEFAULT_BOT_MENU_TEXT,
@@ -140,6 +145,7 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "OPS_TOPIC_TASKS": str(config.ops_topic_tasks),
         "BIBITASKS_ENVIRONMENT": "production",
         "ADMIN_IDS": ",".join(str(value) for value in dict.fromkeys(config.admin_ids)),
+        "MANUAL_GRANT_DAILY_LIMIT": "300",
         "PORT": "3000",
         "DATA_DIR": "/app/data",
         "MEDIA_STORAGE": "local",
@@ -198,6 +204,52 @@ def write_environment(path: Path, values, *, repository_root=None):
     return target
 
 
+def write_monitor_secrets(directory: Path, values, alert_bot_token: str, *, repository_root=None):
+    """Write the watchdog's two least-exposed secret files without overwriting."""
+    alert = str(alert_bot_token or "").strip()
+    if not TOKEN_RE.fullmatch(alert):
+        raise ValueError("MONITOR_ALERT_BOT_TOKEN is missing or malformed")
+    if secrets.compare_digest(alert, str(values.get("BOT_TOKEN", ""))):
+        raise ValueError("monitor alerts must use a dedicated Telegram bot token")
+    health = str(values.get("HEALTH_TOKEN", ""))
+    if len(health) < 32:
+        raise ValueError("generated HEALTH_TOKEN is unavailable")
+    target_dir = directory.expanduser().resolve()
+    repo = (repository_root or Path(__file__).resolve().parents[1]).resolve()
+    try:
+        target_dir.relative_to(repo)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("refusing to write monitor secrets inside the repository")
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths = {
+        "alert_bot_token": target_dir / "monitor-alert-bot-token",
+        "health_token": target_dir / "monitor-health-token",
+    }
+    if any(path.exists() or path.is_symlink() for path in paths.values()):
+        raise FileExistsError("refusing to overwrite an existing monitor secret")
+    created = []
+    try:
+        for name, value in (("alert_bot_token", alert), ("health_token", health)):
+            path = paths[name]
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(path, flags, 0o600)
+            created.append(path)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(value + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(path, 0o600)
+    except BaseException:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    return paths
+
+
 def _supergroup_id(value):
     try:
         return int(value)
@@ -231,6 +283,8 @@ def main():
     parser.add_argument("--bot-username", default="BbGalterbot")
     parser.add_argument("--group-username", default="bbbikefan")
     parser.add_argument("--token-env", default="BOT_TOKEN")
+    parser.add_argument("--monitor-secrets-dir", type=Path)
+    parser.add_argument("--monitor-alert-token-env", default="MONITOR_ALERT_BOT_TOKEN")
     args = parser.parse_args()
     token = str(os.environ.get(args.token_env, "")).strip()
     config = BootstrapConfig(
@@ -249,10 +303,23 @@ def main():
     )
     try:
         values = build_environment(config, token)
-        target = write_environment(args.output, values)
+        monitor_paths = None
+        if args.monitor_secrets_dir:
+            monitor_paths = write_monitor_secrets(
+                args.monitor_secrets_dir, values,
+                os.environ.get(args.monitor_alert_token_env, ""),
+            )
+        try:
+            target = write_environment(args.output, values)
+        except BaseException:
+            for path in (monitor_paths or {}).values():
+                path.unlink(missing_ok=True)
+            raise
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     print(f"Created {target} with {len(values)} variables; secret values were not printed.")
+    if monitor_paths:
+        print("Created dedicated monitor secret files; secret values were not printed.")
     print(f"Next: python scripts/telegram_preflight.py --env-file {target}")
     return 0
 

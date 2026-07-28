@@ -1,4 +1,4 @@
-"""Build a fail-closed, redacted promotion record from verified live evidence."""
+"""Build the archived v2.9.1 evidence record; never use it for newer releases."""
 
 from __future__ import annotations
 
@@ -21,6 +21,17 @@ WORKFLOW_RE = re.compile(
     r"^github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/"
     r"[A-Za-z0-9_.-]+\.ya?ml$"
 )
+SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+APPROVER_RE = re.compile(r"^[\w .'-]{2,80}$", re.UNICODE)
+LEGACY_SCHEMA_VERSION = 293
+LEGACY_BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.9.1 (пилотная надёжность)"
+LEGACY_COMMIT_SHA = "acd0239a9ace9960c988c13e4608e2620b186fd3"
+LEGACY_IMAGE = (
+    "ghcr.io/voglogpro/bibitasks@sha256:"
+    "472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac"
+)
+PINNED_REPOSITORY = "voglogpro/-"
+PINNED_SIGNER_WORKFLOW = "github.com/voglogpro/-/.github/workflows/release.yml"
 
 
 def sha256(path: Path):
@@ -134,9 +145,17 @@ def build_release_record(
         raise ValueError("commit must be a full 40-character SHA")
     if not IMAGE_RE.fullmatch(image):
         raise ValueError("image must be an immutable lowercase GHCR @sha256 reference")
-    if int(schema_version) <= 0:
-        raise ValueError("schema version must be positive")
-    if not first or not second or first.casefold() == second.casefold():
+    if commit != LEGACY_COMMIT_SHA or image != LEGACY_IMAGE:
+        raise ValueError("legacy record is restricted to the exact verified v2.9.1 subject")
+    if int(schema_version) != LEGACY_SCHEMA_VERSION:
+        raise ValueError("legacy release record is restricted to v2.9.1 schema 293")
+    if repository != PINNED_REPOSITORY or signer_workflow != PINNED_SIGNER_WORKFLOW:
+        raise ValueError("legacy release provenance differs from pinned v2.9.1 policy")
+    if (
+        not APPROVER_RE.fullmatch(first)
+        or not APPROVER_RE.fullmatch(second)
+        or first.casefold() == second.casefold()
+    ):
         raise ValueError("two distinct approvers are required")
 
     manifest_path, manifest = _json_file(backup_manifest, "backup manifest")
@@ -149,6 +168,9 @@ def build_release_record(
     )
     database = manifest.get("database") or {}
     manifest_digest = sha256(manifest_path)
+    backup_id = manifest_path.parent.name
+    if not SAFE_ID_RE.fullmatch(backup_id):
+        raise ValueError("backup directory name must be a safe identifier")
     if database.get("integrity_check") != "ok":
         raise ValueError("backup manifest does not prove database integrity")
     if int(database.get("schema_version", -1)) != int(schema_version):
@@ -169,6 +191,16 @@ def build_release_record(
         (preflight.get("summary") or {}).get("fail", -1)
     ) != 0:
         raise ValueError("Telegram preflight is not green")
+    preflight_summary = preflight.get("summary") or {}
+    if any(
+        type(preflight_summary.get(key)) is not int
+        or preflight_summary[key] < 0
+        for key in ("pass", "warn", "fail")
+    ):
+        raise ValueError("Telegram preflight summary is malformed")
+    readiness_version = str(readiness.get("version", "")).strip()
+    if readiness_version != LEGACY_BUILD_VERSION:
+        raise ValueError("readiness version is not the exact verified v2.9.1 build")
     required_ready = (
         readiness.get("ok") is True
         and readiness.get("telegram_update_mode") == "webhook"
@@ -190,7 +222,7 @@ def build_release_record(
         "image": image,
         "schema_version": int(schema_version),
         "backup": {
-            "id": manifest_path.parent.name,
+            "id": backup_id,
             "manifest_sha256": manifest_digest,
             "database_sha256": database_digest,
         },
@@ -207,11 +239,13 @@ def build_release_record(
         },
         "telegram_preflight": {
             "report_sha256": sha256(preflight_path),
-            "summary": preflight["summary"],
+            "summary": {
+                key: preflight_summary[key] for key in ("pass", "warn", "fail")
+            },
         },
         "readiness": {
             "report_sha256": sha256(readiness_path),
-            "version": str(readiness.get("version", "")),
+            "version": readiness_version,
             "telegram_update_mode": str(readiness.get("telegram_update_mode", "")),
         },
         "approvals": [first, second],
@@ -220,6 +254,13 @@ def build_release_record(
 
 def write_record(path: Path, record):
     target = path.expanduser().resolve()
+    repository_root = Path(__file__).resolve().parents[1]
+    try:
+        target.relative_to(repository_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("refusing to write release evidence inside the repository")
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):

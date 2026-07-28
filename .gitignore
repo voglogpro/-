@@ -7,6 +7,9 @@ htmlcov/
 .env
 .env.*
 !.env.example
+*.env
+*.secret
+secrets/
 .venv/
 venv/
 node_modules/
@@ -21,6 +24,14 @@ test-results/
 readiness*.json
 telegram-preflight*.json
 release-record*.json
+release-candidate*.json
+final-release*.json
+secret-recovery*.json
+monitor-drill*.json
+rollback-plan*.json
+stage-report*.json
+activation-report*.json
+evidence/
 pilot-stack.json
 .DS_Store
 Thumbs.db

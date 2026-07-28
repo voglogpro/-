@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ os.environ["WITHDRAW_ACCOUNT_KEY"] = Fernet.generate_key().decode("ascii")
 os.environ["TELEGRAM_INBOX_KEY"] = Fernet.generate_key().decode("ascii")
 os.environ["HEALTH_TOKEN"] = "health_" + "h" * 40
 os.environ["MEDIA_SIGNING_KEY"] = "media_" + "m" * 40
+os.environ["BIBITASKS_ENVIRONMENT"] = "test"
 
 import main  # noqa: E402  (environment must be set before application import)
 
@@ -51,6 +53,10 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         main.DB_PATH = str(case / "bibitasks.db")
         main.TASK_PHOTO_DIR = str(case / "task_photos")
         Path(main.TASK_PHOTO_DIR).mkdir(exist_ok=True)
+        main.ensure_recovery_key_canary(
+            case, main.TELEGRAM_INBOX_FERNET, main.WITHDRAW_FERNET,
+            production=False,
+        )
         await main.init_db()
 
     async def test_atomic_first_login(self):
@@ -63,6 +69,25 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT COUNT(*) FROM members WHERE user_id=?", (uid,)
             ).fetchone()[0]
         self.assertEqual(count, 1)
+
+    async def test_privacy_link_accepts_only_public_https_without_credentials(self):
+        self.assertEqual(
+            main._safe_https_url("https://example.org/privacy"),
+            "https://example.org/privacy",
+        )
+        for unsafe in (
+            "http://example.org/privacy", "javascript:alert(1)",
+            "https://user:password@example.org/privacy", "https://example.org:8443/privacy",
+        ):
+            self.assertIsNone(main._safe_https_url(unsafe))
+        original = (main.PRIVACY_URL_RAW, main.PRIVACY_URL)
+        try:
+            main.PRIVACY_URL_RAW = "https://user:password@example.org/privacy"
+            main.PRIVACY_URL = None
+            with self.assertRaisesRegex(RuntimeError, "PRIVACY_URL"):
+                main._validate_update_receiver_config()
+        finally:
+            main.PRIVACY_URL_RAW, main.PRIVACY_URL = original
 
     async def test_webhook_configuration_is_fail_closed(self):
         names = (
@@ -428,6 +453,11 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         response = await main.api_health(authorized)
         self.assertIn(response.status, (200, 503))
+        payload = json.loads(response.text)
+        self.assertEqual(payload["report_version"], 1)
+        self.assertEqual(payload["application_version"], main.APP_VERSION)
+        self.assertEqual(payload["version"], main.BUILD_VERSION)
+        self.assertIsNotNone(datetime.fromisoformat(payload["generated_at"]).tzinfo)
 
     async def test_photo_declared_mime_must_match_content(self):
         image_bytes = BytesIO()
@@ -945,6 +975,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         main.bot = FailingBot()
         main.ADMIN_IDS = {42}
         try:
+            await main.upsert_member(42, status="approved", role="admin")
             for _ in range(main.PUBLICATION_CLEANUP_MAX_ATTEMPTS - 1):
                 with self.assertRaises(RuntimeError):
                     await main._run_publication_cleanup(operation)
@@ -1406,6 +1437,84 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first)
         self.assertFalse(second)
         self.assertEqual(bound, referrer)
+
+    async def test_application_resubmit_is_rejected_for_pending_and_approved(self):
+        original_auth = main._auth_user
+        current_uid = 901_250_001
+
+        async def allow_user(_request):
+            return {"id": current_uid, "username": "helper"}
+
+        main._auth_user = allow_user
+        try:
+            for status, role in (("pending", "applicant"), ("approved", "helper")):
+                current_uid += 1
+                await main.upsert_member(
+                    current_uid, full_name="Анна", city="Краснодар",
+                    about="Помогаю с парковками", status=status, role=role,
+                    applied_at=(
+                        main.datetime.now(main.timezone.utc) - main.timedelta(days=2)
+                    ).isoformat(),
+                )
+                response = await main.api_apply(DummyRequest({
+                    "name": "Новое имя", "city": "Москва",
+                    "about": "Хочу подать анкету ещё раз",
+                }))
+                self.assertEqual(response.status, 409)
+        finally:
+            main._auth_user = original_auth
+
+    async def test_rejected_application_retry_has_daily_limit_and_audit_event(self):
+        original_auth = main._auth_user
+        current_uid = 901_260_001
+
+        async def allow_user(_request):
+            return {"id": current_uid, "username": "retry_user"}
+
+        main._auth_user = allow_user
+        try:
+            await main.upsert_member(
+                current_uid, full_name="Анна", city="Краснодар",
+                about="Старая анкета", status="blocked", role="applicant",
+                application_note="Нужно подробнее",
+                applied_at=main.now_iso(),
+            )
+            limited = await main.api_apply(DummyRequest({
+                "name": "Анна", "city": "Краснодар",
+                "about": "Теперь подробно: могу поправлять парковки",
+            }))
+            self.assertEqual(limited.status, 429)
+            self.assertGreater(response_json(limited)["retry_after"], 0)
+
+            old = (
+                main.datetime.now(main.timezone.utc) - main.timedelta(hours=25)
+            ).isoformat()
+            await main.upsert_member(current_uid, applied_at=old)
+            retried = await main.api_apply(DummyRequest({
+                "name": "Анна П.", "city": "Краснодар",
+                "about": "Могу поправлять парковки и делать фотоотчёт",
+            }))
+        finally:
+            main._auth_user = original_auth
+
+        self.assertEqual(retried.status, 200)
+        self.assertTrue(response_json(retried)["resubmitted"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            member = db.execute(
+                "SELECT status,full_name,about,application_note FROM members "
+                "WHERE user_id=?", (current_uid,),
+            ).fetchone()
+            audit_count = db.execute(
+                "SELECT COUNT(*) FROM product_events e "
+                "JOIN analytics_subjects s ON s.subject_id=e.subject_id "
+                "WHERE s.user_id=? AND e.event_name='application_resubmitted'",
+                (current_uid,),
+            ).fetchone()[0]
+        self.assertEqual(
+            member,
+            ("pending", "Анна П.", "Могу поправлять парковки и делать фотоотчёт", ""),
+        )
+        self.assertEqual(audit_count, 1)
 
     async def test_admin_application_queue_is_paginated_and_searchable(self):
         original_admin = main._require_admin
@@ -2762,17 +2871,36 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after, ("Орёл", None))
 
     async def test_task_dispute_requires_second_admin_and_reverses_exactly_once(self):
-        worker_id, opener_id, reviewer_id, decider_id = (
-            912_000_001, 912_000_002, 912_000_003, 912_000_004,
+        worker_id, opener_id, reviewer_id = (
+            912_000_001, 912_000_002, 912_000_003,
         )
         await main.upsert_member(
             worker_id, full_name="Исполнитель", city="Краснодар",
             status="approved", role="helper", bonus=100, done_count=1,
         )
-        for admin_id in (opener_id, reviewer_id, decider_id):
+        for admin_id in (opener_id, reviewer_id):
             await main.upsert_member(
                 admin_id, full_name="Ответственный", status="approved", role="admin",
             )
+        open_flags = main._admin_decision_public({
+            "id": 1, "type": "fix_zone", "title": "Проверка",
+            "assignment_status": "done", "assignment_user_id": worker_id,
+        }, opener_id, {opener_id, reviewer_id})
+        decision_flags = main._admin_decision_public({
+            "id": 1, "type": "fix_zone", "title": "Проверка",
+            "assignment_status": "done", "assignment_user_id": worker_id,
+            "dispute_status": "pending", "dispute_opened_by": opener_id,
+            "assignment_terminal_by": reviewer_id,
+        }, reviewer_id, {opener_id, reviewer_id})
+        blocked_flags = main._admin_decision_public({
+            "id": 1, "type": "fix_zone", "title": "Проверка",
+            "assignment_status": "done", "assignment_user_id": worker_id,
+        }, opener_id, {opener_id})
+        self.assertTrue(open_flags["can_open_dispute"])
+        self.assertEqual(open_flags["eligible_decider_count"], 1)
+        self.assertTrue(decision_flags["can_decide_dispute"])
+        self.assertFalse(blocked_flags["can_open_dispute"])
+        self.assertIn("ещё один", blocked_flags["dispute_open_block_reason"])
         with sqlite3.connect(main.DB_PATH) as db:
             task_id = db.execute(
                 "INSERT INTO tasks "
@@ -2824,21 +2952,16 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
                 "decision": "approve", "note": "Проверено тем же ответственным",
                 "operation_id": str(uuid.uuid4()),
             }, opener_id))
-            reviewer_denied = await main.api_admin_task_dispute(DummyRequest({
-                "action": "decide", "dispute_id": dispute_id,
-                "decision": "approve", "note": "Исходный проверяющий подтверждает себя",
-                "operation_id": str(uuid.uuid4()),
-            }, reviewer_id))
             decision_body = {
                 "action": "decide", "dispute_id": dispute_id,
                 "decision": "approve", "note": "Проверены фото и исходное решение",
                 "operation_id": decide_operation,
             }
             decided = await main.api_admin_task_dispute(
-                DummyRequest(decision_body, decider_id)
+                DummyRequest(decision_body, reviewer_id)
             )
             replay = await main.api_admin_task_dispute(
-                DummyRequest(decision_body, decider_id)
+                DummyRequest(decision_body, reviewer_id)
             )
         finally:
             main._require_admin = original_admin
@@ -2846,9 +2969,9 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (
                 opened.status, blocked_withdrawal.status, denied.status,
-                reviewer_denied.status, decided.status, replay.status,
+                decided.status, replay.status,
             ),
-            (200, 409, 403, 403, 200, 200),
+            (200, 409, 403, 200, 200),
         )
         self.assertTrue(response_json(replay)["idempotent"])
         with sqlite3.connect(main.DB_PATH) as db:
@@ -3094,6 +3217,438 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             main.WEBHOOK_MAX_CONNECTIONS = original_connections
             main._telegram_runtime.clear()
             main._telegram_runtime.update(original_runtime)
+
+    async def test_manual_grant_is_positive_limited_idempotent_and_durable(self):
+        maker_a, maker_b = 990_100_001, 990_100_002
+        recipient_a, recipient_b = 990_100_003, 990_100_004
+        for user_id, role in (
+            (maker_a, "admin"), (maker_b, "admin"),
+            (recipient_a, "helper"), (recipient_b, "helper"),
+        ):
+            await main.upsert_member(
+                user_id, full_name=f"Участник {user_id}", status="approved",
+                role=role, bonus=0,
+            )
+        original_admin = main._require_admin
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        first_operation = str(uuid.uuid4())
+        try:
+            negative = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_a, "amount": -1, "reason": "Попытка списания",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_a))
+            first_body = {
+                "user_id": recipient_a, "amount": 200,
+                "reason": "Исправил парковку и прислал фото",
+                "operation_id": first_operation,
+            }
+            first = await main.api_admin_grant(DummyRequest(first_body, maker_a))
+            replay = await main.api_admin_grant(DummyRequest(first_body, maker_a))
+            maker_split = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_b, "amount": 101,
+                "reason": "Помог на второй парковке",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_a))
+            recipient_split = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_a, "amount": 101,
+                "reason": "Ещё одна быстрая благодарность",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_b))
+            failed_operation = str(uuid.uuid4())
+            original_outbox = main._enqueue_outbox_in_tx
+
+            async def broken_outbox(*_args, **_kwargs):
+                raise RuntimeError("outbox unavailable")
+
+            main._enqueue_outbox_in_tx = broken_outbox
+            try:
+                with self.assertRaisesRegex(RuntimeError, "outbox unavailable"):
+                    await main.api_admin_grant(DummyRequest({
+                        "user_id": recipient_b, "amount": 50,
+                        "reason": "Проверка атомарной доставки",
+                        "operation_id": failed_operation,
+                    }, maker_b))
+            finally:
+                main._enqueue_outbox_in_tx = original_outbox
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(
+            (negative.status, first.status, replay.status, maker_split.status, recipient_split.status),
+            (400, 200, 200, 409, 409),
+        )
+        self.assertTrue(response_json(replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (recipient_a,),
+            ).fetchone()[0]
+            ledger_count = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE operation_id=?",
+                (first_operation,),
+            ).fetchone()[0]
+            outbox = db.execute(
+                "SELECT status FROM task_outbox WHERE event_key=?",
+                (f"manual_grant:{first_operation}:recipient",),
+            ).fetchone()
+            command_count = db.execute(
+                "SELECT COUNT(*) FROM manual_grant_commands"
+            ).fetchone()[0]
+            rolled_back = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (recipient_b,),
+            ).fetchone()[0]
+            failed_ledger = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE operation_id=?",
+                (failed_operation,),
+            ).fetchone()[0]
+        self.assertEqual(
+            (balance, ledger_count, command_count, rolled_back, failed_ledger),
+            (200, 1, 1, 0, 0),
+        )
+        self.assertEqual(outbox, ("pending",))
+
+    async def test_awards_share_manual_grant_limit_and_global_operation_namespace(self):
+        maker_a, maker_b, recipient_a, recipient_b = 990_150_001, 990_150_002, 990_150_003, 990_150_004
+        maker_c, recipient_c, recipient_d, maker_d = 990_150_005, 990_150_006, 990_150_007, 990_150_008
+        for user_id, role in ((maker_a, "admin"), (maker_b, "admin"), (maker_c, "admin"), (maker_d, "admin"), (recipient_a, "helper"), (recipient_b, "helper"), (recipient_c, "helper"), (recipient_d, "helper")):
+            await main.upsert_member(user_id, full_name=str(user_id), status="approved", role=role, bonus=0)
+        with sqlite3.connect(main.DB_PATH) as db:
+            award_101 = db.execute(
+                "INSERT INTO awards (code,emoji,title,description,bonus,repeatable,active,created_by,created_at) "
+                "VALUES ('limit101','🏅','Лимит 101','Тест',101,0,1,?,?)",
+                (maker_a, main.now_iso()),
+            ).lastrowid
+            award_200 = db.execute(
+                "INSERT INTO awards (code,emoji,title,description,bonus,repeatable,active,created_by,created_at) "
+                "VALUES ('limit200','🏅','Лимит 200','Тест',200,0,1,?,?)",
+                (maker_b, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+        async def allow_admin(request):
+            return request.uid, None
+        main._require_admin = allow_admin
+        try:
+            invalid_repeatable = await main.api_admin_award_save(DummyRequest({
+                "title": "Денежная", "bonus": 10, "repeatable": True,
+            }, maker_a))
+            zero_repeatable = await main.api_admin_award_save(DummyRequest({
+                "title": "Знак", "bonus": 0, "repeatable": True,
+            }, maker_a))
+            manual = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_a, "amount": 200, "reason": "Первая выплата",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_a))
+            award_blocked = await main.api_admin_award_grant(DummyRequest({
+                "user_id": recipient_b, "award_id": award_101, "note": "Вторая выплата",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_a))
+            award = await main.api_admin_award_grant(DummyRequest({
+                "user_id": recipient_b, "award_id": award_200, "note": "Первая награда",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_b))
+            recipient_blocked = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_b, "amount": 101, "reason": "Вторая выплата",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_a))
+            collision_id = str(uuid.uuid4())
+            first_collision = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_a, "amount": 1, "reason": "Коллизия UUID",
+                "operation_id": collision_id,
+            }, maker_b))
+            second_collision = await main.api_admin_award_grant(DummyRequest({
+                "user_id": recipient_a, "award_id": award_101, "note": "Коллизия UUID",
+                "operation_id": collision_id,
+            }, maker_b))
+            concurrent = await asyncio.gather(
+                main.api_admin_grant(DummyRequest({
+                    "user_id": recipient_c, "amount": 101, "reason": "Параллельная выплата",
+                    "operation_id": str(uuid.uuid4()),
+                }, maker_c)),
+                main.api_admin_award_grant(DummyRequest({
+                    "user_id": recipient_c, "award_id": award_200, "note": "Параллельная награда",
+                    "operation_id": str(uuid.uuid4()),
+                }, maker_c)),
+            )
+            failed_operation = str(uuid.uuid4())
+            original_outbox = main._enqueue_outbox_in_tx
+            async def broken_outbox(*_args, **_kwargs):
+                raise RuntimeError("outbox unavailable")
+            main._enqueue_outbox_in_tx = broken_outbox
+            try:
+                with self.assertRaisesRegex(RuntimeError, "outbox unavailable"):
+                    await main.api_admin_award_grant(DummyRequest({
+                        "user_id": recipient_d, "award_id": award_101,
+                        "note": "Проверка атомарности", "operation_id": failed_operation,
+                    }, maker_d))
+            finally:
+                main._enqueue_outbox_in_tx = original_outbox
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(
+            (invalid_repeatable.status, zero_repeatable.status, manual.status,
+             award_blocked.status, award.status, recipient_blocked.status,
+             first_collision.status, second_collision.status),
+            (400, 200, 200, 409, 200, 409, 200, 409),
+        )
+        self.assertEqual(sorted(response.status for response in concurrent), [200, 409])
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertLessEqual(
+                db.execute("SELECT bonus FROM members WHERE user_id=?", (recipient_c,)).fetchone()[0],
+                main.MANUAL_GRANT_DAILY_LIMIT,
+            )
+            self.assertEqual(
+                db.execute("SELECT bonus FROM members WHERE user_id=?", (recipient_d,)).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM operation_registry WHERE operation_id=?", (failed_operation,)).fetchone()[0],
+                0,
+            )
+
+    async def test_admin_authority_rotation_keeps_manual_and_revokes_removed_env(self):
+        original_ids, original_environment = main.ADMIN_IDS, main.BIBITASKS_ENVIRONMENT
+        try:
+            main.BIBITASKS_ENVIRONMENT = "production"
+            main.ADMIN_IDS = {991_000_001, 991_000_002}
+            await main.init_db()
+            await main.upsert_member(991_000_003, status="approved", role="admin")
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "INSERT INTO admin_authorities (user_id,origin,granted_operation_id,granted_at) "
+                    "VALUES (?,'manual',?,?)",
+                    (991_000_003, str(uuid.uuid4()), main.now_iso()),
+                )
+                db.commit()
+            main.ADMIN_IDS = {991_000_002, 991_000_004}
+            await main.init_db()
+            with sqlite3.connect(main.DB_PATH) as db:
+                roles = dict(db.execute(
+                    "SELECT user_id,role FROM members WHERE user_id IN (991000001,991000002,991000003,991000004)"
+                ).fetchall())
+                sources = set(db.execute("SELECT user_id,origin FROM admin_authorities").fetchall())
+            self.assertEqual(roles[991_000_001], "helper")
+            self.assertEqual(roles[991_000_002], "admin")
+            self.assertEqual(roles[991_000_003], "admin")
+            self.assertEqual(roles[991_000_004], "admin")
+            self.assertIn((991_000_003, "manual"), sources)
+            self.assertNotIn((991_000_001, "env"), sources)
+        finally:
+            main.ADMIN_IDS, main.BIBITASKS_ENVIRONMENT = original_ids, original_environment
+
+    async def test_revoked_admin_is_rechecked_inside_financial_transaction(self):
+        admin_id, recipient_id = 991_100_001, 991_100_002
+        original_environment, original_admin = main.BIBITASKS_ENVIRONMENT, main._require_admin
+        try:
+            main.BIBITASKS_ENVIRONMENT = "production"
+            await main.upsert_member(admin_id, status="approved", role="admin")
+            await main.upsert_member(recipient_id, status="approved", role="helper", bonus=0)
+            async def stale_outer_authorization(_request):
+                return admin_id, None
+            main._require_admin = stale_outer_authorization
+            operation_id = str(uuid.uuid4())
+            response = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient_id, "amount": 50, "reason": "Устаревшее право",
+                "operation_id": operation_id,
+            }, admin_id))
+            with sqlite3.connect(main.DB_PATH) as db:
+                effects = db.execute(
+                    "SELECT COUNT(*) FROM operation_registry WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()[0]
+                balance = db.execute(
+                    "SELECT bonus FROM members WHERE user_id=?", (recipient_id,),
+                ).fetchone()[0]
+            self.assertEqual((response.status, effects, balance), (403, 0, 0))
+        finally:
+            main.BIBITASKS_ENVIRONMENT, main._require_admin = original_environment, original_admin
+
+    async def test_revoked_admin_cannot_mutate_tasks_applications_city_tags_or_retry(self):
+        admin_id, applicant_id, city_user_id, tagged_user_id = (
+            991_200_001, 991_200_002, 991_200_003, 991_200_004,
+        )
+        original_environment, original_admin = main.BIBITASKS_ENVIRONMENT, main._require_admin
+        try:
+            main.BIBITASKS_ENVIRONMENT = "production"
+            await main.upsert_member(admin_id, status="approved", role="admin")
+            await main.upsert_member(applicant_id, status="pending", role="applicant")
+            await main.upsert_member(
+                city_user_id, status="approved", role="helper", city="Краснодар",
+                city_change_requested="Сочи", city_change_requested_at="2026-07-28T10:00:00+00:00",
+            )
+            await main.upsert_member(
+                tagged_user_id, status="approved", role="helper", tags="старый",
+            )
+            with sqlite3.connect(main.DB_PATH) as db:
+                cancel_task_id = db.execute(
+                    "INSERT INTO tasks (type,title,city,address,reward,status,repeatable,created_at) "
+                    "VALUES ('fix_zone','Отмена','Краснодар','Адрес',50,'open',0,?)",
+                    (main.now_iso(),),
+                ).lastrowid
+                retry_task_id = db.execute(
+                    "INSERT INTO tasks (type,title,city,address,reward,status,repeatable,created_at) "
+                    "VALUES ('fix_zone','Повтор','Краснодар','Адрес',50,'open',0,?)",
+                    (main.now_iso(),),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO task_outbox "
+                    "(event_key,event_type,payload_json,status,attempts,available_at,created_at) "
+                    "VALUES (?,'group_task','{}','dead',10,?,?)",
+                    (f"task:{retry_task_id}:announcement", main.now_iso(), main.now_iso()),
+                )
+                db.execute(
+                    "INSERT INTO telegram_update_inbox "
+                    "(update_id,payload_json,payload_sha256,status,attempts,available_at,received_at,dead_at) "
+                    "VALUES (991200005,'encrypted','hash','dead',10,?,?,?)",
+                    (main.now_iso(), main.now_iso(), main.now_iso()),
+                )
+                before_tasks = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                db.commit()
+
+            async def stale_outer_authorization(_request):
+                return admin_id, None
+            main._require_admin = stale_outer_authorization
+            image_bytes = BytesIO()
+            Image.new("RGB", (2, 2), "green").save(image_bytes, format="PNG")
+            photo_data = "data:image/png;base64," + base64.b64encode(
+                image_bytes.getvalue()
+            ).decode()
+            create = await main.api_admin_task_create(DummyRequest({
+                "operation_id": str(uuid.uuid4()), "type": "fix_zone",
+                "title": "Не должно создаться", "details": "Проверка",
+                "city": "Краснодар", "address": "Адрес", "reward": 80,
+                "evidence_policy": "after_required", "repeatable": False,
+                "announce": False, "photo_data": photo_data,
+            }, admin_id))
+            cancel = await main.api_admin_task_cancel(DummyRequest({
+                "task_id": cancel_task_id, "reason": "Устаревшее право",
+                "operation_id": str(uuid.uuid4()),
+            }, admin_id))
+            application = await main.api_admin_decide(DummyRequest({
+                "user_id": applicant_id, "decision": "approve",
+            }, admin_id))
+            city = await main.api_admin_member_city_decide(DummyRequest({
+                "user_id": city_user_id, "decision": "approve",
+                "requested_at": "2026-07-28T10:00:00+00:00",
+            }, admin_id))
+            tags = await main.api_admin_member_tags(DummyRequest({
+                "user_id": tagged_user_id, "tags": ["новый"],
+            }, admin_id))
+            retry = await main.api_admin_task_announcement_retry(DummyRequest({
+                "task_id": retry_task_id, "operation_id": str(uuid.uuid4()),
+            }, admin_id))
+            redrive = await main.api_admin_telegram_inbox_redrive(DummyRequest({
+                "update_id": 991200005, "reason": "Устаревшее право",
+                "operation_id": str(uuid.uuid4()),
+            }, admin_id))
+            with sqlite3.connect(main.DB_PATH) as db:
+                state = (
+                    db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0],
+                    db.execute("SELECT status FROM tasks WHERE id=?", (cancel_task_id,)).fetchone()[0],
+                    db.execute("SELECT status FROM members WHERE user_id=?", (applicant_id,)).fetchone()[0],
+                    db.execute("SELECT city,city_change_requested FROM members WHERE user_id=?", (city_user_id,)).fetchone(),
+                    db.execute("SELECT tags FROM members WHERE user_id=?", (tagged_user_id,)).fetchone()[0],
+                    db.execute("SELECT status FROM task_outbox WHERE event_key=?", (f"task:{retry_task_id}:announcement",)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM media_objects").fetchone()[0],
+                    db.execute("SELECT status FROM telegram_update_inbox WHERE update_id=991200005").fetchone()[0],
+                )
+            self.assertEqual([r.status for r in (create, cancel, application, city, tags, retry, redrive)], [403] * 7)
+            self.assertEqual(state, (before_tasks, "open", "pending", ("Краснодар", "Сочи"), "старый", "dead", 0, "dead"))
+        finally:
+            main.BIBITASKS_ENVIRONMENT, main._require_admin = original_environment, original_admin
+
+    async def test_admin_role_change_requires_distinct_checker_and_is_atomic(self):
+        maker, checker, target = 990_200_001, 990_200_002, 990_200_003
+        for user_id, role in ((maker, "admin"), (checker, "admin"), (target, "helper")):
+            await main.upsert_member(
+                user_id, full_name=f"Участник {user_id}", status="approved", role=role,
+            )
+        original_admin = main._require_admin
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        request_operation = str(uuid.uuid4())
+        try:
+            requested = await main.api_admin_set_role(DummyRequest({
+                "action": "request", "user_id": target, "role": "admin",
+                "reason": "Будет проверять задания и выплаты",
+                "operation_id": request_operation,
+            }, maker))
+            change_id = response_json(requested)["change_id"]
+            maker_denied = await main.api_admin_set_role(DummyRequest({
+                "action": "decide", "change_id": change_id, "decision": "approve",
+                "note": "Проверил свой запрос", "operation_id": str(uuid.uuid4()),
+            }, maker))
+            decision_operation = str(uuid.uuid4())
+            decision_body = {
+                "action": "decide", "change_id": change_id, "decision": "approve",
+                "note": "Личность и доступ проверены", "operation_id": decision_operation,
+            }
+            original_outbox = main._enqueue_outbox_in_tx
+
+            async def broken_outbox(*_args, **_kwargs):
+                raise RuntimeError("outbox unavailable")
+
+            main._enqueue_outbox_in_tx = broken_outbox
+            try:
+                with self.assertRaisesRegex(RuntimeError, "outbox unavailable"):
+                    await main.api_admin_set_role(DummyRequest({
+                        **decision_body, "operation_id": str(uuid.uuid4()),
+                    }, checker))
+            finally:
+                main._enqueue_outbox_in_tx = original_outbox
+            with sqlite3.connect(main.DB_PATH) as db:
+                role_after_failed_delivery = db.execute(
+                    "SELECT role FROM members WHERE user_id=?", (target,),
+                ).fetchone()[0]
+                pending_after_failed_delivery = db.execute(
+                    "SELECT status FROM admin_role_changes WHERE id=?", (change_id,),
+                ).fetchone()[0]
+            applied = await main.api_admin_set_role(DummyRequest(decision_body, checker))
+            replay = await main.api_admin_set_role(DummyRequest(decision_body, checker))
+            demotion_requested = await main.api_admin_set_role(DummyRequest({
+                "action": "request", "user_id": target, "role": "helper",
+                "reason": "Доступ больше не нужен после смены",
+                "operation_id": str(uuid.uuid4()),
+            }, maker))
+            demotion_id = response_json(demotion_requested)["change_id"]
+            demoted = await main.api_admin_set_role(DummyRequest({
+                "action": "decide", "change_id": demotion_id, "decision": "approve",
+                "note": "Активных обязательств нет", "operation_id": str(uuid.uuid4()),
+            }, checker))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(
+            (
+                requested.status, maker_denied.status, applied.status, replay.status,
+                demotion_requested.status, demoted.status,
+            ),
+            (200, 403, 200, 200, 200, 200),
+        )
+        self.assertTrue(response_json(requested)["queued"])
+        self.assertTrue(response_json(replay)["idempotent"])
+        self.assertEqual(
+            (role_after_failed_delivery, pending_after_failed_delivery),
+            ("helper", "pending"),
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            role = db.execute(
+                "SELECT role FROM members WHERE user_id=?", (target,),
+            ).fetchone()[0]
+            changes = db.execute(
+                "SELECT status,requested_by,decided_by FROM admin_role_changes ORDER BY id"
+            ).fetchall()
+            outbox_count = db.execute(
+                "SELECT COUNT(*) FROM task_outbox "
+                "WHERE event_key LIKE 'admin_role_change:%'"
+            ).fetchone()[0]
+        self.assertEqual(role, "helper")
+        self.assertEqual(changes, [("applied", maker, checker), ("applied", maker, checker)])
+        self.assertGreaterEqual(outbox_count, 6)
 
 
 if __name__ == "__main__":

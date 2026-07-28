@@ -324,6 +324,7 @@ def reconcile(
                 "awards", "tasks", "task_assignments", "task_evidence",
                 "withdrawal_requests", "withdrawal_events", "bonus_ledger",
                 "member_awards", "task_outbox", "product_events",
+                "admin_role_changes",
                 ):
                     sequence_name = target.execute(text(
                     "SELECT pg_get_serial_sequence(:table_name,'id')"

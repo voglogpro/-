@@ -8,6 +8,7 @@ PostgreSQL strict scalar types and a small set of ownership-safe foreign keys.
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -273,6 +274,70 @@ task_review_commands = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+manual_grant_commands = Table(
+    "manual_grant_commands", metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("request_hash", Text, nullable=False),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("amount", BigInteger, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("maker_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("ledger_id", BigInteger, fk("bonus_ledger.id"), nullable=False),
+    Column("result_balance", BigInteger, nullable=False),
+    CheckConstraint("amount BETWEEN 1 AND 200", name="manual_grant_positive"),
+    CheckConstraint("maker_id <> user_id", name="manual_grant_distinct"),
+)
+
+admin_role_changes = Table(
+    "admin_role_changes", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("from_role", Text, nullable=False),
+    Column("to_role", Text, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("requested_by", BigInteger, fk("members.user_id"), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("request_operation_id", Text, nullable=False),
+    Column("request_hash", Text, nullable=False),
+    Column("decided_by", BigInteger, fk("members.user_id")),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decision_note", Text),
+    Column("decision_operation_id", Text),
+    Column("decision_hash", Text),
+    UniqueConstraint("request_operation_id", name="uq_admin_role_request_operation"),
+    UniqueConstraint("decision_operation_id", name="uq_admin_role_decision_operation"),
+    CheckConstraint("from_role <> to_role", name="admin_role_distinct"),
+    CheckConstraint(
+        "status IN ('pending','applied','rejected')", name="admin_role_status",
+    ),
+    CheckConstraint("requested_by <> user_id", name="admin_role_maker_target"),
+    CheckConstraint(
+        "decided_by IS NULL OR (decided_by <> requested_by AND decided_by <> user_id)",
+        name="admin_role_checker_distinct",
+    ),
+)
+
+operation_registry = Table(
+    "operation_registry", metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("command_type", Text, nullable=False),
+    Column("request_hash", Text, nullable=False),
+    Column("actor_id", BigInteger, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+admin_authorities = Table(
+    "admin_authorities", metadata,
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("origin", Text, nullable=False),
+    Column("granted_operation_id", Text),
+    Column("granted_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("user_id", "origin", name="pk_admin_authorities"),
+    CheckConstraint("origin IN ('env','manual')", name="admin_authority_origin"),
+)
+
 task_disputes = Table(
     "task_disputes", metadata,
     Column("id", BigInteger, Identity(), primary_key=True),
@@ -515,6 +580,22 @@ Index(
     "idx_task_disputes_status", task_disputes.c.status,
     task_disputes.c.opened_at, task_disputes.c.id,
 )
+Index(
+    "idx_manual_grants_maker_time", manual_grant_commands.c.maker_id,
+    manual_grant_commands.c.created_at,
+)
+Index(
+    "idx_manual_grants_recipient_time", manual_grant_commands.c.user_id,
+    manual_grant_commands.c.created_at,
+)
+Index(
+    "idx_admin_role_changes_status", admin_role_changes.c.status,
+    admin_role_changes.c.requested_at, admin_role_changes.c.id,
+)
+Index(
+    "idx_admin_role_change_one_pending", admin_role_changes.c.user_id,
+    unique=True, postgresql_where=admin_role_changes.c.status == "pending",
+)
 Index("idx_withdrawals_user", withdrawal_requests.c.user_id, withdrawal_requests.c.created_at)
 Index(
     "idx_withdrawals_one_pending", withdrawal_requests.c.user_id, unique=True,
@@ -566,6 +647,10 @@ Index(
 )
 Index("idx_member_awards_user", member_awards.c.user_id, member_awards.c.granted_at)
 Index(
+    "idx_member_awards_maker_time", member_awards.c.granted_by,
+    member_awards.c.granted_at,
+)
+Index(
     "idx_member_awards_operation", member_awards.c.operation_id, unique=True,
     postgresql_where=member_awards.c.operation_id.is_not(None),
 )
@@ -599,11 +684,12 @@ Index("idx_product_events_expiry", product_events.c.expires_at)
 TABLE_ORDER = tuple(metadata.tables)
 IDENTITY_TABLES = (
     "tasks", "bonus_ledger", "task_assignments", "task_evidence", "task_disputes",
+    "admin_role_changes",
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
 )
 
-if len(metadata.tables) != 28:
-    raise RuntimeError(f"Expected 28 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 34:
-    raise RuntimeError("Expected exactly 34 semantic indexes")
+if len(metadata.tables) != 32:
+    raise RuntimeError(f"Expected 32 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 39:
+    raise RuntimeError("Expected exactly 39 semantic indexes")

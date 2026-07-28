@@ -3,13 +3,15 @@
 Один документ про компанию, про автора и про всё, что мы собрали:
 Telegram-бота, Mini App и группу с подтемами.
 
-Обновлено: 28 июля 2026 · версия системы **v2.9.1**
+Обновлено: 28 июля 2026 · текущий кандидат **v2.10.0** · последний проверенный
+release image **v2.9.1**
 
 Технический запуск, переменные окружения и release-процесс описаны в
 [`docs/TECHNICAL-README.md`](docs/TECHNICAL-README.md).
 
 Пошаговый production-запуск для владельца: от VPS и домена до Telegram и
-решения GO/NO-GO — в [`docs/OWNER-LAUNCH.md`](docs/OWNER-LAUNCH.md).
+результата LIVE PASS/FAIL и terminal deployment NO-GO — в
+[`docs/OWNER-LAUNCH.md`](docs/OWNER-LAUNCH.md).
 
 ---
 
@@ -152,11 +154,14 @@ Telegram-бот @BbGalterbot
   слот и при необходимости сразу объявить в подтеме «Работа»
 - **Бонусы и выплаты** — награды, начисления и заявки на перевод с безопасной
   передачей между кассирами
-- **Люди** — серверный поиск по имени, городу, username, ID и тегам; начисление,
-  списание, награда и смена роли
+- **Люди** — серверный поиск по имени, городу, username, ID и тегам; быстрая
+  положительная благодарность и смена обычной роли. Быстрые благодарности
+  ограничены одной операцией и скользящим суточным лимитом по ответственному и
+  получателю. Списания выполняются только через связанное задание, отзыв награды
+  или выплату, а выдачу/снятие роли ответственного подтверждает второй админ.
 
 Роли: 🌿 Помощник, 🚲 Сотрудник, 🛡️ Ответственный. Свою роль сменить
-нельзя, последнего ответственного понизить нельзя — иначе модерировать
+нельзя, а после понижения должны остаться минимум два ответственных — иначе модерировать
 станет некому.
 
 ### Дизайн
@@ -257,14 +262,20 @@ Telegram-бот @BbGalterbot
   заданий не публикуются наружу
 - Зашифрованные Telegram inbox и платёжные реквизиты, durable outbox, audit trail
 - Резервное копирование, restore rehearsal и immutable release images
+- Двухфазный [release candidate / final gate](docs/RELEASE-GATE-V3.md) связывает
+  commit, image, schema, deployment IDs, backup, recovery и live evidence.
+  Финальный gate намеренно остаётся `NO-GO` и не создаёт разрешение на выпуск,
+  пока нет реального custodian quorum, single-use challenge ledger и
+  проверяющего подпись deployment controller.
 
 ### Тесты
 
-**137 автоматических тестов**, все локально зелёные:
+**232 автоматические проверки** в локальном прогоне: 222 PASS и 10 ожидаемых
+environment-specific SKIP (POSIX/Docker/PostgreSQL интеграции выполняет CI):
 
-- **110** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
+- **199** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
 - **6** — точность PostgreSQL migration harness
-- **21** — интерфейс Mini App в Playwright
+- **27** — интерфейс Mini App в Playwright
 
 ---
 
@@ -307,6 +318,7 @@ Production требует не только `BOT_TOKEN`, но и отдельн�
 | v2.3.0 | светлая и тёмная тема с сохранением выбора, новый графический логотип |
 | v2.9.0 | профессиональный pilot-контур: приватный OPS, фото и шаблоны, поиск и теги, payout lease, durable Telegram ingress/outbox, backup/restore, CI и миграционный harness PostgreSQL |
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
+| v2.10.0 candidate | повторная анкета без телефона, постоянная помощь, единый лимит ручных наград, maker-checker ролей, schema 295, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
 
 ---
 

@@ -39,6 +39,9 @@ REQUIRED_DEPLOY_KEYS = (
     "BACKUP_SENTINEL_VALUE",
     "BACKUP_EXPECTED_SOURCE",
     "BIBITASKS_DATA_VOLUME",
+    "MONITOR_ALERT_BOT_TOKEN_FILE",
+    "MONITOR_HEALTH_TOKEN_FILE",
+    "MONITOR_ALERT_CHAT_ID",
 )
 FORBIDDEN_DEPLOY_KEYS = {
     "BOT_TOKEN",
@@ -251,6 +254,25 @@ def run_preflight(
             production_path, secret=True, expected_uid=expected_owner_uid,
         )
         add("production env permissions", secure, detail, detail)
+
+    for key, check_name in (
+        ("MONITOR_ALERT_BOT_TOKEN_FILE", "monitor alert token permissions"),
+        ("MONITOR_HEALTH_TOKEN_FILE", "monitor health token permissions"),
+    ):
+        secret_path = Path(env[key])
+        if not secret_path.is_absolute():
+            add(check_name, False, "", f"{key} must be absolute")
+        else:
+            secure, detail = _file_security(
+                secret_path, secret=True, expected_uid=expected_owner_uid,
+            )
+            add(check_name, secure, detail, detail)
+    add(
+        "monitor alert chat",
+        bool(re.fullmatch(r"-100[0-9]{6,16}", env["MONITOR_ALERT_CHAT_ID"])),
+        "private supergroup-shaped alert target configured",
+        "MONITOR_ALERT_CHAT_ID must be a numeric -100... supergroup ID",
+    )
 
     add(
         "release image binding", env["BIBITASKS_IMAGE"].lower() == expected_image,

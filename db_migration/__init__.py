@@ -2,6 +2,6 @@
 
 from .metadata import metadata
 
-ALEMBIC_HEAD = "0002_pilot_reliability"
+ALEMBIC_HEAD = "0004_authority_operation_registry"
 
 __all__ = ["ALEMBIC_HEAD", "metadata"]

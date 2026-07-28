@@ -26,6 +26,10 @@ SOURCE_COLUMNS = {
     "withdrawal_requests": "id user_id amount status created_at decided_by decided_at note operation_id request_hash account_type account_ciphertext account_masked account_fingerprint key_version decision_operation_id decision_request_hash provider external_reference external_reference_canonical reject_reason account_purged_at processing_by processing_at".split(),
     "withdrawal_events": "id withdrawal_id event_type from_status to_status actor_id operation_id created_at metadata_json".split(),
     "bonus_ledger": "id user_id amount reason task_id assignment_id withdrawal_id created_by created_at operation_id balance_after".split(),
+    "manual_grant_commands": "operation_id request_hash user_id amount reason maker_id created_at ledger_id result_balance".split(),
+    "admin_role_changes": "id user_id from_role to_role reason status requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash".split(),
+    "operation_registry": "operation_id command_type request_hash actor_id created_at".split(),
+    "admin_authorities": "user_id origin granted_operation_id granted_at".split(),
     "member_awards": "id user_id award_id slot bonus note granted_by granted_at operation_id balance_after revoked_at revoked_by revoke_note revoke_operation_id revoke_request_hash".split(),
     "task_review_commands": "operation_id assignment_id request_hash result_status created_at".split(),
     "task_disputes": "id assignment_id task_id user_id reward reason reconciliation_reason reconciliation_reference status opened_by opened_at open_operation_id open_request_hash decided_by decided_at decision_note decision_operation_id decision_request_hash".split(),
@@ -46,13 +50,16 @@ IDENTITY_TABLES = {
     "awards", "tasks", "task_assignments", "task_evidence",
     "withdrawal_requests", "withdrawal_events", "bonus_ledger",
     "member_awards", "task_outbox", "product_events", "task_disputes",
+    "admin_role_changes",
 }
 
 EXPECTED_SOURCE_INDEXES = {
     "idx_tasks_status", "idx_tasks_assigned", "idx_task_assignments_user",
     "idx_task_assignments_review", "idx_assignment_one_active",
     "idx_assignment_one_done", "idx_assignment_decision_operation",
-    "idx_task_disputes_status",
+    "idx_task_disputes_status", "idx_manual_grants_maker_time",
+    "idx_manual_grants_recipient_time", "idx_admin_role_changes_status",
+    "idx_admin_role_change_one_pending",
     "idx_withdrawals_user", "idx_withdrawals_one_pending",
     "idx_withdrawals_operation", "idx_withdrawals_decision_operation",
     "idx_withdrawals_external_reference_canonical", "idx_withdrawal_events_request",
@@ -61,6 +68,7 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_tasks_cancel_operation", "idx_assignments_completion_operation",
     "idx_assignments_release_operation", "idx_member_awards_user",
     "idx_member_awards_operation", "idx_member_awards_revoke_operation",
+    "idx_member_awards_maker_time",
     "idx_task_outbox_delivery",
     "idx_telegram_inbox_delivery", "idx_telegram_inbox_redrive_operation",
     "idx_media_gc", "idx_product_events_dedupe", "idx_product_events_funnel",
@@ -71,8 +79,8 @@ EXPECTED_SOURCE_INDEXES = {
 # Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
 # PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
 # rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "75bb7189def440e1e519b7f4e07611acef4bdac54d4cb6cd6c9afa7087c5669e"
-EXPECTED_SOURCE_USER_VERSION = 293
+EXPECTED_SOURCE_SCHEMA_SHA256 = "a374bc81f0dd699bba703bd97f3c4919ca1b02668959590d45754f5011272b0d"
+EXPECTED_SOURCE_USER_VERSION = 295
 
 
 class HarnessError(RuntimeError):

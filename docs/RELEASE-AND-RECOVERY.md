@@ -98,7 +98,13 @@ task/outbox записи. Каталог rehearsal нельзя монтиров
 1. Остановить writers или включить quiet window.
 2. Создать backup и выполнить restore rehearsal в новый каталог.
 3. Сохранить redacted JSON из `telegram_preflight.py` и `/health/ready`.
-4. Авторизовать `gh` и registry на машине скаута. `release_record.py` сам
+4. Авторизовать `gh` и registry на машине скаута. Для уже выпущенной v2.9.1
+   `release_record.py` сохраняется как legacy evidence builder. Новые релизы
+   проходят двухфазный [release gate v3](RELEASE-GATE-V3.md): candidate и
+   rollback/recovery/live evidence. Подписанный final record появится только
+   после отдельной реализации обязательного deployment enforcement; текущий
+   validator всегда завершает процесс terminal NO-GO.
+   Legacy `release_record.py` сам
    выполнит криптографическую проверку выбранных commit и digest командой:
 
 ```text
@@ -109,12 +115,14 @@ gh attestation verify oci://ghcr.io/voglogpro/bibitasks@sha256:<digest> \
   --deny-self-hosted-runners --format json
 ```
 
-5. Два разных скаута создают локальную неперезаписываемую запись promotion:
+5. Следующий блок — только архивная процедура уже выпущенной v2.9.1. Он не
+   является promotion authority для v2.10.0 и последующих версий. Два разных
+   скаута создают локальную неперезаписываемую legacy-запись:
 
 ```text
 python scripts/release_record.py \
-  --commit <full-40-char-sha> \
-  --image ghcr.io/<owner>/bibitasks@sha256:<digest> \
+  --commit acd0239a9ace9960c988c13e4608e2620b186fd3 \
+  --image ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac \
   --schema-version 293 \
   --backup-manifest <backup>/manifest.json \
   --restore-report <restore>/restore-report.json \
@@ -131,19 +139,117 @@ python scripts/release_record.py \
 GitHub provenance, красном preflight или неготовом webhook/workers. Он записывает
 только hashes и redacted сводку и не перезаписывает существующий путь. Это не WORM:
 после создания hash записи обязательно закрепляется в append-only CI artifact или
-внешнем versioned/WORM-хранилище. После этого разворачивается ровно digest из record
-и повторяются readiness, preflight и live smoke.
+внешнем versioned/WORM-хранилище. Для v2.10.0 создаётся candidate v1 со schema
+`295` по [`RELEASE-GATE-V3.md`](RELEASE-GATE-V3.md). Даже полный набор evidence
+сейчас заканчивается terminal NO-GO: deployment запрещён до реализации
+криптографического quorum хранителей, одноразового challenge ledger и
+контроллера, проверяющего подпись непосредственно перед переключением production.
+
+## Однократный upgrade существующей v2.9.1 базы: recovery-key enrollment
+
+Новый релиз сам создаёт recovery-key canary только в действительно пустом
+`DATA_DIR`. Если рядом уже есть `bibitasks.db`, startup намеренно завершится с
+ошибкой до открытия Telegram. Нельзя удалять canary, подставлять пустой volume
+или временно переключать `BIBITASKS_ENVIRONMENT`: существующая база проходит
+однократную явную церемонию `enroll-existing`.
+
+Условия церемонии:
+
+1. Зафиксировать immutable digest нового образа и остановить app и backup writer.
+   Monitor можно оставить включённым; он должен поднять ожидаемый alert.
+2. Убедиться, что в volume нет `bibitasks.db-wal`/`bibitasks.db-shm`. Если они
+   остались, сначала запустить старый v2.9.1 образ, выполнить штатный checkpoint,
+   снова остановить writers и начать церемонию заново.
+3. Подготовить отдельную временную копию production env, доступную только UID
+   приложения внутри контейнера. Не передавать ключи аргументами или через
+   stdout:
+
+   ```sh
+   sudo install -d -o 10001 -g 10001 -m 0700 /run/bibitasks-key-enrollment
+   sudo install -o 10001 -g 10001 -m 0400 \
+     /etc/bibitasks/bibitasks.env /run/bibitasks-key-enrollment/keys.env
+   sudo install -d -o 10001 -g 10001 -m 0700 /var/lib/bibitasks-enrollment
+   ```
+
+4. Получить SHA-256 остановленной базы из того же named volume. В выводе
+   допустим только digest, он не является секретом:
+
+   ```sh
+   DB_SHA256="$(docker run --rm --network none --read-only \
+     --user 10001:10001 --cap-drop ALL \
+     --security-opt no-new-privileges:true \
+     --mount type=volume,src="$BIBITASKS_DATA_VOLUME",dst=/app/data,readonly \
+     --entrypoint python "$BIBITASKS_IMAGE" -c \
+     "import hashlib; f=open('/app/data/bibitasks.db','rb'); print(hashlib.file_digest(f,'sha256').hexdigest())")"
+   test "${#DB_SHA256}" -eq 64
+   printf '%s\n' "$DB_SHA256"
+   ```
+
+5. Выполнить enrollment тем же immutable образом. Volume монтируется writable
+   только для атомарного создания одного canary; сеть и все capabilities
+   отключены:
+
+   ```sh
+   docker run --rm --network none --read-only --user 10001:10001 \
+     --cap-drop ALL --security-opt no-new-privileges:true \
+     --mount type=volume,src="$BIBITASKS_DATA_VOLUME",dst=/app/data \
+     --mount type=bind,src=/run/bibitasks-key-enrollment/keys.env,dst=/run/keys.env,readonly \
+     --mount type=bind,src=/var/lib/bibitasks-enrollment,dst=/evidence \
+     --entrypoint python "$BIBITASKS_IMAGE" \
+     scripts/recovery_key_canary.py enroll-existing \
+     --data-dir /app/data \
+     --confirm-database-sha256 "$DB_SHA256" \
+     --env-file /run/keys.env \
+     --report /evidence/recovery-key-enrollment.json
+   ```
+
+CLI — одноразовый bridge только от v2.9.1 schema `293` к следующему релизу
+(destination schema `295` применяется уже при последующем startup). Он требует
+точное подтверждение SHA-256, читает и инспектирует SQLite snapshot из байтов
+одного стабильного regular-file descriptor без повторного открытия pathname,
+проверяет `integrity_check=ok`, exact `user_version=293`, `DATA_DIR` mode `0700`
+с правильным owner и link count `1`. Отсутствие WAL/SHM, неизменность DB inode,
+байтов и pathname проверяются до и после публикации. CLI отклоняет активные
+`pending`/`processing` строки без ciphertext, расшифровывает и сверяет fingerprint
+всех сохранившихся Telegram/withdrawal ciphertext и сравнивает декодированный
+32-byte material двух Fernet keys, а не только их текст. Он не читает ключи из
+process environment и никогда не печатает ключи или plaintext. Успешный
+stdout/report содержит только `database_sha256`, `canary_sha256`,
+`schema_version`, `enrolled_at`; report создаётся exclusive с mode `0600` вне
+репозитория. Если report запрошен, его target резервируется и fsync-ится до
+проверки, полный report fsync-ится **до** атомарной публикации canary. Любая
+последующая ошибка удаляет только exact inode report/canary, созданные этой
+операцией; подменённый inode CLI никогда не удаляет.
+
+6. Сверить оба digest в report с stdout, ограничить доступ к evidence и удалить
+   временную копию env. Затем запустить новый stack, дождаться зелёного
+   `/health/ready` и немедленно создать новый verified backup. Старые backups без
+   canary/count contract не являются restore evidence для нового релиза.
+
+Любая ошибка оставляет startup закрытым. Не повторять enrollment поверх уже
+созданного canary: CLI обязан ответить отказом.
 
 ## Rollback
 
-1. Остановить writers и сохранить диагностические логи.
-2. Не запускать старый образ на уже изменённой SQLite-схеме.
-3. Взять предыдущий digest, schema и backup ID из соответствующего
-   `release-record.json`. Для code-only ошибки повторно поднять предыдущий digest только если его schema
-   contract совпадает с текущим.
-4. Для schema/data ошибки восстановить проверенную pre-release копию в новый
-   volume, затем поднять предыдущий digest на этом новом volume.
-5. Проверить `/health/ready`, dead queues и финансовую сверку до возврата трафика.
+SQLite restore rehearsal/PIT staging через новый named volume выполняется
+только скриптом `scripts/sqlite_volume_rollback.py` по пошаговой инструкции
+[`SQLITE-VOLUME-ROLLBACK.md`](SQLITE-VOLUME-ROLLBACK.md). Он выполняет plan,
+неразрушающий restore и повторную проверку реального volume. Production
+activation fail-closed отключена до отдельной двусторонней сверки операций после
+backup; ручное восстановление прямо в текущий volume запрещено.
+
+Текущий runbook не разрешает production rollback ни вручную, ни скриптом.
+Старый point-in-time backup не содержит операции ledger/withdrawals/payouts и
+Telegram inbox/outbox после времени snapshot, поэтому его включение может
+потерять или повторить финансовую операцию. `plan`, `apply` и `verify-stage`
+служат только rehearsal/evidence и не меняют production deploy env.
+
+Production rollback остаётся **NO-GO** до отдельного будущего процесса, который
+машинно проверяет quiet-window final backup, двусторонний operation delta,
+совместимость exact image/commit/schema, installed unit/runtime, отсутствие
+replay/duplicate payouts, post-start readiness и проверенный backout. До этого
+разрешено только восстановление сервиса вперёд исправляющим релизом без отката
+данных.
 
 Разрушительный Alembic downgrade baseline отключён. PostgreSQL rollback — только
 restore проверенной pre-cutover базы либо отдельная forward corrective migration.

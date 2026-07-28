@@ -16,11 +16,16 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+try:
+    from .recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+except ImportError:  # direct ``python scripts/backup.py`` execution
+    from recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
 
 
 def _load_environment(env_file: Path | None) -> None:
@@ -40,6 +45,41 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _read_canary(data_dir: Path) -> bytes:
+    path = data_dir / CANARY_FILENAME
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Recovery-key canary not found: {path}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("Recovery-key canary must be a regular non-symlink file")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Recovery-key canary not found: {path}") from exc
+    try:
+        info = os.fstat(descriptor)
+        after = path.lstat()
+        identity = lambda value: (value.st_dev, value.st_ino)
+        if (
+            not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(after.st_mode)
+            or identity(before) != identity(info) or identity(after) != identity(info)
+            or info.st_nlink != 1
+        ):
+            raise ValueError("Recovery-key canary changed during secure open")
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+            raise PermissionError("Recovery-key canary must have mode 0600")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read()
+    finally:
+        os.close(descriptor)
+    validate_canary_bytes(raw)
+    return raw
+
+
 def create_backup(data_dir: Path, output_dir: Path) -> Path:
     data_dir = data_dir.resolve()
     output_dir = output_dir.resolve()
@@ -51,6 +91,7 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
         raise FileNotFoundError(f"Database not found: {database}")
     if database.is_symlink():
         raise ValueError(f"Database must not be a symbolic link: {database}")
+    canary_raw = _read_canary(data_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -71,6 +112,10 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
                 raise RuntimeError(f"Backup integrity check failed: {integrity}")
         if os.name != "nt":
             database_copy.chmod(0o600)
+        canary_copy = staging / CANARY_FILENAME
+        canary_copy.write_bytes(canary_raw)
+        if os.name != "nt":
+            canary_copy.chmod(0o600)
 
         media = []
         for folder_name in ("task_photos", "proof_photos"):
@@ -98,6 +143,37 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
 
         with closing(sqlite3.connect(database_copy)) as snapshot:
             schema_version = int(snapshot.execute("PRAGMA user_version").fetchone()[0])
+            try:
+                recovery_key_counts = {
+                    "telegram_ciphertext_count": int(snapshot.execute(
+                        "SELECT COUNT(*) FROM telegram_update_inbox "
+                        "WHERE payload_json IS NOT NULL"
+                    ).fetchone()[0]),
+                    "telegram_active_null_count": int(snapshot.execute(
+                        "SELECT COUNT(*) FROM telegram_update_inbox "
+                        "WHERE status IN ('pending','processing') AND payload_json IS NULL"
+                    ).fetchone()[0]),
+                    "withdrawal_ciphertext_count": int(snapshot.execute(
+                        "SELECT COUNT(*) FROM withdrawal_requests "
+                        "WHERE account_ciphertext IS NOT NULL"
+                    ).fetchone()[0]),
+                    "withdrawal_active_null_count": int(snapshot.execute(
+                        "SELECT COUNT(*) FROM withdrawal_requests "
+                        "WHERE status IN ('pending','processing') "
+                        "AND account_ciphertext IS NULL"
+                    ).fetchone()[0]),
+                }
+            except sqlite3.Error as exc:
+                raise RuntimeError(
+                    "Database lacks the encrypted recovery-count contract"
+                ) from exc
+            if (
+                recovery_key_counts["telegram_active_null_count"] > 0
+                or recovery_key_counts["withdrawal_active_null_count"] > 0
+            ):
+                raise RuntimeError(
+                    "Active recovery-sensitive rows are missing ciphertext"
+                )
             has_media_table = snapshot.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_objects'"
             ).fetchone()
@@ -181,6 +257,12 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
                 "sha256": sha256(database_copy),
                 "integrity_check": "ok",
                 "schema_version": schema_version,
+                **recovery_key_counts,
+            },
+            "recovery_key_canary": {
+                "path": CANARY_FILENAME,
+                "bytes": len(canary_raw),
+                "sha256": hashlib.sha256(canary_raw).hexdigest(),
             },
             "media": media,
             "media_objects": media_objects,

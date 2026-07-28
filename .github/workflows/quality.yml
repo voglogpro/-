@@ -20,6 +20,8 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      - name: Audit locked Node dependencies
+        run: npm audit --audit-level=high
       - name: Install browser runtime
         run: npx playwright install --with-deps chromium
       - name: Mini App browser smoke tests
@@ -39,22 +41,38 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install --require-hashes --requirement requirements.lock
+      - name: Scan full Git history for secrets
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            --output "$archive" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $archive" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .
       - name: Audit locked Python dependencies
         run: |
           pip install pip-audit==2.10.1
           pip-audit --requirement requirements.lock --progress-spinner off
       - name: Compile backend
-        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/pilot_host_preflight.py scripts/release_record.py scripts/restore.py scripts/telegram_inventory.py scripts/telegram_preflight.py scripts/telegram_surface_setup.py
+        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/final_release_record.py scripts/pilot_host_preflight.py scripts/pilot_monitor.py scripts/pilot_monitor_launcher.py scripts/recovery_key_canary.py scripts/release_candidate.py scripts/release_record.py scripts/restore.py scripts/secret_recovery_evidence.py scripts/sqlite_volume_rollback.py scripts/telegram_inventory.py scripts/telegram_preflight.py scripts/telegram_surface_setup.py
       - name: Core safety tests
         shell: bash
         run: |
           set -o pipefail
           python -m unittest discover -s tests -v 2>&1 | tee core-tests.log
+      - name: Linux Docker CAP_CHOWN and ownership integration
+        if: runner.os == 'Linux'
+        run: python -m tests.docker_sqlite_volume_rollback_integration
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
@@ -73,15 +91,30 @@ jobs:
           import sys
           from contextlib import closing
           from pathlib import Path
+          from cryptography.fernet import Fernet
+          from scripts.recovery_key_canary import ensure_recovery_key_canary
 
           root = Path(sys.argv[1])
           data = root / "data"
           output = root / "output"
           (data / "task_photos").mkdir(parents=True)
+          data.chmod(0o700)
+          ensure_recovery_key_canary(
+              data, Fernet(Fernet.generate_key()), Fernet(Fernet.generate_key()),
+              production=True,
+          )
           (data / "task_photos" / "sample.jpg").write_bytes(b"test-photo")
           with closing(sqlite3.connect(data / "bibitasks.db")) as db:
               db.execute("CREATE TABLE sample (value TEXT)")
               db.execute("INSERT INTO sample VALUES ('ok')")
+              db.execute(
+                  "CREATE TABLE telegram_update_inbox "
+                  "(update_id INTEGER PRIMARY KEY,payload_json TEXT,status TEXT)"
+              )
+              db.execute(
+                  "CREATE TABLE withdrawal_requests "
+                  "(id INTEGER PRIMARY KEY,account_ciphertext TEXT,status TEXT)"
+              )
           result = subprocess.run(
               [sys.executable, "scripts/backup.py", "--data-dir", str(data),
                "--output-dir", str(output)],
@@ -113,10 +146,18 @@ jobs:
           BACKUP_DIR: /tmp/bibitasks-backups
           BACKUP_SENTINEL: /tmp/bibitasks-backups/.bibitasks-offhost
           BIBITASKS_DOMAIN: tasks.example.com
+          MONITOR_ALERT_BOT_TOKEN_FILE: /tmp/bibitasks-monitor-alert-token
+          MONITOR_HEALTH_TOKEN_FILE: /tmp/bibitasks-monitor-health-token
+          MONITOR_ALERT_CHAT_ID: -1001234567890
         shell: bash
         run: |
           mkdir -p "$BACKUP_DIR"
           touch "$BACKUP_SENTINEL"
+          printf '123456:' > "$MONITOR_ALERT_BOT_TOKEN_FILE"
+          printf '%040d\n' 0 >> "$MONITOR_ALERT_BOT_TOKEN_FILE"
+          printf 'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh\n' > "$MONITOR_HEALTH_TOKEN_FILE"
+          chmod 0600 "$MONITOR_ALERT_BOT_TOKEN_FILE" "$MONITOR_HEALTH_TOKEN_FILE"
+          sudo chown root:root "$MONITOR_ALERT_BOT_TOKEN_FILE" "$MONITOR_HEALTH_TOKEN_FILE"
           compose="$RUNNER_TEMP/docker-compose-v5.3.1"
           if ! message=$("$compose" -f compose.pilot.yaml config --quiet 2>&1); then
             message="${message//'%'/'%25'}"
@@ -125,6 +166,44 @@ jobs:
             echo "::error title=Compose pilot validation failed::$message"
             exit 1
           fi
+      - name: Prove monitor service health and privilege drop
+        env:
+          BIBITASKS_IMAGE: bibitasks:ci
+          BIBITASKS_ENV_FILE: .env.example
+          BACKUP_DIR: /tmp/bibitasks-backups
+          BACKUP_SENTINEL: /tmp/bibitasks-backups/.bibitasks-offhost
+          BIBITASKS_DOMAIN: tasks.example.com
+          MONITOR_ALERT_BOT_TOKEN_FILE: /tmp/bibitasks-monitor-alert-token
+          MONITOR_HEALTH_TOKEN_FILE: /tmp/bibitasks-monitor-health-token
+          MONITOR_ALERT_CHAT_ID: -1001234567890
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/docker-compose-v5.3.1"
+          project=bibitasks-monitor-ci
+          files=(-f compose.pilot.yaml -f tests/fixtures/compose.monitor-ci.yaml)
+          cleanup() { "$compose" -p "$project" "${files[@]}" down -v --remove-orphans; }
+          trap cleanup EXIT
+          "$compose" -p "$project" "${files[@]}" up -d --no-deps monitor
+          container=$("$compose" -p "$project" "${files[@]}" ps -q monitor)
+          test -n "$container"
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")
+            test "$status" = healthy && break
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
+          docker exec --user 10001:10001 "$container" python -c \
+            "v=dict(line.split(':',1) for line in open('/proc/1/status') if ':' in line); assert v['Uid'].split()==['10001']*4; assert v['Gid'].split()==['10001']*4; assert not v['Groups'].split(); assert int(v['CapPrm'].strip(),16)==0 and int(v['CapEff'].strip(),16)==0"
+          "$compose" -p "$project" "${files[@]}" run --rm --no-deps --user 10001:10001 \
+            --entrypoint python monitor -c \
+            "from pathlib import Path; Path('/var/lib/bibitasks-monitor/state.json').write_text('{',encoding='utf-8')"
+          for _ in $(seq 1 10); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$container")
+            test "$status" = unhealthy && break
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = unhealthy
       - name: Validate pilot security policy
         shell: bash
         run: |
@@ -134,8 +213,20 @@ jobs:
           assert "env_file:" not in backup
           assert "network_mode: none" in backup
           assert manifest.count("create_host_path: false") == 2
-          assert manifest.count("networks: [pilot]") == 2
-          assert manifest.count('restart: "unless-stopped"') == 3
+          monitor = manifest.split("\n  monitor:\n", 1)[1].split("\n  caddy:\n", 1)[0]
+          assert "env_file:" not in monitor
+          assert "/var/run/docker.sock" not in monitor
+          assert "bibitasks_data" not in monitor
+          assert "monitor_alert_bot_token" in monitor
+          assert "monitor_health_token" in monitor
+          assert "backup_status:/run/bibitasks-backup:ro" in monitor
+          assert 'user: "0:0"' in monitor
+          assert "pilot_monitor_launcher.py" in monitor
+          assert "--drop-only" in monitor
+          assert "init: true" not in monitor
+          assert 'cap_add: ["CHOWN", "SETGID", "SETUID"]' in monitor
+          assert manifest.count("networks: [pilot]") == 3
+          assert manifest.count('restart: "unless-stopped"') == 4
           assert "condition: service_started" in manifest
           unit = open("deploy/bibitasks-pilot.service.example", encoding="utf-8").read()
           assert "pilot_host_preflight.py" in unit
@@ -156,14 +247,19 @@ jobs:
       - name: Smoke-test image identity and locked imports
         run: >-
           docker run --rm --entrypoint python bibitasks:ci -c
-          "import os,aiogram,aiohttp,aiosqlite,boto3,cryptography,PIL;
-          assert os.getuid()!=0; assert os.access('/app/data',os.W_OK)"
+          "import os,subprocess,aiogram,aiohttp,aiosqlite,boto3,cryptography,PIL;
+          assert os.getuid()!=0; assert os.access('/app/data',os.W_OK);
+          assert os.path.isfile('/app/scripts/secret_recovery_evidence.py');
+          assert os.path.isfile('/app/scripts/recovery_key_canary.py');
+          assert subprocess.run(['python','scripts/recovery_key_canary.py','enroll-existing','--help'],stdout=subprocess.DEVNULL).returncode==0;
+          assert subprocess.check_output(['/usr/local/bin/age','--version'],text=True).strip()=='v1.3.1'"
       - name: Validate tracked secrets and generated data
         shell: bash
         run: |
           test ! -e .env
           test ! -d data
           ! git grep -nE '[0-9]{6,12}:[A-Za-z0-9_-]{30,}' -- . ':(exclude).env.example'
+          ! git ls-files | grep -E '(^|/)(bibitasks|production|deploy\.next)\.env$|\.secret$|(^|/)(secrets|evidence)/|(^|/)(rollback-plan|stage-report|activation-report|secret-recovery|monitor-drill|release-candidate|final-release).*\.json$'
 
   postgres-migration:
     runs-on: ubuntu-latest

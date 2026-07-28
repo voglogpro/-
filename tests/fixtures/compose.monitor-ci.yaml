@@ -1,0 +1,7 @@
+services:
+  monitor:
+    healthcheck:
+      interval: 2s
+      timeout: 2s
+      start_period: 0s
+      retries: 1

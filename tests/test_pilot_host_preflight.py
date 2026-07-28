@@ -68,9 +68,15 @@ class PilotHostPreflightTests(unittest.TestCase):
         self.sentinel.write_text("bibitasks-offhost-v1\n", encoding="utf-8")
         self.production = self.root / "bibitasks.env"
         self.production.write_text("BOT_TOKEN=not-read-by-preflight\n", encoding="utf-8")
+        self.monitor_alert = self.root / "monitor-alert-bot-token"
+        self.monitor_health = self.root / "monitor-health-token"
+        self.monitor_alert.write_text("not-read-by-preflight\n", encoding="utf-8")
+        self.monitor_health.write_text("not-read-by-preflight\n", encoding="utf-8")
         self.deploy = self.root / "deploy.env"
         self._write_deploy()
         os.chmod(self.production, 0o600)
+        os.chmod(self.monitor_alert, 0o600)
+        os.chmod(self.monitor_health, 0o600)
         os.chmod(self.deploy, 0o640)
         self.owner = self.deploy.stat().st_uid if hasattr(self.deploy.stat(), "st_uid") else None
 
@@ -89,6 +95,9 @@ class PilotHostPreflightTests(unittest.TestCase):
                 "BACKUP_SENTINEL_VALUE=bibitasks-offhost-v1",
                 "BACKUP_EXPECTED_SOURCE=backup.example:/bibitasks",
                 "BIBITASKS_DATA_VOLUME=bibitasks_data",
+                f"MONITOR_ALERT_BOT_TOKEN_FILE={self.monitor_alert}",
+                f"MONITOR_HEALTH_TOKEN_FILE={self.monitor_health}",
+                "MONITOR_ALERT_CHAT_ID=-1002222222222",
                 extra,
                 "",
             ]),
@@ -146,6 +155,12 @@ class PilotHostPreflightTests(unittest.TestCase):
         os.chmod(self.production, 0o644)
         report = self._run()
         self.assertEqual(self._status(report, "production env permissions"), "fail")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are authoritative on the VPS")
+    def test_rejects_broad_monitor_secret_permissions(self):
+        os.chmod(self.monitor_alert, 0o644)
+        report = self._run()
+        self.assertEqual(self._status(report, "monitor alert token permissions"), "fail")
 
     def test_rejects_root_filesystem_as_backup(self):
         report = self._run(FakeProbe(mount_target=Path("/")))

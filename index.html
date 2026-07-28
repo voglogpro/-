@@ -577,8 +577,8 @@ select.tinput{appearance:none;background-image:
     <div id="subBox" class="card warm hidden">
       <div class="eyebrow"><b></b>Подписка</div>
       <h2 class="big">Вступи в сообщество</h2>
-      <p class="sub">Ты пришёл по ссылке друга. Вступи — и другу засчитается
-        приглашение, а ты первым увидишь новые задания и акции.</p>
+      <p class="sub">Ты пришёл по ссылке друга. Вступи в сообщество и подай заявку.
+        После одобрения другу засчитается приглашение, а тебе откроются задания.</p>
       <div class="acts">
         <button class="btn btn-volt sm" id="subOpen">Открыть сообщество</button>
         <button class="mini" id="subCheck">Я подписался</button>
@@ -594,7 +594,7 @@ select.tinput{appearance:none;background-image:
         <div class="value-list" aria-label="Как это работает">
           <div class="value-item"><span class="vi">1</span><span>Задания только для твоего города</span></div>
           <div class="value-item"><span class="vi">2</span><span>Фото результата прямо в приложении</span></div>
-          <div class="value-item"><span class="vi">3</span><span>1 бибибонус = 1 ₽ на поездки · 85 бонусов ≈ 10 минут</span></div>
+          <div class="value-item"><span class="vi">3</span><span>1 бибибонус = 1 ₽ на поездки · минимум 1000 бонусов ≈ 118 минут при 8,5 ₽/мин</span></div>
         </div>
         <div class="field"><label for="apName">Как тебя зовут</label>
           <input class="tinput" id="apName" placeholder="Кирилл" inputmode="text"></div>
@@ -604,6 +604,7 @@ select.tinput{appearance:none;background-image:
           <textarea class="tinput" id="apAbout" rows="4"
             placeholder="Например: могу поправлять парковки, перевозить байки на машине и делать фото результата"></textarea></div>
         <div class="hint" style="margin:-5px 0 12px">Номер телефона не нужен. Ответственный увидит имя пользователя Telegram.</div>
+        <div class="hint" id="privacyNotice" style="margin:-5px 0 12px"></div>
         <div class="field-error" id="apError" role="alert"></div>
         <button class="btn btn-volt" id="apSend">Отправить заявку</button>
       </div>
@@ -625,6 +626,8 @@ select.tinput{appearance:none;background-image:
       <div class="eyebrow"><b></b>Статус заявки</div>
       <h2 class="big">Заявка отклонена</h2>
       <p class="sub" id="blockedReason">Причину можно уточнить у ответственного.</p>
+      <button class="btn btn-volt hidden" id="blockedReapply" type="button" style="margin-top:13px">Исправить и подать снова</button>
+      <div class="hint hidden" id="blockedCooldown" style="margin-top:10px"></div>
       <button class="btn btn-ghost hidden" id="blockedContact" style="margin-top:13px">Написать ответственному</button>
     </div>
 
@@ -676,6 +679,14 @@ select.tinput{appearance:none;background-image:
 
   <!-- ═══════════ ПРОФИЛЬ ═══════════ -->
   <div id="tab-profile" class="page tabview hidden">
+    <div class="card warm" id="pHelpCard">
+      <div class="eyebrow"><b></b>Как выполнять задания</div>
+      <p class="sub">1. Проверь город, адрес, срок, награду и формат отчёта.<br>
+        2. Нажми «Взять задание» только если успеваешь.<br>
+        3. Выполни задачу и приложи требуемые фото.<br>
+        4. Нажми «Готово» и дождись проверки ответственного.</p>
+      <div class="acts" id="pHelpLinks"></div>
+    </div>
     <div class="card solid">
       <div class="eyebrow"><b></b>Уровень доверия</div>
       <div class="rowsplit" style="margin-bottom:12px">
@@ -879,6 +890,11 @@ select.tinput{appearance:none;background-image:
 
     <div id="adSubTeam" class="card hidden">
       <div class="eyebrow"><b></b>Люди<span class="cnt" id="adTeamCnt"></span></div>
+      <div class="card lit" style="margin-bottom:12px">
+        <div class="eyebrow"><b></b>Изменения роли ответственного<span class="cnt" id="adRoleChangeCnt"></span></div>
+        <p class="sub" style="margin-bottom:10px">Выдачу или снятие доступа всегда подтверждает второй ответственный.</p>
+        <div id="adRoleChanges" aria-live="polite"><div class="empty">Ожидающих запросов нет.</div></div>
+      </div>
       <div class="searchtools">
         <div class="field"><input class="tinput" id="adTeamSearch"
           placeholder="Имя, @username, город, ID или #тег" aria-label="Поиск людей" autocomplete="off"></div>
@@ -944,11 +960,23 @@ select.tinput{appearance:none;background-image:
   </div>
 </div></div>
 
+<!-- отдельное подтверждение денежного решения по фотоотчёту -->
+<div id="approveSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="approveTitle"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="approveTitle">Подтвердить выполненное задание?</h3>
+  <p class="lead">После подтверждения бонусы сразу попадут исполнителю. Проверь человека, задание и сумму.</p>
+  <div id="approveBody"></div>
+  <div class="acts">
+    <button class="mini" id="approveCancel" type="button" style="flex:1">Вернуться к проверке</button>
+    <button class="btn btn-volt sm" id="approveConfirm" type="button">Начислить</button>
+  </div>
+</div></div>
+
 <!-- шторка: баланс вручную -->
 <div id="balanceSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="balanceTitle"><div class="inner">
   <div class="grab"></div>
   <h3 id="balanceTitle">Изменить баланс</h3>
-  <p class="lead">Операция попадёт в историю участника с указанной причиной.</p>
+  <p class="lead">Быстрая благодарность только начисляет бонусы и попадёт в историю. Списания выполняются через связанное задание, награду или выплату.</p>
   <div class="field"><label for="balanceAmount">Сколько ⚡</label>
     <input class="tinput num" id="balanceAmount" inputmode="numeric" placeholder="100"></div>
   <div class="field"><label for="balanceReason">Причина</label>
@@ -1011,6 +1039,17 @@ select.tinput{appearance:none;background-image:
 </div></div>
 
 <!-- шторка: карточка участника -->
+<div id="awardGrantConfirmSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="awardGrantConfirmTitle"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="awardGrantConfirmTitle">Подтвердить награду</h3>
+  <p class="lead">Проверь получателя и сумму. После подтверждения бонусы начислятся сразу.</p>
+  <div id="awardGrantConfirmBody"></div>
+  <div class="acts">
+    <button class="mini" id="awardGrantConfirmCancel" style="flex:1">Назад</button>
+    <button class="btn btn-amber sm" id="awardGrantConfirm">Подтвердить</button>
+  </div>
+</div></div>
+
 <div id="memberSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="msName"><div class="inner">
   <div class="grab"></div>
   <div class="mshead">
@@ -1021,8 +1060,7 @@ select.tinput{appearance:none;background-image:
   <p class="lead" id="msInfo"></p>
   <div class="meta" id="msTags" style="margin:0 0 14px"></div>
   <div class="mgrid">
-    <button class="mini" id="msPlus">＋ Начислить</button>
-    <button class="mini" id="msMinus">− Списать</button>
+    <button class="mini" id="msPlus">＋ Поблагодарить</button>
     <button class="mini" id="msAward">🏅 Награда</button>
     <button class="mini" id="msRole">🛡️ Роль</button>
     <button class="mini" id="msEditTags">🏷️ Теги</button>
@@ -1034,7 +1072,7 @@ select.tinput{appearance:none;background-image:
 <div id="roleSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="roleTitle"><div class="inner">
   <div class="grab"></div>
   <h3 id="roleTitle">Роль участника</h3>
-  <p class="lead">Роль меняется сразу, участник получит сообщение.</p>
+  <p class="lead">Обычная роль меняется сразу. Доступ ответственного выдаёт или снимает только второй ответственный после независимой проверки.</p>
   <button class="pick" data-role="helper"><span class="em">🌿</span>
     <span class="tx">Помощник<small>Берёт задания и получает бибибонусы</small></span>
     <span class="mark">✓</span></button>
@@ -1407,6 +1445,7 @@ async function load(){
   $('pVersion').textContent = STATE.build_version || '';
   if(!$('apName').value) $('apName').value = me.name || '';
   if(!$('apCity').value) $('apCity').value = me.city || '';
+  if(!$('apAbout').value) $('apAbout').value = me.about || '';
   $('pCityCard').classList.toggle('hidden', !STATE.can_work);
   if(document.activeElement!==$('pCity')) $('pCity').value = me.city || '';
   const requestedCity=me.city_change_requested||'';
@@ -1421,6 +1460,7 @@ async function load(){
   }
   const support = STATE.support_username || '';
   ['waitContact','blockedContact'].forEach(id=>$(id).classList.toggle('hidden', !support));
+  renderHelpAndPrivacy();
 
   $('pBadge').textContent = me.trust_emoji;
   $('pLevel').textContent = me.trust_name;
@@ -1520,12 +1560,63 @@ function renderTasksTab(){
   $('blockedReason').textContent = me.application_note
     ? 'Причина: ' + me.application_note
     : 'Причину можно уточнить у ответственного.';
+  $('blockedReapply').classList.toggle('hidden', !blocked || !me.can_resubmit);
+  const retryAfter=Number(me.resubmit_retry_after||0);
+  $('blockedCooldown').classList.toggle('hidden', !blocked || !!me.can_resubmit || !retryAfter);
+  $('blockedCooldown').textContent=retryAfter
+    ? 'Исправить и отправить анкету снова можно через '+Math.max(1,Math.ceil(retryAfter/3600))+' ч.'
+    : '';
   $('waitMessage').textContent=WRITE_ACCESS_STATE!==true
     ? 'Заявка на рассмотрении. Telegram не разрешил уведомления — проверяй статус здесь или открой чат с ботом и нажми Start.'
     : 'Ответственный одобрит её — и задания появятся здесь. Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.';
   $('waitBot').classList.toggle('hidden', !waiting || WRITE_ACCESS_STATE===true);
   $('worksBox').classList.toggle('hidden', !canWork);
   if(canWork) loadTasks();
+}
+function safeHttpsUrl(raw, telegramOnly){
+  try{
+    const url=new URL(String(raw||''));
+    if(url.protocol!=='https:'||url.username||url.password) return '';
+    if(telegramOnly&&url.hostname!=='t.me') return '';
+    return url.href;
+  }catch(e){ return ''; }
+}
+function openHelpUrl(raw){
+  const url=safeHttpsUrl(raw,false);
+  if(!url){ toast('Ссылка не настроена'); return; }
+  try{
+    if(new URL(url).hostname==='t.me'&&tg&&tg.openTelegramLink) tg.openTelegramLink(url);
+    else if(tg&&tg.openLink) tg.openLink(url);
+    else window.open(url,'_blank','noopener');
+  }catch(e){ toast('Не удалось открыть ссылку'); }
+}
+function renderHelpAndPrivacy(){
+  const help=(STATE&&STATE.help)||{};
+  const links=$('pHelpLinks');
+  links.replaceChildren();
+  [
+    ['🛠 Рабочая тема',help.work_topic_url,!!STATE.can_work],
+    ['💬 Сообщество',help.community_url,!!STATE.can_work],
+    ['🤖 Бот',help.bot_url,true],
+    ['🙋 Ответственный',help.support_url,!!STATE.can_work],
+  ].forEach(([label,raw,show])=>{
+    const url=safeHttpsUrl(raw,false);
+    if(!show||!url) return;
+    const button=document.createElement('button');
+    button.type='button'; button.className='mini'; button.textContent=label;
+    button.onclick=()=>openHelpUrl(url);
+    links.appendChild(button);
+  });
+  const privacy=$('privacyNotice');
+  privacy.textContent='Имя, город и комментарий нужны только для рассмотрения заявки.';
+  const privacyUrl=safeHttpsUrl(STATE&&STATE.privacy_url,false);
+  if(privacyUrl){
+    privacy.appendChild(document.createTextNode(' '));
+    const link=document.createElement('a');
+    link.href=privacyUrl; link.textContent='Как обрабатываются данные';
+    link.rel='noopener noreferrer'; link.target='_blank';
+    privacy.appendChild(link);
+  }
 }
 function openSupport(){
   const u = STATE && STATE.support_username;
@@ -1536,6 +1627,13 @@ function openSupport(){
 }
 $('waitContact').onclick = openSupport;
 $('blockedContact').onclick = openSupport;
+$('blockedReapply').onclick = ()=>{
+  $('blockedBox').classList.add('hidden');
+  $('applyBox').classList.remove('hidden');
+  $('apSend').textContent='Отправить повторную заявку';
+  $('applyBox').scrollIntoView({behavior:'smooth',block:'start'});
+  setTimeout(()=>{ try{$('apName').focus();}catch(e){} },120);
+};
 $('waitBot').onclick = ()=>{
   const username=(STATE&&STATE.bot_username)||'';
   if(!username){ toast('Имя бота не настроено'); return; }
@@ -1594,6 +1692,57 @@ let MY_TASKS = new Map(), WITHDRAW_OPERATION=null;
 const RELEASE_OPERATIONS = new Map(), CANCEL_OPERATIONS = new Map(),
       WITHDRAW_DECISIONS = new Map(), REVIEW_DECISIONS = new Map(),
       DISPUTE_OPERATIONS = new Map(), AWARD_REVOKE_OPERATIONS = new Map();
+let APPROVE_PENDING = null;
+function approveStorageKey(assignmentId){ return 'bibitasks_review_approve_'+Number(assignmentId); }
+function persistedApproveOperation(taskId,assignmentId){
+  const key=approveStorageKey(assignmentId);
+  try{
+    const saved=JSON.parse(sessionStorage.getItem(key)||'null');
+    if(saved&&saved.id&&Number(saved.taskId)===Number(taskId)&&Number(saved.assignmentId)===Number(assignmentId)) return saved;
+  }catch(e){}
+  const operation={id:newOperationId(),taskId:Number(taskId),assignmentId:Number(assignmentId)};
+  try{ sessionStorage.setItem(key,JSON.stringify(operation)); }catch(e){}
+  return operation;
+}
+function clearApproveOperation(assignmentId){
+  try{ sessionStorage.removeItem(approveStorageKey(assignmentId)); }catch(e){}
+}
+function openApproveConfirmation(taskId,assignmentId){
+  const item=REVIEW_ITEMS.find(t=>Number(t.id)===Number(taskId)&&Number(t.assignment_id)===Number(assignmentId));
+  if(!item){ toast('Отчёт уже исчез из очереди. Обнови список.'); return; }
+  APPROVE_PENDING={item:item,operation:persistedApproveOperation(taskId,assignmentId)};
+  const photo=((item.evidence||[]).find(e=>e.kind==='after')||{}).photo_url;
+  $('approveBody').innerHTML='<div class="task">'+
+    '<div class="tt">'+esc(item.title||'Задание')+'</div>'+
+    '<div class="dt">Исполнитель: <b>'+esc(item.claimed_name||'не указан')+'</b></div>'+
+    '<div class="dt">К начислению: <b>+'+Number(item.reward||0)+'⚡</b></div>'+
+    (photo?'<img class="evidence-img" src="'+esc(photo)+'" alt="Фото результата">':'')+'</div>';
+  $('approveConfirm').textContent='Начислить '+Number(item.reward||0)+'⚡';
+  $('approveSheet').classList.remove('hidden'); buzz('tap');
+}
+$('approveCancel').onclick=()=>{
+  if(APPROVE_PENDING) clearApproveOperation(APPROVE_PENDING.operation.assignmentId);
+  APPROVE_PENDING=null; $('approveSheet').classList.add('hidden');
+};
+$('approveConfirm').onclick=async()=>{
+  if(!APPROVE_PENDING) return;
+  const pending=APPROVE_PENDING, button=$('approveConfirm'), original=button.textContent;
+  button.disabled=true; button.textContent='Начисляю…';
+  try{
+    await api('/api/admin/task/approve',{method:'POST',body:JSON.stringify({
+      task_id:Number(pending.operation.taskId),assignment_id:Number(pending.operation.assignmentId),
+      decision:'approve',operation_id:pending.operation.id})});
+    clearApproveOperation(pending.operation.assignmentId);
+    APPROVE_PENDING=null; $('approveSheet').classList.add('hidden');
+    buzz('ok'); toast('Подтверждено, бонусы начислены.'); await loadAdmin();
+  }catch(e){
+    // HTTP 4xx is an unambiguous server answer.  Network/5xx may have committed,
+    // so keep the same operation_id in sessionStorage for a safe retry.
+    if(e.status&&e.status<500) clearApproveOperation(pending.operation.assignmentId);
+    buzz('no'); toast(e.status&&e.status<500?e.message:'Ответ не подтверждён. Повтори — двойного начисления не будет.');
+  }finally{ button.disabled=false; button.textContent=original; }
+};
+$('approveSheet').onclick=e=>{ if(e.target===$('approveSheet')) $('approveCancel').click(); };
 async function loadTasks(){
   setBusy('tab-tasks',true);
   try{
@@ -1614,7 +1763,20 @@ async function loadTasks(){
 
     $('availCnt').textContent = free.length || '';
     $('availList').innerHTML = free.length ? free.map(taskCardOpen).join('')
-      : '<div class="empty">Свободных заданий нет. Заглядывай — новые появляются в течение дня.</div>';
+      : '<div class="empty">Свободных заданий сейчас нет. Новые появляются в течение дня.<br>'+
+        '<button class="mini" id="emptyTasksHelp" type="button" style="margin-top:10px">Как выполнять задания</button>'+
+        '<button class="mini hidden" id="emptyTasksWork" type="button" style="margin-top:8px">Открыть рабочую тему</button></div>';
+    const emptyHelp=$('emptyTasksHelp');
+    if(emptyHelp) emptyHelp.onclick=()=>{
+      const profileTab=document.querySelector('#nav [data-tab="tab-profile"]');
+      if(profileTab) profileTab.click();
+    };
+    const workUrl=safeHttpsUrl(STATE&&STATE.help&&STATE.help.work_topic_url,true);
+    const emptyWork=$('emptyTasksWork');
+    if(emptyWork){
+      emptyWork.classList.toggle('hidden',!workUrl);
+      emptyWork.onclick=()=>openHelpUrl(workUrl);
+    }
     bindTasks();
     if(!START_PARAM_HANDLED && /^task_\d+$/.test(START_PARAM)){
       const taskId=START_PARAM.slice(5);
@@ -2242,6 +2404,17 @@ async function loadAdmin(){
   try{
     const d = await api('/api/admin/overview');
     ADMIN = d;
+    const roleChanges=d.role_changes||[];
+    $('adRoleChangeCnt').textContent=roleChanges.length||'';
+    $('adRoleChanges').innerHTML=roleChanges.length?roleChanges.map(change=>{
+      const actions=change.can_decide
+        ? '<div class="acts"><button class="btn btn-volt sm" data-role-change="'+change.id+'" data-role-decision="approve">Подтвердить</button><button class="mini warn" data-role-change="'+change.id+'" data-role-decision="reject">Отклонить</button></div>'
+        : '<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Ожидается второй ответственный')+'</button></div>';
+      return '<div class="task"><div class="tt">'+esc(change.user_name||('ID '+change.user_id))+'</div>'+
+        '<div class="dt">'+esc(roleTitle(change.from_role))+' → <b>'+esc(roleTitle(change.to_role))+'</b></div>'+
+        '<div class="dt">Причина: '+esc(change.reason)+'</div>'+
+        '<div class="ty">Запросил: '+esc(change.requested_by_name||'ответственный')+' · '+fmtDate(change.requested_at)+'</div>'+actions+'</div>';
+    }).join(''):'<div class="empty">Ожидающих запросов нет.</div>';
     const pend = d.pending || [];
     renderPendingQueue(
       pend,Number(d.pending_total!=null?d.pending_total:pend.length),
@@ -2307,6 +2480,7 @@ async function loadAdmin(){
     $('adDecisions').innerHTML=decisions.length?decisions.map(t=>{
       let actions='';
       if(t.can_open_dispute) actions='<button class="mini warn" data-dopen="'+t.assignment_id+'">Оспорить решение</button>';
+      else if(t.dispute_open_block_reason) actions='<button class="mini" type="button" disabled title="'+esc(t.dispute_open_block_reason)+'">Нужен ещё один ответственный</button>';
       else if(t.can_decide_dispute&&t.dispute_status==='manual_required') actions='<button class="btn btn-volt sm" data-dmanual-reverse="'+t.dispute_id+'">Выплату исправили</button><button class="mini" data-dmanual-keep="'+t.dispute_id+'">Исходное решение верно</button>';
       else if(t.can_decide_dispute) actions='<button class="btn btn-volt sm" data-dapprove="'+t.dispute_id+'">Подтвердить сторно</button><button class="mini" data-dreject="'+t.dispute_id+'">Оставить решение</button>';
       else if(t.dispute_waits_for_second) actions='<button class="mini" type="button" disabled>Ожидается второй ответственный</button>';
@@ -2559,18 +2733,7 @@ function bindAdmin(){
     };
   });
   document.querySelectorAll('[data-tok]').forEach(b=>{
-    b.onclick = ()=>{
-      const assignmentId=Number(b.dataset.as), key='approve:'+assignmentId;
-      const operation=REVIEW_DECISIONS.get(key)||{id:newOperationId(),value:'approve'};
-      REVIEW_DECISIONS.set(key,operation);
-      press(b,'…', async ()=>{
-      await api('/api/admin/task/approve',{method:'POST', body:JSON.stringify({
-        task_id:Number(b.dataset.tok),
-        assignment_id:assignmentId,approve:true,operation_id:operation.id})});
-      REVIEW_DECISIONS.delete(key);
-      buzz('ok'); toast('Подтверждено, бонусы начислены.'); await loadAdmin();
-      });
-    };
+    b.onclick = ()=>openApproveConfirmation(Number(b.dataset.tok),Number(b.dataset.as));
   });
   document.querySelectorAll('[data-tno]').forEach(b=>{
     b.onclick = async ()=>{
@@ -2713,6 +2876,26 @@ function bindAdmin(){
   document.querySelectorAll('[data-member]').forEach(b=>{
     b.onclick = ()=>openMember(Number(b.dataset.member));
   });
+  document.querySelectorAll('[data-role-change]').forEach(b=>{
+    b.onclick=async()=>{
+      const approve=b.dataset.roleDecision==='approve';
+      const note=await askText({
+        title:approve?'Подтвердить изменение роли':'Отклонить изменение роли',
+        lead:approve
+          ? 'Проверь личность участника, нужный уровень доступа и причину запроса.'
+          : 'Причина попадёт в защищённый журнал и будет видна участнику.',
+        placeholder:approve?'Проверил участника и объём доступа':'Почему доступ не меняем',
+        required:true,okLabel:approve?'Подтвердить роль':'Отклонить'});
+      if(note===null) return;
+      press(b,'…',async()=>{
+        await api('/api/admin/role',{method:'POST',body:JSON.stringify({
+          action:'decide',change_id:Number(b.dataset.roleChange),
+          decision:approve?'approve':'reject',note:note,operation_id:newOperationId()})});
+        toast(approve?'Роль изменена после двойной проверки.':'Запрос роли отклонён.');
+        await loadAdmin();
+      });
+    };
+  });
 }
 
 /* ── карточка участника ────────────────────────────────────── */
@@ -2763,7 +2946,6 @@ function closeMember(){ $('memberSheet').classList.add('hidden'); }
 $('msClose').onclick = closeMember;
 $('memberSheet').onclick = e=>{ if(e.target===$('memberSheet')) closeMember(); };
 $('msPlus').onclick  = ()=>{ closeMember(); openBalance(memberTarget.user_id, memberTarget.name, 1); };
-$('msMinus').onclick = ()=>{ closeMember(); openBalance(memberTarget.user_id, memberTarget.name, -1); };
 $('msAward').onclick = ()=>{ closeMember(); openGrant(memberTarget.user_id); };
 $('msRole').onclick  = ()=>{ closeMember(); openRole(memberTarget.user_id, memberTarget.name, memberTarget.role); };
 $('msEditTags').onclick = async ()=>{
@@ -2793,9 +2975,9 @@ function roleTitle(role){
 }
 function roleEmoji(role){ return ROLE_EMOJI[role] || '👤'; }
 
-let roleTarget = null;
+let roleTarget = null, roleCurrent = null, roleTargetName = '';
 function openRole(uid, name, current){
-  roleTarget = uid;
+  roleTarget = uid; roleCurrent=current; roleTargetName=name||'участник';
   $('roleTitle').textContent = 'Роль — ' + (name || 'участник');
   document.querySelectorAll('#roleSheet .pick').forEach(p=>{
     const selected=p.dataset.role===current;
@@ -2811,14 +2993,28 @@ document.querySelectorAll('#roleSheet .pick').forEach(p=>{
   // press() подменяет текст кнопки, а здесь внутри вложенная разметка —
   // поэтому блокируем кнопки, а надпись не трогаем.
   p.onclick = async ()=>{
+    const requestedRole=p.dataset.role;
+    if(requestedRole===roleCurrent){ toast('Роль уже такая.'); return; }
+    let reason='';
+    if(requestedRole==='admin'||roleCurrent==='admin'){
+      reason=await askText({
+        title:requestedRole==='admin'?'Запросить доступ ответственного':'Запросить снятие доступа',
+        lead:'Изменение не произойдёт сразу: причину и объём доступа независимо проверит второй ответственный.',
+        placeholder:requestedRole==='admin'?'За что нужен доступ к выплатам и ролям':'Почему доступ больше не нужен',
+        required:true,okLabel:'Поставить на проверку'});
+      if(reason===null) return;
+    }
     const picks = document.querySelectorAll('#roleSheet .pick');
     picks.forEach(x=>x.disabled = true);
     try{
       const d = await api('/api/admin/role',{method:'POST',
-        body:JSON.stringify({user_id:roleTarget, role:p.dataset.role})});
+        body:JSON.stringify({
+          action:'request',user_id:roleTarget,role:requestedRole,reason:reason,
+          operation_id:(requestedRole==='admin'||roleCurrent==='admin')?newOperationId():undefined
+        })});
       buzz('ok');
       $('roleSheet').classList.add('hidden');
-      toast(d.already ? 'Роль уже такая.' : 'Роль изменена: ' + roleTitle(p.dataset.role));
+      toast(d.already?'Роль уже такая.':(d.queued?'Изменение роли ждёт второго ответственного.':'Роль изменена: '+roleTitle(requestedRole)));
       await loadAdmin();
     }catch(e){
       buzz('no'); toast(e.message);
@@ -2997,10 +3193,10 @@ $('ntPublish').onclick=()=>{
 setWizardStep(1);
 
 /* баланс вручную */
-let balanceTarget = null, balanceSign = 1, balanceOperationId = null;
-function openBalance(uid, name, sign){
-  balanceTarget = uid; balanceSign = sign; balanceOperationId = newOperationId();
-  $('balanceTitle').textContent = (sign>0?'Начислить ':'Списать ') + '⚡ — ' + name;
+let balanceTarget = null, balanceOperationId = null;
+function openBalance(uid, name){
+  balanceTarget = uid; balanceOperationId = newOperationId();
+  $('balanceTitle').textContent = 'Поблагодарить ⚡ — ' + name;
   $('balanceAmount').value = ''; $('balanceReason').value = '';
   clearInvalid(['balanceAmount','balanceReason'],'balanceError');
   $('balanceSheet').classList.remove('hidden');
@@ -3016,7 +3212,7 @@ $('balanceSave').onclick = ()=>{
   if(!reason){ reportInvalid('balanceReason','Причина обязательна — участник увидит её в истории','balanceError'); return; }
   press($('balanceSave'),'Сохраняю…', async ()=>{
     await api('/api/admin/grant',{method:'POST', body:JSON.stringify({
-      user_id:balanceTarget, amount:amount*balanceSign, reason:reason,
+      user_id:balanceTarget, amount:amount, reason:reason,
       operation_id:balanceOperationId})});
     buzz('ok'); $('balanceSheet').classList.add('hidden');
     toast('Баланс обновлён.'); await loadAdmin();
@@ -3087,10 +3283,10 @@ function renderGrantedList(list){
   });
 }
 
-let awardEditId = null, grantOperationId = null;
+let awardEditId = null, AWARD_GRANT_PENDING = null;
 function toggleCheck(el){
   if(!el) return;
-  const change=()=>{ el.classList.toggle('on'); el.setAttribute('aria-checked',el.classList.contains('on')?'true':'false'); buzz('tap'); };
+  const change=()=>{ if(el.getAttribute('aria-disabled')==='true') return; el.classList.toggle('on'); el.setAttribute('aria-checked',el.classList.contains('on')?'true':'false'); buzz('tap'); };
   el.onclick=change;
   if(!el.hasAttribute('tabindex')) el.tabIndex=0;
   if(!el.hasAttribute('role')) el.setAttribute('role','checkbox');
@@ -3098,6 +3294,14 @@ function toggleCheck(el){
   el.onkeydown=e=>{ if(e.key===' '||e.key==='Enter'){ e.preventDefault(); change(); } };
 }
 toggleCheck($('awRepeat')); toggleCheck($('awActive'));
+function syncAwardRepeatable(){
+  const monetary=(Number(($('awBonus').value||'').replace(/\D/g,''))||0)>0;
+  if(monetary) $('awRepeat').classList.remove('on');
+  $('awRepeat').setAttribute('aria-checked',$('awRepeat').classList.contains('on')?'true':'false');
+  $('awRepeat').setAttribute('aria-disabled',monetary?'true':'false');
+  $('awRepeat').style.opacity=monetary?'.55':'';
+}
+$('awBonus').oninput=syncAwardRepeatable;
 toggleCheck($('ntAnnounce'));
 updateTaskMode();
 $('ntReward').oninput = ()=>{
@@ -3132,6 +3336,7 @@ function openAward(a){
   $('awBonus').value = a ? a.bonus : '';
   clearInvalid(['awTitle'],'awError');
   $('awRepeat').classList.toggle('on', a ? a.repeatable : true);
+  syncAwardRepeatable();
   $('awActive').classList.toggle('on', a ? a.active : true);
   $('awEmojiRow').querySelectorAll('button').forEach(x=>{
     const selected=Boolean(a&&x.dataset.e===a.emoji);
@@ -3147,6 +3352,8 @@ $('awardSheet').onclick = e=>{ if(e.target===$('awardSheet')) $('awardSheet').cl
 $('awSave').onclick = ()=>{
   clearInvalid(['awTitle'],'awError');
   const title = $('awTitle').value.trim();
+  const awardBonus=Number(($('awBonus').value||'').replace(/\D/g,''))||0;
+  if(awardBonus>0&&$('awRepeat').classList.contains('on')){ toast('Награда с бонусами должна быть разовой.'); return; }
   if(title.length < 2){ reportInvalid('awTitle','Дай награде название','awError'); return; }
   press($('awSave'),'Сохраняю…', async ()=>{
     await api('/api/admin/award/save',{method:'POST', body:JSON.stringify({
@@ -3175,7 +3382,7 @@ function openGrant(userId, awardId){
     '<option value="'+m.user_id+'"'+(m.user_id===userId?' selected':'')+'>'+
     esc(m.name||('ID '+m.user_id))+'</option>').join('');
   $('grantNote').value = '';
-  grantOperationId = newOperationId();
+  AWARD_GRANT_PENDING = null;
   $('grantSheet').classList.remove('hidden');
   buzz('tap');
 }
@@ -3191,6 +3398,59 @@ $('grantSave').onclick = ()=>{
     toast('Награда выдана, участник получил сообщение.');
     await loadAdmin(); await loadAwards();
   });
+};
+
+function awardGrantStorageKey(uid,awardId){ return 'bibitasks_award_grant_'+uid+'_'+awardId; }
+function persistedAwardGrant(uid,awardId,note){
+  const key=awardGrantStorageKey(uid,awardId), value={uid:Number(uid),awardId:Number(awardId),note:String(note||'')};
+  try{
+    const prior=JSON.parse(sessionStorage.getItem(key)||'null');
+    if(prior&&prior.uid===value.uid&&prior.awardId===value.awardId&&prior.note===value.note&&prior.id) return prior;
+  }catch(e){}
+  const pending=Object.assign({id:newOperationId()},value);
+  try{ sessionStorage.setItem(key,JSON.stringify(pending)); }catch(e){}
+  return pending;
+}
+function clearAwardGrant(pending){
+  if(!pending) return;
+  try{ sessionStorage.removeItem(awardGrantStorageKey(pending.uid,pending.awardId)); }catch(e){}
+}
+$('grantSave').onclick=()=>{
+  const uid=Number($('grantMember').value), awardId=Number($('grantAward').value);
+  const note=$('grantNote').value.trim();
+  const award=(AWARDS||(ADMIN&&ADMIN.awards)||[]).find(a=>Number(a.id)===awardId);
+  if(!award){ toast('Обнови каталог наград и попробуй ещё раз.'); return; }
+  if(Number(award.bonus||0)>0&&note.length<3){ toast('Для награды с бонусами укажи короткую причину.'); $('grantNote').focus(); return; }
+  AWARD_GRANT_PENDING=persistedAwardGrant(uid,awardId,note);
+  const member=((ADMIN&&ADMIN.team)||[]).find(m=>Number(m.user_id)===uid);
+  $('awardGrantConfirmBody').innerHTML='<div class="task">'+
+    '<div class="tt">'+esc(award.emoji+' '+award.title)+'</div>'+
+    '<div class="dt">Кому: <b>'+esc((member&&member.name)||('ID '+uid))+'</b></div>'+
+    '<div class="dt">Начисление: <b>+'+Number(award.bonus||0)+'⚡</b></div>'+
+    (note?'<div class="dt">Причина: '+esc(note)+'</div>':'')+'</div>';
+  $('grantSheet').classList.add('hidden');
+  $('awardGrantConfirmSheet').classList.remove('hidden');
+};
+$('awardGrantConfirmCancel').onclick=()=>{
+  clearAwardGrant(AWARD_GRANT_PENDING); AWARD_GRANT_PENDING=null;
+  $('awardGrantConfirmSheet').classList.add('hidden'); $('grantSheet').classList.remove('hidden');
+};
+$('awardGrantConfirmSheet').onclick=e=>{ if(e.target===$('awardGrantConfirmSheet')) $('awardGrantConfirmCancel').click(); };
+$('awardGrantConfirm').onclick=async()=>{
+  if(!AWARD_GRANT_PENDING) return;
+  const pending=AWARD_GRANT_PENDING, button=$('awardGrantConfirm'), original=button.textContent;
+  button.disabled=true; button.textContent='Начисляю…';
+  try{
+    await api('/api/admin/award/grant',{method:'POST',body:JSON.stringify({
+      user_id:pending.uid,award_id:pending.awardId,note:pending.note,operation_id:pending.id})});
+    clearAwardGrant(pending); AWARD_GRANT_PENDING=null;
+    $('awardGrantConfirmSheet').classList.add('hidden');
+    buzz('ok'); toast('Награда выдана, участник получит сообщение.');
+    await loadAdmin(); await loadAwards();
+  }catch(e){
+    if(e.status&&e.status<500){ clearAwardGrant(pending); AWARD_GRANT_PENDING=null; }
+    buzz('no'); toast(e.status&&e.status<500?e.message:'Ответ не подтверждён. Повтори — двойного начисления не будет.');
+  }finally{ button.disabled=false; button.textContent=original; }
 };
 
 load();

@@ -65,6 +65,23 @@ PASS:
 
 Любой `fail`, readiness `503`, публичная OPS или один скаут — NO-GO.
 
+## 1a. Canary alert и recovery monitor
+
+До допуска участников выполните incident/recovery drill из
+[`PILOT-MONITORING.md`](PILOT-MONITORING.md). Сохраните JSON успешного
+`--test-alert` и итоговый `--report` в `$EVIDENCE_DIR`.
+
+PASS: отдельный alert-бот доставил canary; остановка `bibitasks` создала ровно
+один incident, возврат сервиса — ровно один recovery; в `monitor-drill.json`
+есть timestamps обеих подтверждённых доставок после начала drill,
+`alert_active=false`, `last_healthy=true`, `heartbeat_ok=true`. Отсутствие любого
+сообщения или только конфигурационный/heartbeat check без реального drill — NO-GO.
+Дополнительно независимый внешний dead-man на другом хосте/provider должен
+обнаружить остановку или `unhealthy` самого `monitor`, а также недоступность
+public HTTPS/TLS, и прислать incident/recovery по другому каналу. Host supervisor
+допускается только как дополнение и не заменяет внешний контроль. Проверка только
+`/health/live` этого не доказывает. Без внешнего alert evidence — NO-GO.
+
 ## 2. Android, iPhone и Desktop
 
 На каждом устройстве откройте `/start`, нажмите «Открыть задания», переключите
@@ -145,7 +162,9 @@ PASS: бизнес-задание не потеряно, данные не уш�
 
 ## Решение
 
-Controlled pilot получает GO только при PASS всех девяти блоков. Итоговый отчёт
+Live-приёмка получает **LIVE PASS** только при PASS всех девяти блоков. Итоговый отчёт
 подписывают `S1` и `S2`. Нельзя запускать пилот при утечке данных, неверной роли,
 двойном claim/бонусе/refund/переводе, раскрытии полного ID не текущему кассиру,
 потере бизнес-операции из-за Telegram или провале одного из трёх типов устройств.
+LIVE PASS подтверждает пользовательские сценарии, но не является разрешением на
+production и не обходит terminal NO-GO release gate v3.

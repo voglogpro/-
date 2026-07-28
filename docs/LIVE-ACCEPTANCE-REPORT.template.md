@@ -29,10 +29,12 @@
 | Внутренний readiness | | | |
 | Telegram preflight | | | |
 | Backup + restore rehearsal | | | |
+| Monitor canary alert + incident/recovery JSON | | | |
+| External dead-man: VPS/HTTPS/monitor incident + recovery | | | |
 
 ## Девять блоков live-проверки
 
-Порядок и критерии PASS/NO-GO берутся из `LIVE-ACCEPTANCE.md`. Для каждого блока
+Порядок и критерии LIVE PASS/FAIL берутся из `LIVE-ACCEPTANCE.md`. Для каждого блока
 указать идентификаторы только тестовых объектов и приложить скриншоты/логи без
 секретов.
 
@@ -69,7 +71,10 @@
 Критический дефект, утечка private OPS, неверная роль, двойной claim/bonus/refund,
 раскрытие полного ID не текущему кассиру или потеря операции означают NO-GO.
 
-**Решение:** GO / NO-GO
+**Результат live-приёмки:** LIVE PASS / LIVE FAIL
+
+Этот результат не является разрешением на production и не отменяет terminal
+NO-GO release gate v3.
 
 **S1:** ____________________  **Дата:** __________
 

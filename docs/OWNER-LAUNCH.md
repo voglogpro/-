@@ -13,7 +13,7 @@ backup-процесс используют общий Docker volume; запус�
 
 | Роль | Ответственность |
 |---|---|
-| Владелец | VPS, домен, BotFather/Main/Named Mini App, скрытый ввод token, четыре тестовых аккаунта, GO/NO-GO |
+| Владелец | VPS, домен, BotFather/Main/Named Mini App, скрытый ввод token, четыре тестовых аккаунта, LIVE PASS/FAIL |
 | Разработчик | release tag/digest, установка, inventory ID, evidence pack, диагностика и staging failure drill |
 | S1 и S2 | два разных ответственных: маркеры ID, права групп, выплаты, cleanup и подпись приёмки |
 | U1 и U2 | два обычных тестовых участника на разных устройствах |
@@ -83,7 +83,7 @@ sudo chmod 0400 /mnt/bibitasks-backups/.bibitasks-offhost
 
 ## 3. Release image и production environment
 
-Проверенный релиз для пилота:
+Последний проверенный baseline (не текущий deploy candidate):
 
 ```text
 tag: v2.9.1
@@ -96,6 +96,11 @@ platform: linux/amd64
 указывает на commit выше и amd64 manifest `sha256:e36bd41bf130dcb2c1ed681767fa92ad13ba9c125aadbc651b28af33d865841a`.
 Release workflow публикует SPDX SBOM и SLSA provenance.
 
+Этот образ подтверждает только прежний baseline. Он не содержит новых scripts и
+флагов candidate v1, monitor/recovery и schema 295. Поэтому приведённый digest
+нельзя использовать для запуска текущего worktree v2.10.0. До публикации и
+проверки нового immutable image действует terminal **NO-GO**.
+
 Разработчик создаёт подписанный release tag только из зелёного commit. GitHub
 Actions публикует неизменяемую ссылку вида
 `ghcr.io/voglogpro/bibitasks@sha256:<64 hex>`. Значения `latest`, простой тег и
@@ -104,10 +109,12 @@ Actions публикует неизменяемую ссылку вида
 В GitHub Packages владелец/разработчик делает пакет `bibitasks` публичным и
 проверяет anonymous pull на чистом VPS. Это выбранный контракт пилота: registry
 token на сервере не хранится. `unauthorized` — STOP; не используйте личный PAT
-с широкими правами как временный обход.
+с широкими правами как временный обход. Следующий блок — шаблон для будущего
+v2.10.0 digest. **Не выполнять**, пока CI и независимая проверка не заменят оба
+placeholder точными значениями нового релиза:
 
 ```bash
-export BIBITASKS_IMAGE='ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac'
+export BIBITASKS_IMAGE='<NEW_VERIFIED_V2_10_0_IMMUTABLE_IMAGE_REQUIRED>'
 docker pull "$BIBITASKS_IMAGE"
 BIBITASKS_UID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -u)"
 BIBITASKS_GID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -g)"
@@ -156,26 +163,31 @@ history. Ниже заменяются только домен и реальны
 
 ```bash
 read -rsp 'BOT_TOKEN: ' BOT_TOKEN; echo
-export BOT_TOKEN
+read -rsp 'MONITOR_ALERT_BOT_TOKEN (отдельный бот): ' MONITOR_ALERT_BOT_TOKEN; echo
+export BOT_TOKEN MONITOR_ALERT_BOT_TOKEN
 docker run --rm --user 0:0 -e BOT_TOKEN \
+  -e MONITOR_ALERT_BOT_TOKEN \
   -v /etc/bibitasks:/secure "$BIBITASKS_IMAGE" \
   python scripts/bootstrap_production_env.py \
   --output /secure/bibitasks.env \
+  --monitor-secrets-dir /secure \
   --public-base-url https://tasks.example.com \
   --group-id -1000000000001 --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
   --webapp-shortname bibibike \
   --topic-news 11 --topic-chat 12 --topic-work 13 \
   --topic-franchise 14 --ops-topic-tasks 21
-unset BOT_TOKEN
-sudo chmod 0600 /etc/bibitasks/bibitasks.env
+unset BOT_TOKEN MONITOR_ALERT_BOT_TOKEN
+sudo chmod 0600 /etc/bibitasks/bibitasks.env \
+  /etc/bibitasks/monitor-alert-bot-token \
+  /etc/bibitasks/monitor-health-token
 ```
 
 Создайте `/etc/bibitasks/deploy.env` без token:
 
 ```dotenv
-BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:472f78a2681795a114cfcaa9174c9cd11f03eef965de83becf4c06872d458cac
-BIBITASKS_RELEASE_COMMIT=acd0239a9ace9960c988c13e4608e2620b186fd3
+BIBITASKS_IMAGE=<NEW_VERIFIED_V2_10_0_IMMUTABLE_IMAGE_REQUIRED>
+BIBITASKS_RELEASE_COMMIT=<NEW_VERIFIED_V2_10_0_COMMIT_REQUIRED>
 BIBITASKS_ENV_FILE=/etc/bibitasks/bibitasks.env
 BIBITASKS_DOMAIN=tasks.example.com
 BACKUP_DIR=/mnt/bibitasks-backups
@@ -183,9 +195,22 @@ BACKUP_SENTINEL=/mnt/bibitasks-backups/.bibitasks-offhost
 BACKUP_SENTINEL_VALUE=bibitasks-offhost-v1
 BACKUP_EXPECTED_SOURCE=backup.example.com:/exports/bibitasks
 BIBITASKS_DATA_VOLUME=bibitasks_data
+MONITOR_ALERT_BOT_TOKEN_FILE=/etc/bibitasks/monitor-alert-bot-token
+MONITOR_HEALTH_TOKEN_FILE=/etc/bibitasks/monitor-health-token
+MONITOR_ALERT_CHAT_ID=-1000000000003
+MONITOR_INSTANCE_LABEL=pilot-1
 ```
 
+`MONITOR_ALERT_BOT_TOKEN` должен принадлежать отдельному боту только для
+аварийных сообщений. Добавьте его в приватную alert-группу
+`MONITOR_ALERT_CHAT_ID` с правом отправки сообщений, но без прав администратора.
+Не используйте для мониторинга основной bot token.
+
 ## 4. Запуск и автоматический HTTPS
+
+**Terminal STOP:** этот раздел остаётся справочным и не выполняется, пока
+placeholder в `deploy.env` не заменены новым проверенным commit/digest и release
+gate не получил отдельный криптографически принудительный deployment controller.
 
 Из `/opt/bibitasks` на зафиксированном commit:
 
@@ -208,7 +233,13 @@ sudo systemctl enable --now bibitasks-pilot.service
 docker compose --env-file /etc/bibitasks/deploy.env \
   -f compose.pilot.yaml ps
 curl --fail --show-error https://tasks.example.com/health/live
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  exec -T --user 10001:10001 monitor python scripts/pilot_monitor.py --test-alert
 ```
+
+В приватной alert-группе должно появиться тестовое сообщение. Подробный runbook,
+порог срабатывания и проверка recovery описаны в
+[`PILOT-MONITORING.md`](PILOT-MONITORING.md).
 
 Публичный `/health/ready` специально возвращает `404`: он содержит внутренние
 признаки и защищён token. Полная проверка выполняется внутри контейнера:
@@ -257,15 +288,16 @@ docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
 ```
 
 Preflight должен завершиться exit code `0` и JSON `"ok": true`. Бот должен
-называться «Бибибайк» с зелёным логотипом; OPS должна оставаться private.
+называться «БибиЗадачи · Бибибайк» с зелёным логотипом; OPS должна оставаться
+private.
 
 ## 6. Evidence pack разработчика
 
 До live-приёмки разработчик передаёт владельцу закрытый пакет в
 `$EVIDENCE_DIR`: полный commit/digest, ссылки на зелёный CI, результат GitHub
 attestation, `readiness.json`, `telegram-preflight.json`, backup `manifest.json`,
-`restore-report.json` из восстановления в **новый пустой каталог** и итоговый
-`release-record.json` с двумя разными проверяющими. Команды и fail-closed
+`restore-report.json` из восстановления в **новый пустой каталог** и
+`release-candidate.json`. Команды и fail-closed
 проверки даны в [`RELEASE-AND-RECOVERY.md`](RELEASE-AND-RECOVERY.md). Пакет не
 коммитится; его hash закрепляется во внешнем versioned/append-only хранилище.
 
@@ -273,10 +305,12 @@ attestation, `readiness.json`, `telegram-preflight.json`, backup `manifest.json`
 отдельных Telegram-группах. Подписанный staging-отчёт входит в evidence pack;
 владелец не меняет retry/права production. Без любого из этих артефактов — NO-GO.
 
-## 7. Решение о пилоте
+## 7. Результат live-приёмки
 
 Заполните [`LIVE-ACCEPTANCE-REPORT.template.md`](LIVE-ACCEPTANCE-REPORT.template.md)
 по инструкции [`LIVE-ACCEPTANCE.md`](LIVE-ACCEPTANCE.md). Блок отказоустойчивости
-на staging проводит разработчик, не владелец на production. Только девять PASS,
+на staging проводит разработчик, не владелец на production. Девять PASS,
 подписи S1/S2, проверенная restore-копия и отсутствие критических дефектов дают
-GO. Отчёт со скриншотами и operational ID хранится вне публичного Git.
+только **LIVE PASS**. Это не разрешение на deployment и не отменяет terminal
+NO-GO release gate v3. Отчёт со скриншотами и operational ID хранится вне
+публичного Git.
