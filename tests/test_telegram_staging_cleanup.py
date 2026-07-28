@@ -39,9 +39,14 @@ class TelegramStagingCleanupTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def reconcile(self, **kwargs):
+        if os.name != "nt":
+            kwargs["expected_owner_uid"] = self.token.stat().st_uid
+        return cleanup.reconcile(**kwargs)
+
     def test_dry_run_only_verifies_identity_and_never_leaks_token(self):
         api = FakeTelegram()
-        report = cleanup.reconcile(
+        report = self.reconcile(
             token_file=self.token, expected_bot_id=900001,
             expected_username="BibiLoadTestBot", apply=False, api_call=api,
         )
@@ -51,7 +56,7 @@ class TelegramStagingCleanupTests(unittest.TestCase):
 
     def test_apply_deletes_without_dropping_updates_and_confirms_empty_url(self):
         api = FakeTelegram()
-        report = cleanup.reconcile(
+        report = self.reconcile(
             token_file=self.token, expected_bot_id=900001,
             expected_username="BibiLoadTestBot", apply=True,
             confirm_username="@BibiLoadTestBot", api_call=api,
@@ -62,22 +67,32 @@ class TelegramStagingCleanupTests(unittest.TestCase):
 
     def test_identity_confirmation_and_postcondition_fail_closed(self):
         with self.assertRaisesRegex(cleanup.CleanupError, "identity"):
-            cleanup.reconcile(
+            self.reconcile(
                 token_file=self.token, expected_bot_id=900002,
                 expected_username="BibiLoadTestBot", apply=False,
                 api_call=FakeTelegram(),
             )
         with self.assertRaisesRegex(cleanup.CleanupError, "not confirmed"):
-            cleanup.reconcile(
+            self.reconcile(
                 token_file=self.token, expected_bot_id=900001,
                 expected_username="BibiLoadTestBot", apply=True,
                 confirm_username="BibiLoadTestBot", api_call=FakeTelegram(sticky=True),
             )
         with self.assertRaisesRegex(cleanup.CleanupError, "confirmation"):
-            cleanup.reconcile(
+            self.reconcile(
                 token_file=self.token, expected_bot_id=900001,
                 expected_username="BibiLoadTestBot", apply=True,
                 confirm_username="OtherLoadBot", api_call=FakeTelegram(),
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership is authoritative on the VPS")
+    def test_rejects_token_owned_by_an_unexpected_uid(self):
+        with self.assertRaisesRegex(cleanup.CleanupError, "root-owned"):
+            cleanup.reconcile(
+                token_file=self.token, expected_bot_id=900001,
+                expected_username="BibiLoadTestBot", apply=False,
+                api_call=FakeTelegram(),
+                expected_owner_uid=self.token.stat().st_uid + 1,
             )
 
 

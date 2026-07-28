@@ -88,7 +88,9 @@ def _trusted_directory_chain(path: Path, *, expected_uid: int | None):
             raise ConfigurationError("sensitive path ancestry must contain only directories")
         if expected_uid is not None and info.st_uid not in {0, expected_uid}:
             raise ConfigurationError("sensitive path ancestry has an untrusted owner")
-        if stat.S_IMODE(info.st_mode) & 0o022:
+        mode = stat.S_IMODE(info.st_mode)
+        root_sticky_directory = info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+        if mode & 0o022 and not root_sticky_directory:
             raise ConfigurationError("sensitive path ancestry must not be group/world writable")
 
 

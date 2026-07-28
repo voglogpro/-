@@ -25,7 +25,7 @@ class CleanupError(ValueError):
     pass
 
 
-def _read_private_token(path: Path) -> str:
+def _read_private_token(path: Path, *, expected_owner_uid: int = 0) -> str:
     resolved = path.expanduser().resolve()
     try:
         info = resolved.stat()
@@ -33,7 +33,9 @@ def _read_private_token(path: Path) -> str:
         raise CleanupError("staging token file is unavailable") from exc
     if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > 512:
         raise CleanupError("staging token must be a small regular non-symlink file")
-    if os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o077):
+    if os.name != "nt" and (
+        info.st_uid != expected_owner_uid or stat.S_IMODE(info.st_mode) & 0o077
+    ):
         raise CleanupError("staging token must be root-owned and mode 0600 or stricter")
     try:
         token = resolved.read_text("utf-8").strip()
@@ -47,6 +49,7 @@ def _read_private_token(path: Path) -> str:
 def reconcile(
     *, token_file: Path, expected_bot_id: int, expected_username: str,
     apply: bool, confirm_username: str = "", api_call=None,
+    expected_owner_uid: int = 0,
 ) -> dict:
     username = expected_username.strip().lstrip("@")
     confirmation = confirm_username.strip().lstrip("@")
@@ -56,7 +59,7 @@ def reconcile(
         raise CleanupError("expected staging bot ID is malformed")
     if apply and confirmation.casefold() != username.casefold():
         raise CleanupError("apply requires exact staging bot username confirmation")
-    token = _read_private_token(token_file)
+    token = _read_private_token(token_file, expected_owner_uid=expected_owner_uid)
     call = api_call or (lambda method, params=None: telegram_call(token, method, params))
     try:
         identity = call("getMe", None)
