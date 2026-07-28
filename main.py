@@ -23,6 +23,7 @@ import math
 import os
 import re
 import signal
+import sqlite3
 import sys
 import secrets
 import time
@@ -208,6 +209,9 @@ BIBITASKS_ENVIRONMENT = (
     os.getenv("BIBITASKS_ENVIRONMENT", "production") or "production"
 ).strip().lower()
 PILOT_LOAD_TEST_ENABLED = _truthy_env("PILOT_LOAD_TEST_ENABLED", "false")
+PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED = _truthy_env(
+    "PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED", "false"
+)
 PRIVACY_URL_RAW = (os.getenv("PRIVACY_URL", "") or "").strip()
 PRIVACY_CONTROLLER_NAME_RAW = os.getenv("PRIVACY_CONTROLLER_NAME", "") or ""
 PRIVACY_CONTACT_RAW = os.getenv("PRIVACY_CONTACT", "") or ""
@@ -345,6 +349,7 @@ _api_capacity = {
 _media_capacity = {
     "active": 0, "waiters": 0, "rejected": 0,
 }
+_runtime_errors = {"database_locked": 0}
 _media_normalize_semaphore = None
 _media_normalize_loop = None
 _media_normalize_jobs = set()
@@ -368,6 +373,21 @@ _telegram_runtime = {
     "configured_at": "",
 }
 _background_tasks = {}
+
+
+def _record_runtime_error(exc):
+    """Keep a non-PII monotonic signal for SQLite lock failures."""
+    current = exc
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if (
+            isinstance(current, sqlite3.OperationalError)
+            and "database is locked" in str(current).casefold()
+        ):
+            _runtime_errors["database_locked"] += 1
+            return
+        current = current.__cause__ or current.__context__
 _shutdown_event = asyncio.Event()
 _current_update_id = contextvars.ContextVar("telegram_update_id", default=None)
 _telegram_timed_out_jobs = {}
@@ -420,6 +440,12 @@ def _validate_update_receiver_config():
     if PILOT_LOAD_TEST_ENABLED and BIBITASKS_ENVIRONMENT != "staging":
         raise RuntimeError(
             "PILOT_LOAD_TEST_ENABLED is allowed only in staging"
+        )
+    if PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED and not (
+        PILOT_LOAD_TEST_ENABLED and BIBITASKS_ENVIRONMENT == "staging"
+    ):
+        raise RuntimeError(
+            "PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED requires staging load-test mode"
         )
     if PRIVACY_URL_RAW and PRIVACY_URL is None:
         raise RuntimeError("PRIVACY_URL must be a public HTTPS URL without credentials")
@@ -3343,6 +3369,7 @@ async def _save_image(
         if stored_size != len(normalized) or not hmac.compare_digest(stored_sha, digest):
             raise ValueError("Хранилище вернуло фотографию с неверной контрольной суммой.")
     except Exception as exc:
+        _record_runtime_error(exc)
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             await db.execute(
                 "UPDATE media_objects SET last_error=? WHERE id=? AND state='uploading'",
@@ -3957,6 +3984,11 @@ async def _join_request_delivery(item, payload):
 
 async def _deliver_outbox_item(item):
     payload = json.loads(item["payload_json"])
+    if PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED:
+        # Disposable staging still exercises the durable outbox and worker,
+        # but synthetic 52-bit recipients must never trigger real Bot API
+        # delivery. The flag is rejected outside explicit staging load mode.
+        return None
     if item["event_type"] == "direct":
         return await bot.send_message(
             int(item["recipient_id"]), payload["text"],
@@ -4177,6 +4209,7 @@ async def outbox_worker():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            _record_runtime_error(exc)
             logger.warning("Outbox delivery failed: %s", type(exc).__name__)
             if item:
                 attempts = int(item["attempts"] or 0) + 1
@@ -4494,6 +4527,7 @@ async def telegram_inbox_worker():
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                _record_runtime_error(exc)
                 logger.warning("Telegram inbox processing failed: %s", type(exc).__name__)
                 if item:
                     await _mark_telegram_update_failed(
@@ -5009,7 +5043,8 @@ async def lifecycle_worker():
                 await _refresh_telegram_runtime()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            _record_runtime_error(exc)
             logger.exception("Не удалось обработать сроки заданий")
         await asyncio.sleep(30)
 
@@ -10392,13 +10427,22 @@ async def api_health(request):
     )
     if not authorized and (HEALTH_TOKEN or not local_request):
         raise web.HTTPUnauthorized()
+    query = getattr(getattr(request, "rel_url", None), "query", {})
+    refresh_requested = query.get("refresh") == "1"
+    force_refresh = bool(
+        refresh_requested and authorized
+        and BIBITASKS_ENVIRONMENT == "staging"
+        and PILOT_LOAD_TEST_ENABLED
+    )
+    if refresh_requested and not force_refresh:
+        raise web.HTTPForbidden()
     now = time.monotonic()
-    if now - float(_health_cache["checked_at"]) >= 30:
+    if force_refresh or now - float(_health_cache["checked_at"]) >= 30:
         # Single-flight: после истечения cache только один запрос проверяет БД,
         # остальные ждут тот же результат вместо параллельного quick_check.
         async with _health_check_lock:
             now = time.monotonic()
-            if now - float(_health_cache["checked_at"]) >= 30:
+            if force_refresh or now - float(_health_cache["checked_at"]) >= 30:
                 database_ok = False
                 database_error = ""
                 try:
@@ -10514,6 +10558,9 @@ async def api_health(request):
         "application_version": APP_VERSION,
         "environment": BIBITASKS_ENVIRONMENT,
         "pilot_load_test_enabled": PILOT_LOAD_TEST_ENABLED,
+        "pilot_load_test_telegram_stub_enabled": (
+            PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED
+        ),
         "process_rss_bytes": _process_rss_bytes(),
         "report_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -10527,6 +10574,7 @@ async def api_health(request):
         "media_quarantined": media_quarantined,
         "media_uploading_stale": media_uploading_stale,
         "database_error": database_error,
+        "database_locked_errors": _runtime_errors["database_locked"],
         "withdrawal_encryption_ready": WITHDRAW_FERNET is not None,
         "telegram_inbox_encryption_ready": TELEGRAM_INBOX_FERNET is not None,
         "outbox_dead": outbox_dead,
@@ -10591,7 +10639,8 @@ async def error_middleware(request, handler):
         return response
     except web.HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
+        _record_runtime_error(exc)
         safe_path = request.path
         if safe_path.startswith("/telegram/webhook/"):
             safe_path = "/telegram/webhook/[redacted]"

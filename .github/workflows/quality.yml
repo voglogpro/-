@@ -64,7 +64,7 @@ jobs:
           pip install pip-audit==2.10.1
           pip-audit --requirement requirements.lock --progress-spinner off
       - name: Compile backend
-        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/final_release_record.py scripts/pilot_host_preflight.py scripts/pilot_load_test.py scripts/pilot_monitor.py scripts/pilot_monitor_launcher.py scripts/recovery_key_canary.py scripts/release_candidate.py scripts/release_record.py scripts/restore.py scripts/secret_recovery_evidence.py scripts/sqlite_volume_rollback.py scripts/telegram_inventory.py scripts/telegram_join_request_link.py scripts/telegram_preflight.py scripts/telegram_public_surface_audit.py scripts/telegram_surface_setup.py migrations/versions/0006_join_request_admission.py
+        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_loadtest_env.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/final_release_record.py scripts/loadtest_host_preflight.py scripts/pilot_host_preflight.py scripts/pilot_load_test.py scripts/pilot_monitor.py scripts/pilot_monitor_launcher.py scripts/recovery_key_canary.py scripts/release_candidate.py scripts/release_record.py scripts/restore.py scripts/secret_recovery_evidence.py scripts/sqlite_volume_rollback.py scripts/telegram_inventory.py scripts/telegram_join_request_link.py scripts/telegram_preflight.py scripts/telegram_public_surface_audit.py scripts/telegram_staging_cleanup.py scripts/telegram_surface_setup.py migrations/versions/0006_join_request_admission.py
       - name: Core safety tests
         shell: bash
         run: |
@@ -167,6 +167,22 @@ jobs:
             echo "::error title=Compose pilot validation failed::$message"
             exit 1
           fi
+      - name: Validate disposable load-test stack syntax
+        env:
+          BIBITASKS_IMAGE: ghcr.io/voglogpro/bibitasks@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          BIBITASKS_RELEASE_COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          BIBITASKS_LOADTEST_ENV_FILE: .env.example
+          BIBITASKS_LOADTEST_DOMAIN: load.tasks.example.com
+          BIBITASKS_LOADTEST_PROJECT: bibitasks_loadtest_bbbbbbbbbbbb_deadbeef_project
+          BIBITASKS_LOADTEST_DATA_VOLUME: bibitasks_loadtest_bbbbbbbbbbbb_deadbeef_data
+          BIBITASKS_LOADTEST_NETWORK: bibitasks_loadtest_bbbbbbbbbbbb_deadbeef_network
+          BIBITASKS_LOADTEST_CADDY_DATA_VOLUME: bibitasks_loadtest_bbbbbbbbbbbb_deadbeef_caddy_data
+          BIBITASKS_LOADTEST_CADDY_CONFIG_VOLUME: bibitasks_loadtest_bbbbbbbbbbbb_deadbeef_caddy_config
+          BIBITASKS_LOADTEST_EVIDENCE_DIR: /tmp/bibitasks-loadtest-evidence
+        shell: bash
+        run: |
+          compose="$RUNNER_TEMP/docker-compose-v5.3.1"
+          "$compose" -f compose.loadtest.yaml config --quiet
       - name: Prove monitor service health and privilege drop
         env:
           BIBITASKS_IMAGE: bibitasks:ci
@@ -241,6 +257,23 @@ jobs:
           assert manifest.count("networks: [pilot]") == 3
           assert manifest.count('restart: "unless-stopped"') == 4
           assert "condition: service_started" in manifest
+          loadtest = open("compose.loadtest.yaml", encoding="utf-8").read()
+          assert "backup:" not in loadtest
+          assert "monitor:" not in loadtest
+          assert "bibitasks_data" not in loadtest
+          assert "BIBITASKS_ENVIRONMENT: staging" in loadtest
+          assert 'PILOT_LOAD_TEST_ENABLED: "true"' in loadtest
+          assert 'PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED: "true"' in loadtest
+          assert "BIBITASKS_LOADTEST_DATA_VOLUME" in loadtest
+          assert "BIBITASKS_LOADTEST_CADDY_DATA_VOLUME" in loadtest
+          assert "BIBITASKS_LOADTEST_CADDY_CONFIG_VOLUME" in loadtest
+          assert "BIBITASKS_LOADTEST_PROJECT" in loadtest
+          assert "loadtest-runner:" in loadtest
+          assert "Caddyfile.loadtest" in loadtest
+          assert "com.bibitasks.purpose: loadtest" in loadtest
+          assert 'restart: "no"' in loadtest
+          assert "cap_drop: [\"ALL\"]" in loadtest
+          assert "no-new-privileges:true" in loadtest
           unit = open("deploy/bibitasks-pilot.service.example", encoding="utf-8").read()
           assert "pilot_host_preflight.py" in unit
           assert "--wait --wait-timeout 180" in unit
@@ -263,6 +296,13 @@ jobs:
           -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro"
           caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
           validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Validate disposable Caddy edge configuration
+        run: >-
+          docker run --rm --entrypoint caddy
+          -e BIBITASKS_DOMAIN=load.tasks.example.com
+          -v "$PWD/deploy/Caddyfile.loadtest:/etc/caddy/Caddyfile:ro"
+          caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+          validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Smoke-test image identity and locked imports
         run: >-
           docker run --rm --entrypoint python bibitasks:ci -c
@@ -270,7 +310,10 @@ jobs:
           assert os.getuid()!=0; assert os.access('/app/data',os.W_OK);
           assert os.path.isfile('/app/scripts/secret_recovery_evidence.py');
           assert os.path.isfile('/app/scripts/recovery_key_canary.py');
+          assert os.path.isfile('/app/scripts/bootstrap_loadtest_env.py');
+          assert os.path.isfile('/app/scripts/loadtest_host_preflight.py');
           assert os.path.isfile('/app/scripts/pilot_load_test.py');
+          assert os.path.isfile('/app/scripts/telegram_staging_cleanup.py');
           assert subprocess.run(['python','scripts/recovery_key_canary.py','enroll-existing','--help'],stdout=subprocess.DEVNULL).returncode==0;
           assert subprocess.check_output(['/usr/local/bin/age','--version'],text=True).strip()=='v1.3.1'"
       - name: Validate tracked secrets and generated data

@@ -887,6 +887,80 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["version"], main.BUILD_VERSION)
         self.assertIsNotNone(datetime.fromisoformat(payload["generated_at"]).tzinfo)
 
+    async def test_forced_health_refresh_is_staging_loadtest_only(self):
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        original_loadtest = main.PILOT_LOAD_TEST_ENABLED
+        original_cache = dict(main._health_cache)
+        request = SimpleNamespace(
+            headers={"X-Health-Token": main.HEALTH_TOKEN},
+            remote="172.20.0.10",
+            rel_url=SimpleNamespace(query={"refresh": "1"}),
+        )
+        try:
+            main._health_cache["checked_at"] = 9_000_000_000.0
+            main.BIBITASKS_ENVIRONMENT = "test"
+            main.PILOT_LOAD_TEST_ENABLED = False
+            with self.assertRaises(main.web.HTTPForbidden):
+                await main.api_health(request)
+
+            before = main._health_cache["checked_at"]
+            main.BIBITASKS_ENVIRONMENT = "staging"
+            main.PILOT_LOAD_TEST_ENABLED = True
+            response = await main.api_health(request)
+            self.assertIn(response.status, (200, 503))
+            self.assertNotEqual(main._health_cache["checked_at"], before)
+        finally:
+            main.BIBITASKS_ENVIRONMENT = original_environment
+            main.PILOT_LOAD_TEST_ENABLED = original_loadtest
+            main._health_cache.clear()
+            main._health_cache.update(original_cache)
+
+    async def test_loadtest_telegram_stub_is_staging_only_and_skips_bot_api(self):
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        original_loadtest = main.PILOT_LOAD_TEST_ENABLED
+        original_stub = main.PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED
+
+        async def forbidden_send(*_args, **_kwargs):
+            raise AssertionError("synthetic outbox touched Telegram")
+
+        try:
+            main.BIBITASKS_ENVIRONMENT = "staging"
+            main.PILOT_LOAD_TEST_ENABLED = False
+            main.PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED = True
+            with self.assertRaisesRegex(RuntimeError, "requires staging load-test"):
+                main._validate_update_receiver_config()
+
+            main.PILOT_LOAD_TEST_ENABLED = True
+            main._validate_update_receiver_config()
+            item = {
+                "payload_json": json.dumps({"text": "synthetic"}),
+                "event_type": "direct",
+                "recipient_id": 4_400_000_000_000_000,
+            }
+            with patch.object(main.bot, "send_message", new=forbidden_send):
+                self.assertIsNone(await main._deliver_outbox_item(item))
+        finally:
+            main.BIBITASKS_ENVIRONMENT = original_environment
+            main.PILOT_LOAD_TEST_ENABLED = original_loadtest
+            main.PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED = original_stub
+
+    async def test_database_lock_runtime_counter_is_monotonic_and_health_visible(self):
+        before = main._runtime_errors["database_locked"]
+        main._record_runtime_error(RuntimeError("unrelated"))
+        self.assertEqual(main._runtime_errors["database_locked"], before)
+        wrapped = RuntimeError("request failed")
+        wrapped.__cause__ = sqlite3.OperationalError("database is locked")
+        main._record_runtime_error(wrapped)
+        self.assertEqual(main._runtime_errors["database_locked"], before + 1)
+        request = SimpleNamespace(
+            headers={"X-Health-Token": main.HEALTH_TOKEN},
+            remote="127.0.0.1",
+            rel_url=SimpleNamespace(query={}),
+        )
+        payload = json.loads((await main.api_health(request)).text)
+        self.assertEqual(payload["database_locked_errors"], before + 1)
+        main._runtime_errors["database_locked"] = before
+
     async def test_photo_declared_mime_must_match_content(self):
         image_bytes = BytesIO()
         Image.new("RGB", (2, 2), "green").save(image_bytes, format="PNG")

@@ -18,10 +18,12 @@ import io
 import json
 import math
 import os
+import random
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
@@ -38,6 +40,7 @@ DEFAULT_WEBHOOK_SECONDS = 5.0
 DEFAULT_MEMORY_LIMIT_BYTES = 600 * 1024 * 1024
 DEFAULT_WEBHOOK_P95_MS = 500.0
 SYNTHETIC_USER_ID_START = 3_900_000_000_000_000
+INTERNAL_HEALTH_BASE_URL = "http://bibitasks:3000"
 
 
 class ConfigurationError(ValueError):
@@ -88,11 +91,19 @@ def signed_init_data(bot_token: str, user_id: int, *, query_id: str) -> str:
     return urlencode(values)
 
 
+@lru_cache(maxsize=1)
 def synthetic_photo_data_url() -> str:
-    image = Image.new("RGB", (320, 240), (58, 178, 88))
+    """Return a deterministic phone-sized fixture that exercises JPEG work."""
+    width, height = 1280, 960
+    pixels = random.Random(0xB1B1CAFE).randbytes(width * height * 3)
+    image = Image.frombytes("RGB", (width, height), pixels)
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
-    return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+    image.save(
+        output, format="JPEG", quality=88, optimize=True, progressive=True,
+    )
+    return "data:image/jpeg;base64," + base64.b64encode(
+        output.getvalue()
+    ).decode("ascii")
 
 
 def _read_secret(path: str, label: str) -> str:
@@ -102,6 +113,13 @@ def _read_secret(path: str, label: str) -> str:
         raise ConfigurationError(f"cannot read {label} file") from exc
     if not value:
         raise ConfigurationError(f"{label} file is empty")
+    return value
+
+
+def _read_environment_secret(name: str) -> str:
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise ConfigurationError(f"environment variable {name} is empty")
     return value
 
 
@@ -150,6 +168,10 @@ def build_plan(args) -> dict:
     return {
         "mode": "apply" if args.apply else "dry_run",
         "target": args.base_url.rstrip("/"),
+        "health_target": args.health_base_url,
+        "secret_source": (
+            "environment" if args.secrets_from_environment else "files"
+        ),
         "staging_only": True,
         "destructive_fixture": True,
         "first_opens": args.first_opens,
@@ -185,10 +207,12 @@ class LoadRun:
         self.health_token = health_token
         self.webhook_secret = webhook_secret
         self.base_url = args.base_url.rstrip("/")
+        self.health_base_url = args.health_base_url
         self.run_id = str(uuid.uuid4())
         self.samples: list[Sample] = []
         self.setup_samples: list[Sample] = []
         self.health_samples: list[dict] = []
+        self.final_health: dict = {}
         self.stop_health = asyncio.Event()
         self.photo = synthetic_photo_data_url()
 
@@ -202,7 +226,8 @@ class LoadRun:
     async def request(
         self, scenario: str, method: str, path: str, *,
         headers: dict[str, str] | None = None, body: dict | None = None,
-        retries: int = 0, measured: bool = True,
+        retries: int = 0, measured: bool = True, base_url: str | None = None,
+        expect_json: bool = True,
     ) -> tuple[int, dict]:
         target = self.samples if measured else self.setup_samples
         for attempt in range(retries + 1):
@@ -213,18 +238,20 @@ class LoadRun:
             response_headers = {}
             try:
                 async with self.session.request(
-                    method, self.base_url + path, headers=headers, json=body,
+                    method, (base_url or self.base_url) + path,
+                    headers=headers, json=body,
                 ) as response:
                     status = response.status
                     response_headers = response.headers
                     raw = await response.text()
-                    try:
-                        decoded = json.loads(raw) if raw else {}
-                        payload = decoded if isinstance(decoded, dict) else {}
-                    except json.JSONDecodeError:
-                        error = "non_json_response"
-                    if not error:
-                        error = str(payload.get("error") or "")
+                    if expect_json:
+                        try:
+                            decoded = json.loads(raw) if raw else {}
+                            payload = decoded if isinstance(decoded, dict) else {}
+                        except json.JSONDecodeError:
+                            error = "non_json_response"
+                        if not error:
+                            error = str(payload.get("error") or "")
                     if "database is locked" in raw.casefold():
                         error = "database_is_locked"
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -244,13 +271,32 @@ class LoadRun:
 
     async def health(self) -> tuple[int, dict]:
         return await self.request(
-            "health", "GET", "/health/ready",
+            "health", "GET", "/health/ready?refresh=1",
             headers={"X-Health-Token": self.health_token}, measured=False,
+            base_url=self.health_base_url,
+        )
+
+    @staticmethod
+    def healthy_snapshot(status: int, payload: dict) -> bool:
+        return bool(
+            status == 200
+            and payload.get("ok") is True
+            and payload.get("pilot_load_test_telegram_stub_enabled") is True
+            and payload.get("database") is True
+            and not payload.get("database_error")
+            and payload.get("database_locked_errors") == 0
+            and payload.get("storage_writable") is True
+            and payload.get("telegram_receiver_ready") is True
+            and payload.get("lifecycle_worker_alive") is True
+            and payload.get("outbox_worker_alive") is True
+            and payload.get("telegram_inbox_worker_alive") is True
+            and payload.get("telegram_inbox_dead") == 0
+            and payload.get("outbox_dead") == 0
         )
 
     async def preflight(self):
         status, payload = await self.health()
-        if status not in {200, 503}:
+        if status != 200:
             raise ConfigurationError(f"health endpoint returned HTTP {status}")
         if payload.get("environment") != "staging":
             raise ConfigurationError(
@@ -266,6 +312,13 @@ class LoadRun:
             )
         if not payload.get("application_version"):
             raise ConfigurationError("staging health has no application version")
+        if not self.healthy_snapshot(status, payload):
+            raise ConfigurationError("staging readiness is not healthy")
+        if (
+            payload.get("telegram_inbox_pending") != 0
+            or payload.get("outbox_pending") != 0
+        ):
+            raise ConfigurationError("staging queues must be empty before the load test")
 
     async def _expect_ok(self, *args, **kwargs) -> dict:
         status, payload = await self.request(*args, measured=False, **kwargs)
@@ -326,6 +379,11 @@ class LoadRun:
         return fixtures
 
     async def first_open(self, user_id: int):
+        shell_status, shell_payload = await self.request(
+            "first_open_shell", "GET", "/", retries=3, expect_json=False,
+        )
+        if shell_status != 200:
+            return shell_status, shell_payload
         return await self.request(
             "first_open", "GET", "/api/state",
             headers=self.auth(user_id, "first-open"), retries=3,
@@ -368,15 +426,14 @@ class LoadRun:
         user_id = self.args.user_id_start + 20_000 + index
         payload = {
             "update_id": update_id,
-            "message": {
-                "message_id": update_id,
-                "date": int(time.time()),
-                "chat": {"id": user_id, "type": "private"},
-                "from": {
+            "poll_answer": {
+                "poll_id": f"capacity-{self.run_id}-{index}",
+                "user": {
                     "id": user_id, "is_bot": False,
                     "first_name": "Capacity",
                 },
-                "text": "/start",
+                "option_ids": [0],
+                "option_persistent_ids": ["capacity-option-0"],
             },
         }
         return await self.request(
@@ -384,21 +441,34 @@ class LoadRun:
             headers={
                 "X-Telegram-Bot-Api-Secret-Token": self.webhook_secret,
             },
-            body=payload,
+            body=payload, retries=40,
         )
+
+    @staticmethod
+    def health_sample(status: int, payload: dict) -> dict:
+        return {
+            "status": status,
+            "ok": payload.get("ok"),
+            "telegram_stub": payload.get("pilot_load_test_telegram_stub_enabled"),
+            "database": payload.get("database"),
+            "database_error": payload.get("database_error"),
+            "database_locked_errors": payload.get("database_locked_errors"),
+            "storage_writable": payload.get("storage_writable"),
+            "receiver_ready": payload.get("telegram_receiver_ready"),
+            "lifecycle_worker_alive": payload.get("lifecycle_worker_alive"),
+            "outbox_worker_alive": payload.get("outbox_worker_alive"),
+            "telegram_inbox_worker_alive": payload.get("telegram_inbox_worker_alive"),
+            "rss": payload.get("process_rss_bytes"),
+            "inbox_pending": payload.get("telegram_inbox_pending"),
+            "inbox_dead": payload.get("telegram_inbox_dead"),
+            "outbox_pending": payload.get("outbox_pending"),
+            "outbox_dead": payload.get("outbox_dead"),
+        }
 
     async def health_sampler(self):
         while not self.stop_health.is_set():
             status, payload = await self.health()
-            if payload:
-                self.health_samples.append({
-                    "status": status,
-                    "rss": payload.get("process_rss_bytes"),
-                    "inbox_pending": payload.get("telegram_inbox_pending"),
-                    "inbox_soft": payload.get("telegram_inbox_soft_limit"),
-                    "outbox_pending": payload.get("outbox_pending"),
-                    "outbox_soft": payload.get("outbox_soft_limit"),
-                })
+            self.health_samples.append(self.health_sample(status, payload))
             try:
                 await asyncio.wait_for(self.stop_health.wait(), timeout=0.5)
             except asyncio.TimeoutError:
@@ -407,14 +477,15 @@ class LoadRun:
     async def wait_for_queue_recovery(self) -> tuple[bool, float]:
         started = time.monotonic()
         while time.monotonic() - started <= self.args.queue_drain_seconds:
-            _status, payload = await self.health()
+            status, payload = await self.health()
+            snapshot = self.health_sample(status, payload)
+            self.final_health = snapshot
             inbox = payload.get("telegram_inbox_pending")
-            inbox_soft = payload.get("telegram_inbox_soft_limit")
             outbox = payload.get("outbox_pending")
-            outbox_soft = payload.get("outbox_soft_limit")
-            if all(isinstance(value, int) for value in (
-                inbox, inbox_soft, outbox, outbox_soft,
-            )) and inbox < inbox_soft and outbox < outbox_soft:
+            if (
+                self.healthy_snapshot(status, payload)
+                and inbox == 0 and outbox == 0
+            ):
                 return True, round(time.monotonic() - started, 3)
             await asyncio.sleep(2)
         return False, round(time.monotonic() - started, 3)
@@ -495,6 +566,25 @@ class LoadRun:
         database_locked = any(
             sample.error == "database_is_locked" for sample in self.samples
         )
+        health_evidence = [*self.health_samples]
+        if self.final_health:
+            health_evidence.append(self.final_health)
+        health_evidence_ok = bool(health_evidence) and all(
+            item.get("status") == 200
+            and item.get("ok") is True
+            and item.get("telegram_stub") is True
+            and item.get("database") is True
+            and not item.get("database_error")
+            and item.get("database_locked_errors") == 0
+            and item.get("storage_writable") is True
+            and item.get("receiver_ready") is True
+            and item.get("lifecycle_worker_alive") is True
+            and item.get("outbox_worker_alive") is True
+            and item.get("telegram_inbox_worker_alive") is True
+            and item.get("inbox_dead") == 0
+            and item.get("outbox_dead") == 0
+            for item in health_evidence
+        )
         unhandled_500 = sum(sample.status == 500 for sample in self.samples)
         controlled_busy = sum(
             sample.status == 503 and sample.retryable for sample in self.samples
@@ -515,7 +605,8 @@ class LoadRun:
                 maximum_rss is not None
                 and maximum_rss < self.args.memory_limit_bytes
             ),
-            "queues_recovered_below_soft_limits": queue_recovered,
+            "health_remained_ready": health_evidence_ok,
+            "queues_fully_drained": queue_recovered,
         }
         return {
             "report_version": 1,
@@ -556,11 +647,13 @@ def parser() -> argparse.ArgumentParser:
         description="Staging-only BibiTasks pilot capacity gate (dry-run by default)",
     )
     result.add_argument("--base-url", default="https://staging.example.invalid")
+    result.add_argument("--health-base-url", default=INTERNAL_HEALTH_BASE_URL)
     result.add_argument("--apply", action="store_true")
     result.add_argument("--confirm-base-url", default="")
     result.add_argument("--bot-token-file")
     result.add_argument("--health-token-file")
     result.add_argument("--webhook-secret-file")
+    result.add_argument("--secrets-from-environment", action="store_true")
     result.add_argument("--webhook-path", default="")
     result.add_argument("--admin-user-id", type=int)
     result.add_argument("--user-id-start", type=int, default=SYNTHETIC_USER_ID_START)
@@ -597,13 +690,29 @@ def validate_args(args):
         raise ConfigurationError("synthetic user IDs must stay inside Telegram's 52-bit range")
     if args.apply:
         validate_target(args.base_url, args.confirm_base_url)
-        required = {
+        if args.health_base_url != INTERNAL_HEALTH_BASE_URL:
+            raise ConfigurationError(
+                "--health-base-url must be exactly http://bibitasks:3000"
+            )
+        secret_files = {
             "--bot-token-file": args.bot_token_file,
             "--health-token-file": args.health_token_file,
             "--webhook-secret-file": args.webhook_secret_file,
-            "--webhook-path": args.webhook_path,
+        }
+        if args.secrets_from_environment and any(secret_files.values()):
+            raise ConfigurationError(
+                "--secrets-from-environment is mutually exclusive with secret files"
+            )
+        if args.secrets_from_environment and args.webhook_path:
+            raise ConfigurationError(
+                "--secrets-from-environment derives the webhook path internally"
+            )
+        required = {
             "--admin-user-id": args.admin_user_id,
         }
+        if not args.secrets_from_environment:
+            required.update(secret_files)
+            required["--webhook-path"] = args.webhook_path
         missing = [key for key, value in required.items() if not value]
         if missing:
             raise ConfigurationError("missing apply arguments: " + ", ".join(missing))
@@ -612,9 +721,16 @@ def validate_args(args):
 
 
 async def async_main(args) -> dict:
-    bot_token = _read_secret(args.bot_token_file, "bot token")
-    health_token = _read_secret(args.health_token_file, "health token")
-    webhook_secret = _read_secret(args.webhook_secret_file, "webhook secret")
+    if args.secrets_from_environment:
+        bot_token = _read_environment_secret("BOT_TOKEN")
+        health_token = _read_environment_secret("HEALTH_TOKEN")
+        webhook_secret = _read_environment_secret("WEBHOOK_SECRET")
+        route_id = _read_environment_secret("WEBHOOK_ROUTE_ID")
+        args.webhook_path = "/telegram/webhook/" + route_id
+    else:
+        bot_token = _read_secret(args.bot_token_file, "bot token")
+        health_token = _read_secret(args.health_token_file, "health token")
+        webhook_secret = _read_secret(args.webhook_secret_file, "webhook secret")
     timeout = aiohttp.ClientTimeout(total=20, connect=5)
     connector = aiohttp.TCPConnector(limit=256, ssl=True)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:

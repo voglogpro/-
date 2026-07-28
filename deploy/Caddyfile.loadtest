@@ -1,0 +1,50 @@
+{
+    admin off
+
+    servers {
+        timeouts {
+            read_header 10s
+            read_body   2m
+            write       2m
+            idle        2m
+        }
+        max_header_size 32KB
+    }
+}
+
+{$BIBITASKS_DOMAIN} {
+    encode zstd gzip
+
+    request_body {
+        max_size 16777216
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(self), geolocation=(), microphone=()"
+        -Server
+    }
+
+    # Readiness remains private. The runner reaches it on the isolated Docker
+    # network; the public staging edge deliberately matches production here.
+    @private_readiness path /health/ready
+    respond @private_readiness 404
+
+    @sensitive_routes path /telegram/webhook/* /task-photo/* /media/*
+    log_skip @sensitive_routes
+
+    reverse_proxy bibitasks:3000
+
+    log {
+        output stdout
+        format json
+    }
+}
+
+http://127.0.0.1:2015 {
+    @not_live not path /health/live
+    respond @not_live 404
+    reverse_proxy bibitasks:3000
+}
