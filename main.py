@@ -49,7 +49,7 @@ from aiogram.types import (
 
 APP_VERSION = "v2.10.0"
 BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
-SQLITE_SCHEMA_VERSION = 298
+SQLITE_SCHEMA_VERSION = 299
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -848,6 +848,32 @@ TASK_TEMPLATES = [
     },
 ]
 
+TASK_TEMPLATE_SEED_AT = "2026-07-28T00:00:00+00:00"
+TASK_TEMPLATE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,49}$")
+TASK_TEMPLATE_CONTENT_FIELDS = (
+    "title", "task_type", "task_title", "details", "reward", "mode",
+    "evidence_policy", "max_participants", "budget_cap", "photo_media_id",
+    "photo_sha256",
+)
+
+
+def _canonical_json(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _task_template_content_hash(content):
+    canonical = {key: content.get(key) for key in TASK_TEMPLATE_CONTENT_FIELDS}
+    return hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
+
+
+def _task_template_seed_ids(key):
+    return (
+        str(uuid.uuid5(uuid.NAMESPACE_URL, f"bibitasks:task-template:{key}")),
+        str(uuid.uuid5(uuid.NAMESPACE_URL, f"bibitasks:task-template:{key}:v1")),
+    )
+
 # Уровни доверия: (ключ, название, эмодзи, порог выполненных задач)
 TRUST_LEVELS = [
     ("novice",   "Новичок",     "🌱", 0),
@@ -992,7 +1018,13 @@ async def init_db():
                 cancelled_by INTEGER,
                 cancel_reason TEXT,
                 expired_at TEXT,
-                version INTEGER NOT NULL DEFAULT 1
+                version INTEGER NOT NULL DEFAULT 1,
+                template_id TEXT,
+                template_version_id TEXT,
+                CHECK((template_id IS NULL)=(template_version_id IS NULL)),
+                FOREIGN KEY(template_id,template_version_id)
+                    REFERENCES task_template_versions(template_id,id)
+                    DEFERRABLE INITIALLY DEFERRED
             )
         """)
         await db.execute("""
@@ -1152,6 +1184,170 @@ async def init_db():
                 result_status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_templates (
+                id TEXT PRIMARY KEY,
+                key TEXT NOT NULL UNIQUE,
+                origin TEXT NOT NULL CHECK(origin IN ('system','manual')),
+                status TEXT NOT NULL CHECK(status IN ('active','archived')),
+                generation INTEGER NOT NULL CHECK(generation>0),
+                current_version_id TEXT NOT NULL,
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_by INTEGER,
+                updated_at TEXT NOT NULL,
+                archived_by INTEGER,
+                archived_at TEXT,
+                CHECK(key=lower(key)),
+                CHECK((status='active' AND archived_by IS NULL AND archived_at IS NULL)
+                    OR (status='archived' AND archived_by IS NOT NULL AND archived_at IS NOT NULL)),
+                FOREIGN KEY(id,current_version_id)
+                    REFERENCES task_template_versions(template_id,id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_template_versions (
+                id TEXT PRIMARY KEY,
+                template_id TEXT NOT NULL,
+                version_number INTEGER NOT NULL CHECK(version_number>0),
+                title TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                task_title TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '',
+                reward INTEGER NOT NULL CHECK(reward BETWEEN 1 AND 300),
+                mode TEXT NOT NULL CHECK(mode IN ('open','personal','all')),
+                evidence_policy TEXT NOT NULL CHECK(evidence_policy IN
+                    ('none','comment_only','photo_required','before_after')),
+                max_participants INTEGER NOT NULL,
+                budget_cap INTEGER NOT NULL,
+                photo_media_id TEXT,
+                photo_sha256 TEXT,
+                content_hash TEXT NOT NULL,
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                UNIQUE(template_id,version_number),
+                UNIQUE(template_id,id),
+                CHECK((photo_media_id IS NULL AND photo_sha256 IS NULL)
+                    OR (photo_media_id IS NOT NULL AND photo_sha256 IS NOT NULL)),
+                CHECK((mode IN ('open','personal') AND max_participants=1
+                    AND budget_cap=reward) OR (mode='all'
+                    AND max_participants BETWEEN 1 AND 500
+                    AND budget_cap BETWEEN reward AND 150000
+                    AND max_participants*reward<=budget_cap)),
+                FOREIGN KEY(template_id) REFERENCES task_templates(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(photo_media_id) REFERENCES media_objects(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_template_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT NOT NULL,
+                template_version_id TEXT,
+                event_type TEXT NOT NULL CHECK(event_type IN
+                    ('created','version_created','archived','activated')),
+                generation INTEGER NOT NULL CHECK(generation>0),
+                actor_id INTEGER,
+                operation_id TEXT NOT NULL UNIQUE,
+                request_hash TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                before_json TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(template_id,generation),
+                FOREIGN KEY(template_id) REFERENCES task_templates(id),
+                FOREIGN KEY(template_id,template_version_id)
+                    REFERENCES task_template_versions(template_id,id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_template_versions_immutable_update
+            BEFORE UPDATE ON task_template_versions BEGIN
+                SELECT RAISE(ABORT,'task template versions are immutable');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_template_versions_immutable_delete
+            BEFORE DELETE ON task_template_versions BEGIN
+                SELECT RAISE(ABORT,'task template versions are immutable');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_templates_key_immutable
+            BEFORE UPDATE OF key ON task_templates
+            WHEN NEW.key<>OLD.key BEGIN
+                SELECT RAISE(ABORT,'task template key is immutable');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_template_events_immutable_update
+            BEFORE UPDATE ON task_template_events BEGIN
+                SELECT RAISE(ABORT,'task template events are immutable');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_template_events_immutable_delete
+            BEFORE DELETE ON task_template_events BEGIN
+                SELECT RAISE(ABORT,'task template events are immutable');
+            END
+        """)
+        # Existing SQLite installations cannot gain composite foreign keys via
+        # ALTER TABLE. These triggers keep upgraded databases as strict as a
+        # freshly created schema and as the PostgreSQL target.
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS tasks_template_provenance_insert
+            BEFORE INSERT ON tasks
+            WHEN (NEW.template_id IS NULL)<>(NEW.template_version_id IS NULL)
+              OR (NEW.template_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM task_template_versions v
+                  WHERE v.template_id=NEW.template_id AND v.id=NEW.template_version_id
+              ))
+            BEGIN
+                SELECT RAISE(ABORT,'invalid task template provenance');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS tasks_template_provenance_update
+            BEFORE UPDATE OF template_id,template_version_id ON tasks
+            WHEN (NEW.template_id IS NULL)<>(NEW.template_version_id IS NULL)
+              OR (NEW.template_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM task_template_versions v
+                  WHERE v.template_id=NEW.template_id AND v.id=NEW.template_version_id
+              ))
+            BEGIN
+                SELECT RAISE(ABORT,'invalid task template provenance');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_templates_current_version_update
+            BEFORE UPDATE OF current_version_id ON task_templates
+            WHEN NOT EXISTS (
+                SELECT 1 FROM task_template_versions v
+                WHERE v.template_id=NEW.id AND v.id=NEW.current_version_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT,'task template current version mismatch');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS task_template_events_provenance_insert
+            BEFORE INSERT ON task_template_events
+            WHEN (NEW.template_version_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM task_template_versions v
+                    WHERE v.template_id=NEW.template_id AND v.id=NEW.template_version_id
+                )) OR NOT EXISTS (
+                    SELECT 1 FROM task_templates t
+                    JOIN task_template_versions v
+                      ON v.template_id=t.id AND v.id=t.current_version_id
+                    WHERE t.id=NEW.template_id
+                )
+            BEGIN
+                SELECT RAISE(ABORT,'invalid task template event provenance');
+            END
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS task_disputes (
@@ -1629,6 +1825,8 @@ async def init_db():
             ("cancelled_by", "INTEGER"),
             ("cancel_reason", "TEXT"),
             ("expired_at", "TEXT"),
+            ("template_id", "TEXT"),
+            ("template_version_id", "TEXT"),
             ("version", "INTEGER NOT NULL DEFAULT 1"),
         ):
             if name not in task_columns:
@@ -1949,6 +2147,18 @@ async def init_db():
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_templates_status "
+            "ON task_templates(status,id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_template_versions_template "
+            "ON task_template_versions(template_id,version_number)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_template_versions_media "
+            "ON task_template_versions(photo_media_id)")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_template_events_template "
+            "ON task_template_events(template_id,generation,id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_assigned "
             "ON tasks(assigned_to, status)")
@@ -2273,6 +2483,93 @@ async def init_db():
         # cannot carry discretionary money without a separate approval flow.
         await db.execute("UPDATE awards SET repeatable=0 WHERE bonus>0 AND repeatable<>0")
 
+        # Built-in templates are immutable version-1 seeds. Existing rows are
+        # never overwritten; future catalogue changes must create a new version.
+        for seed in TASK_TEMPLATES:
+            template_id, version_id = _task_template_seed_ids(seed["key"])
+            mode = seed.get("mode") or "open"
+            reward = int(seed["reward"])
+            max_participants = 10 if mode == "all" else 1
+            budget_cap = reward * max_participants
+            content = {
+                "title": seed["title"], "task_type": seed["type"],
+                "task_title": seed["task_title"],
+                "details": seed.get("details") or "", "reward": reward,
+                "mode": mode,
+                "evidence_policy": _evidence_policy(
+                    seed.get("evidence_policy") or "after_required"
+                ),
+                "max_participants": max_participants,
+                "budget_cap": budget_cap, "photo_media_id": None,
+                "photo_sha256": None,
+            }
+            content_hash = _task_template_content_hash(content)
+            existing_template = await (await db.execute(
+                "SELECT t.id,t.origin,v.id,v.content_hash FROM task_templates t "
+                "LEFT JOIN task_template_versions v ON v.template_id=t.id "
+                "AND v.version_number=1 WHERE t.key=?", (seed["key"],),
+            )).fetchone()
+            if existing_template:
+                if (
+                    existing_template[0] != template_id
+                    or existing_template[1] != "system"
+                    or existing_template[2] != version_id
+                    or existing_template[3] != content_hash
+                ):
+                    raise RuntimeError(
+                        f"Conflicting built-in task template seed: {seed['key']}"
+                    )
+                continue
+            operation_id = f"task-template-seed:{seed['key']}:v1"
+            request_hash = content_hash
+            result = {
+                "ok": True, "template_id": template_id,
+                "generation": 1, "version_id": version_id,
+                "version_number": 1, "status": "active",
+                "idempotent": False,
+            }
+            after = {
+                "id": template_id, "key": seed["key"], "origin": "system",
+                "status": "active", "generation": 1,
+                "current_version_id": version_id, "version": {
+                    **content, "id": version_id, "version_number": 1,
+                    "content_hash": content_hash,
+                },
+            }
+            await db.execute(
+                "INSERT INTO task_templates "
+                "(id,key,origin,status,generation,current_version_id,created_by,"
+                "created_at,updated_by,updated_at) "
+                "VALUES (?,?,'system','active',1,?,NULL,?,NULL,?)",
+                (template_id, seed["key"], version_id,
+                 TASK_TEMPLATE_SEED_AT, TASK_TEMPLATE_SEED_AT),
+            )
+            await db.execute(
+                "INSERT INTO task_template_versions "
+                "(id,template_id,version_number,title,task_type,task_title,details,"
+                "reward,mode,evidence_policy,max_participants,budget_cap,photo_media_id,"
+                "photo_sha256,content_hash,created_by,created_at) "
+                "VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?, ?,NULL,?)",
+                (
+                    version_id, template_id, content["title"], content["task_type"],
+                    content["task_title"], content["details"], content["reward"],
+                    content["mode"], content["evidence_policy"],
+                    content["max_participants"], content["budget_cap"], None, None,
+                    content_hash, TASK_TEMPLATE_SEED_AT,
+                ),
+            )
+            await db.execute(
+                "INSERT INTO task_template_events "
+                "(template_id,template_version_id,event_type,generation,actor_id,"
+                "operation_id,request_hash,note,before_json,after_json,result_json,created_at) "
+                "VALUES (?,?,'created',1,NULL,?,?, '',?,?,?,?)",
+                (
+                    template_id, version_id, operation_id, request_hash,
+                    _canonical_json({}), _canonical_json(after),
+                    _canonical_json(result), TASK_TEMPLATE_SEED_AT,
+                ),
+            )
+
         # Keep independent authority sources. A person may be both env-backed
         # and maker-checker promoted; rotating ADMIN_IDS removes only env power.
         for uid in ADMIN_IDS:
@@ -2370,6 +2667,8 @@ async def _reconcile_referenced_media():
         rows = await (await db.execute(
             "SELECT m.* FROM media_objects m WHERE m.state='ready' AND ("
             "EXISTS (SELECT 1 FROM tasks t WHERE t.photo_media_id=m.id) OR "
+            "EXISTS (SELECT 1 FROM task_template_versions tv "
+            "WHERE tv.photo_media_id=m.id) OR "
             "EXISTS (SELECT 1 FROM task_evidence e WHERE e.media_id=m.id) OR "
             "EXISTS (SELECT 1 FROM task_outbox o WHERE o.media_id=m.id "
             "AND o.status IN ('pending','sending','dead'))) "
@@ -2594,6 +2893,8 @@ async def _cleanup_media_objects():
             "((m.state='ready' AND (m.delete_after<=? OR m.created_at<?)) "
             "OR m.state IN ('delete_pending','quarantined')) "
             "AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.photo_media_id=m.id) "
+            "AND NOT EXISTS (SELECT 1 FROM task_template_versions tv "
+            "WHERE tv.photo_media_id=m.id) "
             "AND NOT EXISTS (SELECT 1 FROM task_evidence e WHERE e.media_id=m.id) "
             "AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.media_id=m.id "
             "AND o.status IN ('pending','sending','dead')) LIMIT 100",
@@ -2605,10 +2906,12 @@ async def _cleanup_media_objects():
                 "UPDATE media_objects SET state='delete_pending' WHERE id=? "
                 "AND state IN ('ready','delete_pending','quarantined') "
                 "AND NOT EXISTS (SELECT 1 FROM tasks WHERE photo_media_id=?) "
+                "AND NOT EXISTS (SELECT 1 FROM task_template_versions "
+                "WHERE photo_media_id=?) "
                 "AND NOT EXISTS (SELECT 1 FROM task_evidence WHERE media_id=?) "
                 "AND NOT EXISTS (SELECT 1 FROM task_outbox WHERE media_id=? "
                 "AND status IN ('pending','sending','dead'))",
-                (row["id"], row["id"], row["id"], row["id"]),
+                (row["id"], row["id"], row["id"], row["id"], row["id"]),
             )
             await db.commit()
         if cur.rowcount != 1:
@@ -3042,6 +3345,7 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
         if not exact:
             return False
         domain_locations = {
+            "task_create": ("tasks", "operation_id"),
             "task_review": ("task_review_commands", "operation_id"),
             "task_dispute_open": ("task_disputes", "open_operation_id"),
             "task_dispute_decide": ("task_disputes", "decision_operation_id"),
@@ -3056,6 +3360,9 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
             "admin_role_decision": ("admin_role_changes", "decision_operation_id"),
             "staff_access_request": ("staff_access_changes", "request_operation_id"),
             "staff_access_decision": ("staff_access_changes", "decision_operation_id"),
+            "task_template_create": ("task_template_events", "operation_id"),
+            "task_template_version_create": ("task_template_events", "operation_id"),
+            "task_template_status_change": ("task_template_events", "operation_id"),
             "award_grant": ("member_awards", "operation_id"),
             "award_revoke": ("member_awards", "revoke_operation_id"),
             "withdrawal_request": ("withdrawal_requests", "operation_id"),
@@ -3071,6 +3378,7 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
                 return False
         return True
     legacy_checks = (
+        ("tasks", "operation_id", "task_create"),
         ("task_review_commands", "operation_id", "task_review"),
         ("task_disputes", "open_operation_id", "task_dispute_open"),
         ("task_disputes", "decision_operation_id", "task_dispute_decide"),
@@ -7014,6 +7322,10 @@ async def api_admin_overview(request):
         evidence_tasks.extend(open_task_items)
     if evidence_tasks:
         await _attach_task_evidence(evidence_tasks)
+    task_templates = (
+        await _task_templates_active_public()
+        if "task.template.manage" in capabilities else []
+    )
     return _json({
         "ok": True,
         "pending": [dict(r) for r in pending] if "application.queue.view" in capabilities else [],
@@ -7081,7 +7393,7 @@ async def api_admin_overview(request):
             ),
         } for r in role_changes] if "access.view" in capabilities else [],
         "join_requests": [dict(r) for r in join_requests] if "admission.view" in capabilities else [],
-        "task_templates": TASK_TEMPLATES if "task.template.manage" in capabilities else [],
+        "task_templates": task_templates,
     })
 
 
@@ -7660,6 +7972,703 @@ async def api_admin_decide(request):
     return _json({"ok": True, "join_requests_queued": join_requests_queued})
 
 
+def _task_template_uuid(value):
+    try:
+        return str(uuid.UUID(str(value or "").strip()))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _task_template_route_id(request):
+    return _task_template_uuid(
+        (getattr(request, "match_info", {}) or {}).get("template_id")
+    )
+
+
+def _normalize_task_template_content(body):
+    title = " ".join(str(body.get("title") or "").split())[:120]
+    task_type = str(body.get("task_type") or body.get("type") or "").strip()
+    task_title = " ".join(str(body.get("task_title") or "").split())[:120]
+    details = str(body.get("details") or "").strip()[:500]
+    mode = str(body.get("mode") or "").strip().lower()
+    evidence_policy = _evidence_policy(body.get("evidence_policy"))
+    reward = _as_int(body.get("reward"))
+    if len(title) < 3 or len(task_title) < 3:
+        return None, "title"
+    if task_type not in TASK_TYPES:
+        return None, "type"
+    if reward is None or not 1 <= reward <= 300:
+        return None, "reward"
+    if mode not in {"open", "personal", "all"}:
+        return None, "mode"
+    if evidence_policy is None:
+        return None, "evidence_policy"
+    if mode == "all":
+        max_participants = _as_int(body.get("max_participants"))
+        budget_cap = _as_int(body.get("budget_cap"))
+        if max_participants is None or not 1 <= max_participants <= 500:
+            return None, "max_participants"
+        if (
+            budget_cap is None or budget_cap < reward or budget_cap > 150000
+            or max_participants * reward > budget_cap
+        ):
+            return None, "budget_cap"
+    else:
+        max_participants = 1
+        budget_cap = reward
+    return {
+        "title": title, "task_type": task_type, "task_title": task_title,
+        "details": details, "reward": reward, "mode": mode,
+        "evidence_policy": evidence_policy,
+        "max_participants": max_participants, "budget_cap": budget_cap,
+        "photo_media_id": None, "photo_sha256": None,
+    }, None
+
+
+def _task_template_version_public(row):
+    return {
+        "id": row["version_id"],
+        "version_number": int(row["version_number"]),
+        "title": row["title"], "type": row["task_type"],
+        "task_title": row["task_title"], "details": row["details"] or "",
+        "reward": int(row["reward"]), "mode": row["mode"],
+        "evidence_policy": _public_evidence_policy(row["evidence_policy"]),
+        "max_participants": int(row["max_participants"]),
+        "budget_cap": int(row["budget_cap"]),
+        "photo_url": _signed_media_url(row["photo_media_id"]),
+        "has_photo": bool(row["photo_media_id"]),
+        "content_hash": row["content_hash"],
+        "created_by": row["version_created_by"],
+        "created_at": row["version_created_at"],
+    }
+
+
+def _task_template_public(row):
+    version = _task_template_version_public(row)
+    return {
+        "id": row["template_id"], "key": row["key"],
+        "origin": row["origin"], "status": row["status"],
+        "generation": int(row["generation"]),
+        "current_version_id": row["current_version_id"],
+        "created_by": row["template_created_by"],
+        "created_at": row["template_created_at"],
+        "updated_by": row["updated_by"], "updated_at": row["updated_at"],
+        "archived_by": row["archived_by"], "archived_at": row["archived_at"],
+        "version_id": version["id"], "version_number": version["version_number"],
+        "title": version["title"], "type": version["type"],
+        "task_title": version["task_title"], "details": version["details"],
+        "reward": version["reward"], "mode": version["mode"],
+        "evidence_policy": version["evidence_policy"],
+        "max_participants": version["max_participants"],
+        "budget_cap": version["budget_cap"], "photo_url": version["photo_url"],
+        "has_photo": version["has_photo"], "content_hash": version["content_hash"],
+        "current_version": version,
+    }
+
+
+def _task_template_audit_snapshot(row):
+    content = {field: row[field] for field in TASK_TEMPLATE_CONTENT_FIELDS}
+    return {
+        "id": row["template_id"], "key": row["key"], "origin": row["origin"],
+        "status": row["status"], "generation": int(row["generation"]),
+        "current_version_id": row["current_version_id"],
+        "version": {
+            **content, "id": row["version_id"],
+            "version_number": int(row["version_number"]),
+            "content_hash": row["content_hash"],
+        },
+    }
+
+
+async def _task_template_row_in_tx(db, template_id):
+    return await (await db.execute(
+        "SELECT t.id AS template_id,t.key,t.origin,t.status,t.generation,"
+        "t.current_version_id,t.created_by AS template_created_by,"
+        "t.created_at AS template_created_at,t.updated_by,t.updated_at,"
+        "t.archived_by,t.archived_at,v.id AS version_id,v.version_number,"
+        "v.title,v.task_type,v.task_title,v.details,v.reward,v.mode,"
+        "v.evidence_policy,v.max_participants,v.budget_cap,v.photo_media_id,"
+        "v.photo_sha256,v.content_hash,v.created_by AS version_created_by,"
+        "v.created_at AS version_created_at FROM task_templates t "
+        "JOIN task_template_versions v ON v.id=t.current_version_id "
+        "WHERE t.id=?", (template_id,),
+    )).fetchone()
+
+
+async def _task_template_replay_in_tx(db, operation_id, request_hash, actor_id):
+    event = await (await db.execute(
+        "SELECT request_hash,actor_id,result_json FROM task_template_events "
+        "WHERE operation_id=?", (operation_id,),
+    )).fetchone()
+    if not event:
+        return None, None
+    if event["request_hash"] != request_hash or int(event["actor_id"] or 0) != int(actor_id):
+        return None, _json({"error": "operation_conflict"}, status=409)
+    result = json.loads(event["result_json"])
+    result["idempotent"] = True
+    return result, None
+
+
+async def _task_templates_active_public():
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT t.id AS template_id,t.key,t.origin,t.status,t.generation,"
+            "t.current_version_id,t.created_by AS template_created_by,"
+            "t.created_at AS template_created_at,t.updated_by,t.updated_at,"
+            "t.archived_by,t.archived_at,v.id AS version_id,v.version_number,"
+            "v.title,v.task_type,v.task_title,v.details,v.reward,v.mode,"
+            "v.evidence_policy,v.max_participants,v.budget_cap,v.photo_media_id,"
+            "v.photo_sha256,v.content_hash,v.created_by AS version_created_by,"
+            "v.created_at AS version_created_at FROM task_templates t "
+            "JOIN task_template_versions v ON v.id=t.current_version_id "
+            "WHERE t.status='active' ORDER BY t.key"
+        )).fetchall()
+    return [_task_template_public(row) for row in rows]
+
+
+async def api_admin_task_templates_list(request):
+    _, err = await _require_capability(request, "task.template.manage")
+    if err is not None:
+        return err
+    query = getattr(request, "query", {}) or {}
+    status_filter = str(query.get("status") or "active").strip().lower()
+    if status_filter not in {"active", "archived", "all"}:
+        return _json({"error": "status"}, status=400)
+    limit = min(100, max(1, _as_int(query.get("limit"), 50)))
+    after_id = _task_template_uuid(query.get("after_id")) if query.get("after_id") else None
+    if query.get("after_id") and not after_id:
+        return _json({"error": "cursor"}, status=400)
+    clauses, params = [], []
+    if status_filter != "all":
+        clauses.append("t.status=?")
+        params.append(status_filter)
+    if after_id:
+        clauses.append("t.id>?")
+        params.append(after_id)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT t.id AS template_id,t.key,t.origin,t.status,t.generation,"
+            "t.current_version_id,t.created_by AS template_created_by,"
+            "t.created_at AS template_created_at,t.updated_by,t.updated_at,"
+            "t.archived_by,t.archived_at,v.id AS version_id,v.version_number,"
+            "v.title,v.task_type,v.task_title,v.details,v.reward,v.mode,"
+            "v.evidence_policy,v.max_participants,v.budget_cap,v.photo_media_id,"
+            "v.photo_sha256,v.content_hash,v.created_by AS version_created_by,"
+            "v.created_at AS version_created_at FROM task_templates t "
+            "JOIN task_template_versions v ON v.id=t.current_version_id" + where
+            + " ORDER BY t.id LIMIT ?", (*params, limit + 1),
+        )).fetchall()
+    has_more = len(rows) > limit
+    items = [_task_template_public(row) for row in rows[:limit]]
+    return _json({
+        "ok": True, "items": items,
+        "next_cursor": items[-1]["id"] if has_more and items else None,
+    })
+
+
+async def api_admin_task_template_get(request):
+    _, err = await _require_capability(request, "task.template.manage")
+    if err is not None:
+        return err
+    template_id = _task_template_route_id(request)
+    if not template_id:
+        return _json({"error": "template_id"}, status=400)
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        row = await _task_template_row_in_tx(db, template_id)
+        if not row:
+            return _json({"error": "not_found"}, status=404)
+        versions = await (await db.execute(
+            "SELECT id AS version_id,version_number,title,task_type,task_title,"
+            "details,reward,mode,evidence_policy,max_participants,budget_cap,"
+            "photo_media_id,photo_sha256,content_hash,created_by AS version_created_by,"
+            "created_at AS version_created_at FROM task_template_versions "
+            "WHERE template_id=? ORDER BY version_number DESC", (template_id,),
+        )).fetchall()
+    return _json({
+        "ok": True, "template": _task_template_public(row),
+        "versions": [_task_template_version_public(item) for item in versions],
+    })
+
+
+async def api_admin_task_template_create(request):
+    admin_id, err = await _require_capability(request, "task.template.manage")
+    if err is not None:
+        return err
+    body = await _body(request)
+    operation_id = _operation_uuid(body.get("operation_id"))
+    requested_key = str(body.get("key") or "").strip().lower()
+    key = (
+        requested_key
+        if requested_key else
+        (f"custom_{uuid.UUID(operation_id).hex}" if operation_id else "")
+    )
+    content, validation_error = _normalize_task_template_content(body)
+    photo_data = body.get("photo_data") or ""
+    copied_from_id = (
+        _task_template_uuid(body.get("copied_from_id"))
+        if body.get("copied_from_id") else None
+    )
+    copied_from_version_id = (
+        _task_template_uuid(body.get("copied_from_version_id"))
+        if body.get("copied_from_version_id") else None
+    )
+    photo_action = str(body.get("photo_action") or (
+        "replace" if photo_data else "keep" if copied_from_id else "remove"
+    )).strip().lower()
+    if (
+        not operation_id or not TASK_TEMPLATE_KEY_RE.fullmatch(key) or validation_error
+        or photo_action not in {"keep", "replace", "remove"}
+        or (photo_action == "keep" and not copied_from_id)
+        or (photo_action == "keep" and not copied_from_version_id)
+        or (copied_from_version_id and not copied_from_id)
+        or (photo_action == "replace" and not photo_data)
+        or (photo_action != "replace" and photo_data)
+    ):
+        return _json({"error": validation_error or "template_identity"}, status=400)
+    copied_photo = None
+    if copied_from_id and photo_action == "keep":
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            copied_photo = await (await db.execute(
+                "SELECT v.photo_media_id,v.photo_sha256,m.state,m.purpose "
+                "FROM task_template_versions v LEFT JOIN media_objects m "
+                "ON m.id=v.photo_media_id WHERE v.template_id=? AND v.id=?",
+                (copied_from_id, copied_from_version_id),
+            )).fetchone()
+        if not copied_photo:
+            return _json({"error": "copy_source_not_found"}, status=404)
+        content["photo_media_id"] = copied_photo["photo_media_id"]
+        content["photo_sha256"] = copied_photo["photo_sha256"]
+    request_hash = _request_fingerprint({
+        "command": "create", "actor_id": int(admin_id),
+        "requested_key": requested_key or None, "key": key,
+        "content": {**content, "photo_media_id": None, "photo_sha256": None},
+        "copied_from_id": copied_from_id,
+        "copied_from_version_id": copied_from_version_id,
+        "photo_action": photo_action,
+        "photo_input_sha256": hashlib.sha256(str(photo_data).encode("utf-8")).hexdigest()
+        if photo_data else "",
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, admin_id, "task.template.manage"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        replay, conflict = await _task_template_replay_in_tx(
+            db, operation_id, request_hash, admin_id,
+        )
+        await db.rollback()
+        if conflict:
+            return conflict
+        if replay:
+            return _json(replay)
+    image = None
+    if photo_data:
+        try:
+            image = await _save_image(
+                photo_data, purpose="task_template_brief",
+                upload_operation_id=f"template:{operation_id}:brief",
+                request_hash=request_hash, admin_id=admin_id,
+                required_capability="task.template.manage",
+            )
+        except PermissionError:
+            return _json({"error": "capability_revoked"}, status=403)
+        except ValueError as exc:
+            return _json({"error": "photo", "message": str(exc)}, status=400)
+        content["photo_media_id"] = image["media_id"]
+        content["photo_sha256"] = image["sha256"]
+    if content["evidence_policy"] == "before_after" and not content["photo_media_id"]:
+        await _remove_saved_images([image] if image else [])
+        return _json({"error": "brief_required"}, status=400)
+    template_id, version_id = str(uuid.uuid4()), str(uuid.uuid4())
+
+    async def reject_after_template_upload(response):
+        if image:
+            await _remove_saved_images([image])
+        return response
+
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if not await _has_capability_in_tx(db, admin_id, "task.template.manage"):
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "capability_revoked"}, status=403)
+                )
+            replay, conflict = await _task_template_replay_in_tx(
+                db, operation_id, request_hash, admin_id,
+            )
+            if conflict:
+                await db.rollback()
+                return await reject_after_template_upload(conflict)
+            if replay:
+                await db.rollback()
+                return _json(replay)
+            if not await _claim_operation_in_tx(
+                db, operation_id, "task_template_create", request_hash, admin_id,
+            ):
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "operation_conflict"}, status=409)
+                )
+            if await (await db.execute(
+                "SELECT 1 FROM task_templates WHERE key=?", (key,),
+            )).fetchone():
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "template_key_exists"}, status=409)
+                )
+            if copied_from_id and photo_action == "keep":
+                live_copy = await (await db.execute(
+                    "SELECT photo_media_id,photo_sha256 FROM task_template_versions "
+                    "WHERE template_id=? AND id=?",
+                    (copied_from_id, copied_from_version_id),
+                )).fetchone()
+                if (
+                    not live_copy
+                    or live_copy["photo_media_id"] != content["photo_media_id"]
+                    or live_copy["photo_sha256"] != content["photo_sha256"]
+                ):
+                    await db.rollback()
+                    return await reject_after_template_upload(
+                        _json({"error": "copy_source_changed"}, status=409)
+                    )
+            if content["photo_media_id"]:
+                claimed = await db.execute(
+                    "UPDATE media_objects SET delete_after=NULL WHERE id=? "
+                    "AND state='ready' AND purpose='task_template_brief' AND sha256=?",
+                    (content["photo_media_id"], content["photo_sha256"]),
+                )
+                if claimed.rowcount != 1:
+                    await db.rollback()
+                    return await reject_after_template_upload(
+                        _json({"error": "media_not_ready"}, status=409)
+                    )
+            stamp = now_iso()
+            content_hash = _task_template_content_hash(content)
+            await db.execute(
+                "INSERT INTO task_templates "
+                "(id,key,origin,status,generation,current_version_id,created_by,created_at,"
+                "updated_by,updated_at) VALUES (?,?,'manual','active',1,?,?,?,?,?)",
+                (template_id, key, version_id, admin_id, stamp, admin_id, stamp),
+            )
+            await db.execute(
+                "INSERT INTO task_template_versions "
+                "(id,template_id,version_number,title,task_type,task_title,details,reward,"
+                "mode,evidence_policy,max_participants,budget_cap,photo_media_id,photo_sha256,"
+                "content_hash,created_by,created_at) VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (version_id, template_id, *(content[field] for field in
+                    TASK_TEMPLATE_CONTENT_FIELDS), content_hash, admin_id, stamp),
+            )
+            after_row = await _task_template_row_in_tx(db, template_id)
+            after = _task_template_public(after_row)
+            result = {
+                "ok": True, "template_id": template_id, "generation": 1,
+                "version_id": version_id, "version_number": 1,
+                "status": "active", "idempotent": False,
+                "copied_from_id": copied_from_id,
+                "copied_from_version_id": copied_from_version_id,
+            }
+            await db.execute(
+                "INSERT INTO task_template_events "
+                "(template_id,template_version_id,event_type,generation,actor_id,operation_id,"
+                "request_hash,note,before_json,after_json,result_json,created_at) "
+                "VALUES (?,?,'created',1,?,?,?,'',?,?,?,?)",
+                (template_id, version_id, admin_id, operation_id, request_hash,
+                 _canonical_json({}), _canonical_json(
+                     _task_template_audit_snapshot(after_row)
+                 ),
+                 _canonical_json(result), stamp),
+            )
+            await db.commit()
+    except Exception:
+        await _remove_saved_images([image] if image else [])
+        raise
+    return _json(result)
+
+
+async def api_admin_task_template_version_create(request):
+    admin_id, err = await _require_capability(request, "task.template.manage")
+    if err is not None:
+        return err
+    template_id = _task_template_route_id(request)
+    body = await _body(request)
+    operation_id = _operation_uuid(body.get("operation_id"))
+    expected_generation = _as_int(body.get("expected_generation"))
+    photo_action = str(body.get("photo_action") or "keep").strip().lower()
+    photo_data = body.get("photo_data") or ""
+    content, validation_error = _normalize_task_template_content(body)
+    if (
+        not template_id or not operation_id or expected_generation is None
+        or expected_generation < 1 or photo_action not in {"keep", "replace", "remove"}
+        or validation_error or (photo_action == "replace" and not photo_data)
+        or (photo_action != "replace" and photo_data)
+    ):
+        return _json({"error": validation_error or "template_version"}, status=400)
+    request_hash = _request_fingerprint({
+        "command": "version_create", "actor_id": int(admin_id),
+        "template_id": template_id, "expected_generation": expected_generation,
+        "content": content, "photo_action": photo_action,
+        "photo_input_sha256": hashlib.sha256(str(photo_data).encode("utf-8")).hexdigest()
+        if photo_data else "",
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, admin_id, "task.template.manage"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        replay, conflict = await _task_template_replay_in_tx(
+            db, operation_id, request_hash, admin_id,
+        )
+        await db.rollback()
+        if conflict:
+            return conflict
+        if replay:
+            return _json(replay)
+    image = None
+    if photo_action == "replace":
+        try:
+            image = await _save_image(
+                photo_data, purpose="task_template_brief",
+                upload_operation_id=f"template:{operation_id}:brief",
+                request_hash=request_hash, admin_id=admin_id,
+                required_capability="task.template.manage",
+            )
+        except PermissionError:
+            return _json({"error": "capability_revoked"}, status=403)
+        except ValueError as exc:
+            return _json({"error": "photo", "message": str(exc)}, status=400)
+        content["photo_media_id"], content["photo_sha256"] = image["media_id"], image["sha256"]
+
+    async def reject_after_template_upload(response):
+        if image:
+            await _remove_saved_images([image])
+        return response
+
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if not await _has_capability_in_tx(db, admin_id, "task.template.manage"):
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "capability_revoked"}, status=403)
+                )
+            replay, conflict = await _task_template_replay_in_tx(
+                db, operation_id, request_hash, admin_id,
+            )
+            if conflict:
+                await db.rollback()
+                return await reject_after_template_upload(conflict)
+            if replay:
+                await db.rollback()
+                return _json(replay)
+            current = await _task_template_row_in_tx(db, template_id)
+            if not current:
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "not_found"}, status=404)
+                )
+            if int(current["generation"]) != expected_generation:
+                await db.rollback()
+                return await reject_after_template_upload(_json({
+                    "error": "template_generation_conflict",
+                    "generation": int(current["generation"]),
+                }, status=409))
+            if photo_action == "keep":
+                content["photo_media_id"] = current["photo_media_id"]
+                content["photo_sha256"] = current["photo_sha256"]
+            if content["evidence_policy"] == "before_after" and not content["photo_media_id"]:
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "brief_required"}, status=400)
+                )
+            if content["photo_media_id"]:
+                media = await (await db.execute(
+                    "SELECT state,purpose,sha256 FROM media_objects WHERE id=?",
+                    (content["photo_media_id"],),
+                )).fetchone()
+                if (
+                    not media or media["state"] != "ready"
+                    or media["purpose"] != "task_template_brief"
+                    or media["sha256"] != content["photo_sha256"]
+                ):
+                    await db.rollback()
+                    return await reject_after_template_upload(
+                        _json({"error": "media_not_ready"}, status=409)
+                    )
+                await db.execute(
+                    "UPDATE media_objects SET delete_after=NULL WHERE id=?",
+                    (content["photo_media_id"],),
+                )
+            content_hash = _task_template_content_hash(content)
+            if content_hash == current["content_hash"]:
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "template_unchanged"}, status=409)
+                )
+            if not await _claim_operation_in_tx(
+                db, operation_id, "task_template_version_create", request_hash, admin_id,
+            ):
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "operation_conflict"}, status=409)
+                )
+            version_id = str(uuid.uuid4())
+            version_number = int(current["version_number"]) + 1
+            generation = expected_generation + 1
+            stamp = now_iso()
+            await db.execute(
+                "INSERT INTO task_template_versions "
+                "(id,template_id,version_number,title,task_type,task_title,details,reward,"
+                "mode,evidence_policy,max_participants,budget_cap,photo_media_id,photo_sha256,"
+                "content_hash,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (version_id, template_id, version_number,
+                 *(content[field] for field in TASK_TEMPLATE_CONTENT_FIELDS),
+                 content_hash, admin_id, stamp),
+            )
+            updated = await db.execute(
+                "UPDATE task_templates SET current_version_id=?,generation=?,updated_by=?,"
+                "updated_at=? WHERE id=? AND generation=?",
+                (version_id, generation, admin_id, stamp, template_id, expected_generation),
+            )
+            if updated.rowcount != 1:
+                await db.rollback()
+                return await reject_after_template_upload(
+                    _json({"error": "template_generation_conflict"}, status=409)
+                )
+            after_row = await _task_template_row_in_tx(db, template_id)
+            after = _task_template_public(after_row)
+            result = {
+                "ok": True, "template_id": template_id, "generation": generation,
+                "version_id": version_id, "version_number": version_number,
+                "status": after["status"], "idempotent": False,
+            }
+            await db.execute(
+                "INSERT INTO task_template_events "
+                "(template_id,template_version_id,event_type,generation,actor_id,operation_id,"
+                "request_hash,note,before_json,after_json,result_json,created_at) "
+                "VALUES (?,?,'version_created',?,?,?,?,?,?, ?,?,?)",
+                (template_id, version_id, generation, admin_id, operation_id, request_hash,
+                 " ".join(str(body.get("note") or "").split())[:300],
+                 _canonical_json(_task_template_audit_snapshot(current)),
+                 _canonical_json(_task_template_audit_snapshot(after_row)),
+                 _canonical_json(result), stamp),
+            )
+            await db.commit()
+    except Exception:
+        await _remove_saved_images([image] if image else [])
+        raise
+    return _json(result)
+
+
+async def api_admin_task_template_status(request):
+    admin_id, err = await _require_capability(request, "task.template.manage")
+    if err is not None:
+        return err
+    template_id = _task_template_route_id(request)
+    body = await _body(request)
+    operation_id = _operation_uuid(body.get("operation_id"))
+    expected_generation = _as_int(body.get("expected_generation"))
+    desired = str(body.get("status") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    if (
+        not template_id or not operation_id or expected_generation is None
+        or expected_generation < 1 or desired not in {"active", "archived"}
+        or len(note) < 3
+    ):
+        return _json({"error": "template_status"}, status=400)
+    request_hash = _request_fingerprint({
+        "command": "status_change", "actor_id": int(admin_id),
+        "template_id": template_id, "expected_generation": expected_generation,
+        "status": desired, "note": note,
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, admin_id, "task.template.manage"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        replay, conflict = await _task_template_replay_in_tx(
+            db, operation_id, request_hash, admin_id,
+        )
+        if conflict:
+            await db.rollback()
+            return conflict
+        if replay:
+            await db.rollback()
+            return _json(replay)
+        current = await _task_template_row_in_tx(db, template_id)
+        if not current:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if int(current["generation"]) != expected_generation:
+            await db.rollback()
+            return _json({"error": "template_generation_conflict",
+                          "generation": int(current["generation"])}, status=409)
+        if current["status"] == desired:
+            await db.rollback()
+            return _json({"error": "template_status_unchanged"}, status=409)
+        if desired == "active" and current["photo_media_id"]:
+            media = await (await db.execute(
+                "SELECT state,purpose,sha256 FROM media_objects WHERE id=?",
+                (current["photo_media_id"],),
+            )).fetchone()
+            if (
+                not media or media["state"] != "ready"
+                or media["purpose"] != "task_template_brief"
+                or media["sha256"] != current["photo_sha256"]
+            ):
+                await db.rollback()
+                return _json({"error": "media_not_ready"}, status=409)
+        if not await _claim_operation_in_tx(
+            db, operation_id, "task_template_status_change", request_hash, admin_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        generation, stamp = expected_generation + 1, now_iso()
+        archived_by = admin_id if desired == "archived" else None
+        archived_at = stamp if desired == "archived" else None
+        updated = await db.execute(
+            "UPDATE task_templates SET status=?,generation=?,updated_by=?,updated_at=?,"
+            "archived_by=?,archived_at=? WHERE id=? AND generation=?",
+            (desired, generation, admin_id, stamp, archived_by, archived_at,
+             template_id, expected_generation),
+        )
+        if updated.rowcount != 1:
+            await db.rollback()
+            return _json({"error": "template_generation_conflict"}, status=409)
+        after_row = await _task_template_row_in_tx(db, template_id)
+        after = _task_template_public(after_row)
+        result = {
+            "ok": True, "template_id": template_id, "generation": generation,
+            "version_id": current["version_id"],
+            "version_number": int(current["version_number"]),
+            "status": desired, "idempotent": False,
+        }
+        await db.execute(
+            "INSERT INTO task_template_events "
+            "(template_id,template_version_id,event_type,generation,actor_id,operation_id,"
+            "request_hash,note,before_json,after_json,result_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (template_id, current["version_id"],
+             "archived" if desired == "archived" else "activated",
+             generation, admin_id, operation_id, request_hash, note,
+             _canonical_json(_task_template_audit_snapshot(current)),
+             _canonical_json(_task_template_audit_snapshot(after_row)),
+             _canonical_json(result), stamp),
+        )
+        await db.commit()
+    return _json(result)
+
+
 async def api_admin_task_create(request):
     admin_id, err = await _require_capability(request, "task.create")
     if err is not None:
@@ -7671,6 +8680,48 @@ async def api_admin_task_create(request):
             "error": "operation_id",
             "message": "Для безопасного создания задания нужен operation_id в формате UUID.",
         }, status=400)
+    template_id = _task_template_uuid(body.get("template_id")) if body.get("template_id") else None
+    template_version_id = (
+        _task_template_uuid(body.get("template_version_id"))
+        if body.get("template_version_id") else None
+    )
+    if bool(template_id) != bool(template_version_id):
+        return _json({"error": "template_identity"}, status=400)
+    template_row = None
+    template_photo_action = "replace" if body.get("photo_data") else "inherit"
+    if template_id:
+        template_photo_action = str(
+            body.get("template_photo_action") or body.get("photo_action")
+            or template_photo_action
+        ).strip().lower()
+        if template_photo_action not in {"inherit", "replace", "remove"}:
+            return _json({"error": "photo_action"}, status=400)
+        if template_photo_action == "replace" and not body.get("photo_data"):
+            return _json({"error": "photo"}, status=400)
+        if template_photo_action != "replace" and body.get("photo_data"):
+            return _json({"error": "photo_action"}, status=400)
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            template_row = await (await db.execute(
+                "SELECT t.status,t.current_version_id,t.generation,v.*,"
+                "m.object_key AS photo_object_key,m.state AS photo_state,"
+                "m.purpose AS photo_purpose,m.sha256 AS media_sha256 "
+                "FROM task_templates t JOIN task_template_versions v "
+                "ON v.template_id=t.id LEFT JOIN media_objects m "
+                "ON m.id=v.photo_media_id WHERE t.id=? AND v.id=?",
+                (template_id, template_version_id),
+            )).fetchone()
+        if not template_row:
+            return _json({"error": "template_not_found"}, status=404)
+        body = dict(body)
+        body.update({
+            "type": template_row["task_type"], "title": template_row["task_title"],
+            "details": template_row["details"], "reward": template_row["reward"],
+            "repeatable": template_row["mode"] == "all",
+            "evidence_policy": template_row["evidence_policy"],
+            "max_participants": template_row["max_participants"],
+            "budget_cap": template_row["budget_cap"],
+        })
     ttype = body.get("type")
     if ttype not in TASK_TYPES:
         return _json({"error": "type"}, status=400)
@@ -7702,19 +8753,11 @@ async def api_admin_task_create(request):
             assigned_to = int(assigned_to)
         except (TypeError, ValueError):
             return _json({"error": "assignee"}, status=400)
-        assignee = await get_member(assigned_to)
-        if not assignee or assignee["status"] != "approved" or assignee["role"] not in (
-            "helper", "employee", "admin"
-        ):
-            return _json({
-                "error": "assignee",
-                "message": "Можно назначить только одобренного участника.",
-            }, status=400)
-        if _city_key(assignee.get("city")) != _city_key(city):
-            return _json({
-                "error": "assignee_city",
-                "message": "Город участника не совпадает с городом задания.",
-            }, status=400)
+    if template_row and template_row["mode"] == "personal" and assigned_to is None:
+        return _json({
+            "error": "assignee",
+            "message": "Персональный шаблон требует исполнителя.",
+        }, status=400)
     repeatable = bool(body.get("repeatable"))
     if repeatable and assigned_to is not None:
         return _json({
@@ -7727,7 +8770,13 @@ async def api_admin_task_create(request):
             "error": "evidence_policy",
             "message": "Неизвестная политика фотоотчёта.",
         }, status=400)
-    if evidence_policy == "before_after" and not body.get("photo_data"):
+    if (
+        evidence_policy == "before_after" and not body.get("photo_data")
+        and not (
+            template_row and template_photo_action == "inherit"
+            and template_row["photo_media_id"]
+        )
+    ):
         return _json({
             "error": "brief_required",
             "message": "Для отчёта «до/после» прикрепи исходное фото точки.",
@@ -7779,19 +8828,24 @@ async def api_admin_task_create(request):
         "max_participants": max_participants, "budget_cap": budget_cap,
         "slot_start": slot_start, "slot_end": slot_end,
         "lat": lat, "lng": lng, "announce": announce,
+        "template_id": template_id, "template_version_id": template_version_id,
+        "template_photo_action": template_photo_action if template_id else None,
         "photo_sha256": (
             hashlib.sha256(str(photo_data).encode("utf-8")).hexdigest()
             if photo_data else ""
         ),
     })
     brief_image = None
+    uploaded_brief_image = None
     photo_file = None
     announcement_status = "not_requested"
     announce_error = ""
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
         existing = await (await db.execute(
-            "SELECT id,created_by,repeatable,photo_file,photo_media_id,request_hash "
+            "SELECT id,created_by,repeatable,photo_file,photo_media_id,request_hash,"
+            "template_id,template_version_id "
             "FROM tasks WHERE operation_id=?",
             (operation_id,),
         )).fetchone()
@@ -7800,21 +8854,58 @@ async def api_admin_task_create(request):
                 int(existing["created_by"]) != int(admin_id)
                 or existing["request_hash"] != request_hash
             ):
+                await db.rollback()
                 return _json({
                     "error": "operation_conflict",
                     "message": "Этот operation_id уже использован для другого задания.",
                 }, status=409)
+            if not await _claim_operation_in_tx(
+                db, operation_id, "task_create", request_hash, admin_id,
+            ):
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
             delivery = await (await db.execute(
                 "SELECT status FROM task_outbox WHERE event_key=?",
                 (f"task:{int(existing['id'])}:announcement",),
             )).fetchone()
+            await db.commit()
             return _json({
                 "ok": True, "task_id": int(existing["id"]),
                 "repeatable": bool(existing["repeatable"]),
                 "has_photo": bool(existing["photo_media_id"] or existing["photo_file"]),
                 "operation_id": operation_id, "idempotent": True,
                 "announcement_status": delivery[0] if delivery else "not_requested",
+                "template_id": existing["template_id"],
+                "template_version_id": existing["template_version_id"],
             })
+        await db.rollback()
+    # Mutable member state is deliberately checked only after committed-command
+    # replay. A lost response must remain replayable even if the assignee is
+    # later blocked, changes role, or moves to another city.
+    if assigned_to is not None:
+        assignee = await get_member(assigned_to)
+        if not assignee or assignee["status"] != "approved" or assignee["role"] not in (
+            "helper", "employee", "admin"
+        ):
+            return _json({
+                "error": "assignee",
+                "message": "Можно назначить только одобренного участника.",
+            }, status=400)
+        if _city_key(assignee.get("city")) != _city_key(city):
+            return _json({
+                "error": "assignee_city",
+                "message": "Город участника не совпадает с городом задания.",
+            }, status=400)
+    if template_row and (
+        template_row["status"] != "active"
+        or template_row["current_version_id"] != template_version_id
+    ):
+        return _json({
+            "error": "template_archived" if template_row["status"] != "active"
+            else "template_version_stale",
+            "current_version_id": template_row["current_version_id"],
+            "generation": int(template_row["generation"]),
+        }, status=409)
     # Time-dependent validation applies only to a new command. A committed
     # operation must remain replayable after its deadline when the first HTTP
     # response was lost.
@@ -7832,38 +8923,70 @@ async def api_admin_task_create(request):
                 admin_id=admin_id,
                 required_capability="task.create",
             )
+            uploaded_brief_image = brief_image
         except PermissionError:
             return _json({"error": "admin_revoked"}, status=403)
         except ValueError as exc:
             status = 409 if "upload operation" in str(exc) else 400
             return _json({"error": "photo", "message": str(exc)}, status=status)
         photo_file = brief_image["photo_file"]
+    elif template_row and template_photo_action == "inherit" and template_row["photo_media_id"]:
+        if (
+            template_row["photo_state"] != "ready"
+            or template_row["photo_purpose"] != "task_template_brief"
+            or template_row["media_sha256"] != template_row["photo_sha256"]
+        ):
+            return _json({"error": "media_not_ready"}, status=409)
+        brief_image = {
+            "media_id": template_row["photo_media_id"],
+            "photo_file": template_row["photo_object_key"],
+            "sha256": template_row["photo_sha256"],
+        }
+        photo_file = brief_image["photo_file"]
+    if evidence_policy == "before_after" and not brief_image:
+        return _json({"error": "brief_required"}, status=400)
+
+    async def reject_after_task_upload(response):
+        if uploaded_brief_image:
+            await _remove_saved_images([uploaded_brief_image])
+        return response
+
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             if not await _has_capability_in_tx(db, admin_id, "task.create"):
                 await db.rollback()
-                return _json({"error": "admin_revoked"}, status=403)
+                return await reject_after_task_upload(
+                    _json({"error": "admin_revoked"}, status=403)
+                )
             existing = await (await db.execute(
                 "SELECT id, created_by, repeatable, photo_file, request_hash FROM tasks "
                 "WHERE operation_id=?",
                 (operation_id,),
             )).fetchone()
             if existing:
-                await db.rollback()
                 if (
                     int(existing["created_by"]) != int(admin_id)
                     or existing["request_hash"] != request_hash
                 ):
-                    return _json({
+                    await db.rollback()
+                    return await reject_after_task_upload(_json({
                         "error": "operation_conflict",
                         "message": "Этот operation_id уже использован для другого задания.",
-                    }, status=409)
+                    }, status=409))
+                if not await _claim_operation_in_tx(
+                    db, operation_id, "task_create", request_hash, admin_id,
+                ):
+                    await db.rollback()
+                    return await reject_after_task_upload(
+                        _json({"error": "operation_conflict"}, status=409)
+                    )
                 delivery = await (await db.execute(
                     "SELECT status FROM task_outbox WHERE event_key=?",
                     (f"task:{int(existing['id'])}:announcement",),
                 )).fetchone()
+                await db.commit()
                 return _json({
                     "ok": True,
                     "task_id": int(existing["id"]),
@@ -7872,10 +8995,25 @@ async def api_admin_task_create(request):
                     "operation_id": operation_id,
                     "idempotent": True,
                     "announcement_status": delivery[0] if delivery else "not_requested",
+                    "template_id": template_id,
+                    "template_version_id": template_version_id,
                 })
+            if template_id:
+                live_template = await (await db.execute(
+                    "SELECT status,current_version_id FROM task_templates WHERE id=?",
+                    (template_id,),
+                )).fetchone()
+                if (
+                    not live_template or live_template["status"] != "active"
+                    or live_template["current_version_id"] != template_version_id
+                ):
+                    await db.rollback()
+                    return await reject_after_task_upload(
+                        _json({"error": "template_state_changed"}, status=409)
+                    )
             if assigned_to is not None:
                 current_assignee = await (await db.execute(
-                    "SELECT status,role FROM members WHERE user_id=?",
+                    "SELECT status,role,city FROM members WHERE user_id=?",
                     (assigned_to,),
                 )).fetchone()
                 if (
@@ -7884,10 +9022,16 @@ async def api_admin_task_create(request):
                     or current_assignee["role"] not in ("helper", "employee", "admin")
                 ):
                     await db.rollback()
-                    return _json({
+                    return await reject_after_task_upload(_json({
                         "error": "assignee_changed",
                         "message": "Участник больше недоступен для назначения. Обнови список.",
-                    }, status=409)
+                    }, status=409))
+                if _city_key(current_assignee["city"]) != _city_key(city):
+                    await db.rollback()
+                    return await reject_after_task_upload(_json({
+                        "error": "assignee_city",
+                        "message": "Город участника изменился. Обнови список исполнителей.",
+                    }, status=409))
                 if (
                     current_assignee["role"] == "admin"
                     and not await _admin_task_has_independent_review_path_in_tx(
@@ -7895,37 +9039,53 @@ async def api_admin_task_create(request):
                     )
                 ):
                     await db.rollback()
-                    return _json({
+                    return await reject_after_task_upload(_json({
                         "error": "admin_task_independence",
                         "message": (
                             "Нельзя назначить задание ответственному: нужны два других "
                             "действующих администратора для независимой проверки и возможного спора."
                         ),
-                    }, status=409)
-            if brief_image:
-                media_claim = await db.execute(
-                    "UPDATE media_objects SET delete_after=NULL "
-                    "WHERE id=? AND state='ready'",
-                    (brief_image["media_id"],),
+                    }, status=409))
+            if not await _claim_operation_in_tx(
+                db, operation_id, "task_create", request_hash, admin_id,
+            ):
+                await db.rollback()
+                return await reject_after_task_upload(
+                    _json({"error": "operation_conflict"}, status=409)
                 )
+            if brief_image:
+                if uploaded_brief_image:
+                    media_claim = await db.execute(
+                        "UPDATE media_objects SET delete_after=NULL "
+                        "WHERE id=? AND state='ready' AND purpose='task_brief' "
+                        "AND sha256=?",
+                        (brief_image["media_id"], brief_image["sha256"]),
+                    )
+                else:
+                    media_claim = await db.execute(
+                        "UPDATE media_objects SET delete_after=NULL "
+                        "WHERE id=? AND state='ready' "
+                        "AND purpose='task_template_brief' AND sha256=?",
+                        (brief_image["media_id"], brief_image["sha256"]),
+                    )
                 if media_claim.rowcount != 1:
                     await db.rollback()
-                    return _json({
+                    return await reject_after_task_upload(_json({
                         "error": "media_not_ready",
                         "message": "Фотография ещё не готова или уже удаляется. Добавь её заново.",
-                    }, status=409)
+                    }, status=409))
             cur = await db.execute(
                 "INSERT INTO tasks (type, title, details, lat, lng, address, city, reward, "
                 "status, created_by, created_at, assigned_to, slot_start, slot_end, "
                 "repeatable, photo_file,photo_media_id, operation_id, request_hash, evidence_policy, "
-                "max_participants, budget_cap) "
-                "VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "max_participants, budget_cap,template_id,template_version_id) "
+                "VALUES (?,?,?,?,?,?,?,?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ttype, title, details, lat, lng, address, city, reward, admin_id,
                     now_iso(), assigned_to, slot_start, slot_end, int(repeatable), photo_file,
                     brief_image["media_id"] if brief_image else None,
                     operation_id, request_hash, evidence_policy,
-                    max_participants, budget_cap,
+                    max_participants, budget_cap, template_id, template_version_id,
                 ))
             tid = cur.lastrowid
             if brief_image:
@@ -7996,7 +9156,9 @@ async def api_admin_task_create(request):
                     announce_error = "Приватная OPS-группа не настроена"
             await db.commit()
     except Exception:
-        await _remove_saved_images([brief_image] if brief_image else [])
+        await _remove_saved_images(
+            [uploaded_brief_image] if uploaded_brief_image else []
+        )
         raise
     return _json({
         "ok": True,
@@ -8012,6 +9174,8 @@ async def api_admin_task_create(request):
         "announced": False,
         "announcement_status": announcement_status,
         "announce_error": announce_error,
+        "template_id": template_id,
+        "template_version_id": template_version_id,
     })
 
 
@@ -11414,7 +12578,19 @@ async def rate_limit_middleware(request, handler):
 _HEAVY_API_PATHS = frozenset({
     "/api/tasks/complete",
     "/api/admin/task/create",
+    "/api/admin/task-templates",
 })
+_TASK_TEMPLATE_VERSION_WRITE_RE = re.compile(
+    r"^/api/admin/task-templates/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/versions$"
+)
+
+
+def _is_heavy_api_request(request):
+    return request.method not in {"GET", "HEAD", "OPTIONS"} and (
+        request.path in _HEAVY_API_PATHS
+        or bool(_TASK_TEMPLATE_VERSION_WRITE_RE.fullmatch(request.path))
+    )
 
 
 def _capacity_response(kind):
@@ -11440,7 +12616,7 @@ async def capacity_middleware(request, handler):
     limit = API_READ_INFLIGHT_MAX if read else API_WRITE_INFLIGHT_MAX
     if _api_capacity[f"active_{lane}"] >= limit:
         return _capacity_response(lane)
-    heavy = not read and request.path in _HEAVY_API_PATHS
+    heavy = _is_heavy_api_request(request)
     if heavy and _api_capacity["active_heavy"] >= API_HEAVY_INFLIGHT_MAX:
         return _capacity_response("heavy")
     # No await occurs between checking and reserving. aiohttp runs one event
@@ -11491,6 +12667,23 @@ async def start_api_server():
         )
         app.router.add_post("/api/admin/decide", api_admin_decide)
         app.router.add_post("/api/admin/task/create", api_admin_task_create)
+        app.router.add_get(
+            "/api/admin/task-templates", api_admin_task_templates_list,
+        )
+        app.router.add_get(
+            "/api/admin/task-templates/{template_id}", api_admin_task_template_get,
+        )
+        app.router.add_post(
+            "/api/admin/task-templates", api_admin_task_template_create,
+        )
+        app.router.add_post(
+            "/api/admin/task-templates/{template_id}/versions",
+            api_admin_task_template_version_create,
+        )
+        app.router.add_post(
+            "/api/admin/task-templates/{template_id}/status",
+            api_admin_task_template_status,
+        )
         app.router.add_post(
             "/api/admin/task/announcement/retry",
             api_admin_task_announcement_retry,

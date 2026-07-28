@@ -325,7 +325,7 @@ production `python scripts/telegram_preflight.py` и
 | v2.3.0 | светлая и тёмная тема с сохранением выбора, новый графический логотип |
 | v2.9.0 | профессиональный pilot-контур: приватный OPS, фото и шаблоны, поиск и теги, payout lease, durable Telegram ingress/outbox, backup/restore, CI и миграционный harness PostgreSQL |
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
-| v2.10.0 candidate | анкета без телефона, capability RBAC с preset-ролями и maker-checker, полное сторно ручных начислений, управляемые Telegram join requests, bounded API/media/Telegram admission, автоматизированный staging load gate, обязательная privacy policy, schema 298, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
+| v2.10.0 candidate | анкета без телефона, capability RBAC с preset-ролями и maker-checker, versioned task templates с immutable audit и provenance, управляемые Telegram join requests, bounded API/media/Telegram admission, автоматизированный staging load gate, обязательная privacy policy, schema 299, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
 
 ---
 

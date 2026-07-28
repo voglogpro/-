@@ -217,6 +217,7 @@ p.sub{margin:0;color:var(--ink-2);font-size:14px}
 }
 .tinput::placeholder{color:var(--placeholder)}
 .tinput:focus{outline:none;box-shadow:inset 0 0 0 1.5px var(--brand)}
+.tinput:disabled{color:var(--ink-2);background:var(--surface-2);opacity:1;cursor:not-allowed}
 textarea.tinput{resize:none;line-height:1.45}
 select.tinput{appearance:none;background-image:
   linear-gradient(45deg,transparent 50%,var(--ink-2) 50%),
@@ -498,6 +499,18 @@ select.tinput{appearance:none;background-image:
 .wizard-actions{display:flex;gap:8px;position:sticky;bottom:0;padding-top:12px;
   background:linear-gradient(transparent,var(--surface) 12px)}
 .wizard-actions .btn{flex:1}
+.task-modebar{margin-bottom:14px}
+.template-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.template-toolbar h2{margin:0}
+.template-list{display:grid;gap:10px}
+.template-card{display:grid;grid-template-columns:84px minmax(0,1fr);gap:12px;padding:12px;
+  border-radius:17px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line)}
+.template-card.no-photo{grid-template-columns:1fr}
+.template-card img{width:84px;height:84px;object-fit:cover;border-radius:13px;background:var(--surface-2)}
+.template-card .acts{grid-column:1/-1;margin-top:0}
+.template-card .acts .mini,.template-card .acts .btn{min-height:44px}
+.template-photo-current{width:100%;max-height:220px;object-fit:contain;border-radius:15px;background:var(--surface-2);margin-bottom:8px}
+.template-status{min-height:20px;color:var(--ink-2);font-size:14px;margin-bottom:9px}
 .preview-block{padding:13px;border-radius:16px;background:var(--surface);margin-bottom:10px}
 .preview-block b{display:block;margin-bottom:4px}
 .evidence{margin-top:12px;padding:12px;border-radius:16px;background:var(--surface)}
@@ -529,6 +542,11 @@ select.tinput{appearance:none;background-image:
 
 @media (max-width:420px){
   .two,.searchtools{grid-template-columns:1fr}
+  .template-toolbar{align-items:stretch;flex-direction:column}
+  .template-card{grid-template-columns:70px minmax(0,1fr)}
+  .template-card img{width:70px;height:70px}
+  .template-card .acts{display:grid;grid-template-columns:1fr 1fr}
+  .template-card .acts>*{width:100%}
 }
 @media (max-width:360px){
   :root{--pad:12px;--r:20px}
@@ -799,6 +817,11 @@ select.tinput{appearance:none;background-image:
     </div>
 
     <div id="adSubCreate" class="card hidden">
+      <div class="seg task-modebar" role="group" aria-label="Работа с заданиями">
+        <button data-taskmode="taskCreateMode" class="on" aria-pressed="true">Создать</button>
+        <button data-taskmode="taskTemplateMode" data-cap-any="task.template.manage" aria-pressed="false">Шаблоны</button>
+      </div>
+      <div id="taskCreateMode">
       <div class="eyebrow"><b></b>Новое задание · <span id="ntStepLabel">шаг 1 из 3</span></div>
       <div class="wizard-progress" aria-hidden="true"><i class="on"></i><i></i><i></i></div>
 
@@ -807,6 +830,16 @@ select.tinput{appearance:none;background-image:
         <p class="sub" style="margin-bottom:14px">Шаблон заполнит основные поля сразу — останется проверить детали.</p>
         <div class="field"><label for="ntTemplate">Шаблон задания</label>
           <select class="tinput" id="ntTemplate"></select></div>
+        <div class="notice hidden" id="ntTemplateLockHint" role="status">
+          Тип, текст, награда и правила отчёта заданы версией шаблона. Чтобы изменить их, выбери «Без шаблона».
+        </div>
+        <div class="notice hidden" id="ntTemplateRecovery" role="alert" tabindex="-1">
+          <div id="ntTemplateRecoveryText"></div>
+          <div class="acts">
+            <button class="btn btn-volt sm" id="ntTemplateReapply" type="button">Применить обновлённый шаблон</button>
+            <button class="mini" id="ntTemplateDetach" type="button">Продолжить без шаблона</button>
+          </div>
+        </div>
         <button class="hidden" id="ntTemplateApply" type="button" aria-hidden="true" tabindex="-1">Применить</button>
         <div class="field"><label for="ntType">Тип</label><select class="tinput" id="ntType"></select></div>
         <div class="field"><label for="ntTitle">Заголовок</label>
@@ -846,7 +879,7 @@ select.tinput{appearance:none;background-image:
             <select class="tinput" id="ntEvidence">
               <option value="after_required">Фото результата обязательно</option>
               <option value="before_and_after_required">Исходное фото + фото результата</option>
-              <option value="none">Достаточно комментария</option>
+              <option value="comment_only">Достаточно комментария</option>
             </select></div>
           <div class="field" id="ntMaxParticipantsField"><label for="ntMaxParticipants">Максимум исполнителей</label>
             <input class="tinput num" id="ntMaxParticipants" inputmode="numeric" value="1"></div>
@@ -879,6 +912,21 @@ select.tinput{appearance:none;background-image:
       <div class="wizard-actions">
         <button class="mini hidden" id="ntBack" type="button">Назад</button>
         <button class="btn btn-volt" id="ntCreate" data-cap-any="task.create" type="button">Продолжить</button>
+      </div>
+      </div>
+      <div id="taskTemplateMode" class="hidden">
+        <div class="template-toolbar">
+          <div><div class="eyebrow"><b></b>Библиотека шаблонов</div><h2>Повторяющиеся задания</h2></div>
+          <button class="btn btn-volt sm" id="tplNew" data-cap-any="task.template.manage" type="button">＋ Новый шаблон</button>
+        </div>
+        <div class="seg" role="group" aria-label="Статус шаблонов" style="margin-bottom:10px">
+          <button data-tplstatus="active" class="on" aria-pressed="true">Активные</button>
+          <button data-tplstatus="archived" aria-pressed="false">Архив</button>
+        </div>
+        <div class="field"><label for="tplSearch">Найти шаблон</label>
+          <input class="tinput" id="tplSearch" type="search" autocomplete="off" placeholder="Название или текст задания"></div>
+        <div id="tplLibraryStatus" class="template-status" role="status" aria-live="polite"></div>
+        <div id="tplLibrary" class="template-list" aria-live="polite"><div class="empty">Загружаю…</div></div>
       </div>
     </div>
 
@@ -1002,6 +1050,45 @@ select.tinput{appearance:none;background-image:
     <button class="mini" id="ntPreviewBack" type="button" style="flex:1">Вернуться к форме</button>
     <button class="btn btn-volt sm" id="ntPublish" type="button">Опубликовать</button>
   </div>
+</div></div>
+
+<div id="templateEditorSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="tplEditorTitle"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="tplEditorTitle">Новый шаблон</h3>
+  <p class="lead" id="tplEditorLead">Сохрани повторяющиеся настройки. Перед публикацией их всегда можно изменить.</p>
+  <div class="field"><label for="tplName">Название в библиотеке</label>
+    <input class="tinput" id="tplName" maxlength="120" placeholder="Парковка у торгового центра"></div>
+  <div class="field"><label for="tplTaskTitle">Заголовок задания</label>
+    <input class="tinput" id="tplTaskTitle" maxlength="120" placeholder="Поправить парковку байков"></div>
+  <div class="field"><label for="tplType">Тип</label><select class="tinput" id="tplType"></select></div>
+  <div class="field"><label for="tplDetails">Что сделать</label>
+    <textarea class="tinput" id="tplDetails" rows="3" maxlength="500"></textarea></div>
+  <div class="two">
+    <div class="field"><label for="tplReward">Награда одному, ⚡</label><input class="tinput num" id="tplReward" inputmode="numeric"></div>
+    <div class="field"><label for="tplMode">Кто выполняет</label><select class="tinput" id="tplMode"><option value="open">Первый свободный</option><option value="personal">Назначенный сотрудник</option><option value="all">Все участники</option></select></div>
+  </div>
+  <div class="two">
+    <div class="field"><label for="tplEvidence">Подтверждение</label><select class="tinput" id="tplEvidence"><option value="after_required">Фото результата</option><option value="before_and_after_required">Фото до и после</option><option value="comment_only">Комментарий</option></select></div>
+    <div class="field"><label for="tplMaxParticipants">Максимум исполнителей</label><input class="tinput num" id="tplMaxParticipants" inputmode="numeric" value="1"></div>
+  </div>
+  <div class="field"><label for="tplBudgetCap">Лимит бюджета, ⚡</label><input class="tinput num" id="tplBudgetCap" inputmode="numeric"></div>
+  <div class="field"><label id="tplPhotoLabel" for="tplPhoto">Фото в шаблоне — необязательно</label>
+    <img id="tplPhotoCurrent" class="template-photo-current hidden" alt="Фото шаблона задания">
+    <label class="photo-pick" for="tplPhoto"><span class="tx" id="tplPhotoText"><b>📷 Выбрать фото</b><br>JPG, PNG или WebP</span>
+      <input id="tplPhoto" type="file" aria-labelledby="tplPhotoLabel tplPhotoText" accept="image/jpeg,image/png,image/webp"></label>
+    <button class="mini hidden" id="tplPhotoRemove" type="button" style="margin-top:8px">Убрать фото из шаблона</button>
+  </div>
+  <div class="field-error" id="tplEditorError" role="alert"></div>
+  <div class="acts"><button class="mini" id="tplEditorCancel" type="button" style="flex:1">Отмена</button>
+    <button class="mini hidden" id="tplEditorCopy" type="button">Сохранить как копию</button>
+    <button class="btn btn-volt sm" id="tplEditorSave" type="button">Сохранить шаблон</button></div>
+</div></div>
+
+<div id="templateConfirmSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="tplConfirmTitle"><div class="inner">
+  <div class="grab"></div><h3 id="tplConfirmTitle">Подтвердить действие</h3>
+  <p class="lead" id="tplConfirmLead"></p>
+  <div class="acts"><button class="mini" id="tplConfirmCancel" type="button" style="flex:1">Отмена</button>
+    <button class="btn btn-volt sm" id="tplConfirmOk" type="button">Продолжить</button></div>
 </div></div>
 
 <!-- отдельное подтверждение денежного решения по фотоотчёту -->
@@ -1195,6 +1282,7 @@ try{
 }catch(e){}
 
 let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
+let TASK_TEMPLATE_OVERVIEW=[], TASK_TEMPLATE_LIBRARY=[], TASK_TEMPLATE_STATUS='active';
 let STAFF_CAPABILITIES = new Set(), STAFF_PRESETS = [], STAFF_ACCESS_CONFIGURED = false;
 const STAFF_SECTIONS = {
   queue: [
@@ -1549,6 +1637,18 @@ function activateAdminSubsection(btn,withEffects=true){
 document.querySelectorAll('[data-asub]').forEach(btn=>{
   btn.onclick=()=>activateAdminSubsection(btn,true);
 });
+function activateTaskMode(button,withEffects=true){
+  if(!button||button.classList.contains('hidden')) return;
+  document.querySelectorAll('[data-taskmode]').forEach(item=>{
+    const selected=item===button;
+    item.classList.toggle('on',selected);
+    item.setAttribute('aria-pressed',selected?'true':'false');
+  });
+  ['taskCreateMode','taskTemplateMode'].forEach(id=>$(id).classList.toggle('hidden',id!==button.dataset.taskmode));
+  if(button.dataset.taskmode==='taskTemplateMode'&&hasCap('task.template.manage')) loadTemplateLibrary(TASK_TEMPLATE_STATUS);
+  if(withEffects){ buzz('tap'); window.scrollTo(0,0); }
+}
+document.querySelectorAll('[data-taskmode]').forEach(button=>button.onclick=()=>activateTaskMode(button,true));
 
 /* ── состояние ─────────────────────────────────────────────── */
 function openFallbackBot(){
@@ -2768,11 +2868,7 @@ async function loadAdmin(){
       ? workers.map(m=>'<option value="'+m.user_id+'">'+esc(m.name||('ID '+m.user_id))+'</option>').join('')
       : '<option value="">Нет одобренных участников</option>';
 
-    const templates = d.task_templates || [];
-    const selectedTemplate = $('ntTemplate').value;
-    $('ntTemplate').innerHTML = '<option value="">Без шаблона</option>'+templates.map(t=>
-      '<option value="'+esc(t.key)+'">'+esc(t.title)+'</option>').join('');
-    if(templates.some(t=>t.key===selectedTemplate)) $('ntTemplate').value=selectedTemplate;
+    syncTaskTemplateSelector(d.task_templates||[]);
 
     renderGrantedList(d.granted || []);
     renderManualGrantHistory(d.manual_grants || []);
@@ -3263,11 +3359,313 @@ document.querySelectorAll('#roleSheet .pick').forEach(p=>{
   };
 });
 
-/* ── шаблоны и фотография задания ─────────────────────────── */
-function applyTaskTemplate(quiet){
-  const template = ((ADMIN && ADMIN.task_templates)||[])
-    .find(t=>t.key===$('ntTemplate').value);
-  if(!template) return;
+/* ── библиотека шаблонов ──────────────────────────────────── */
+let TEMPLATE_CONFIRM_RESOLVE=null;
+function confirmTemplateAction(options){
+  $('tplConfirmTitle').textContent=options.title||'Подтвердить действие';
+  $('tplConfirmLead').textContent=options.lead||'';
+  $('tplConfirmOk').textContent=options.okLabel||'Продолжить';
+  $('templateConfirmSheet').classList.remove('hidden');
+  setTimeout(()=>$('tplConfirmOk').focus(),80);
+  return new Promise(resolve=>{ TEMPLATE_CONFIRM_RESOLVE=resolve; });
+}
+function closeTemplateConfirm(result){
+  $('templateConfirmSheet').classList.add('hidden');
+  const resolve=TEMPLATE_CONFIRM_RESOLVE; TEMPLATE_CONFIRM_RESOLVE=null;
+  if(resolve) resolve(result);
+}
+$('tplConfirmCancel').onclick=()=>closeTemplateConfirm(false);
+$('tplConfirmOk').onclick=()=>closeTemplateConfirm(true);
+$('templateConfirmSheet').onclick=e=>{ if(e.target===$('templateConfirmSheet')) closeTemplateConfirm(false); };
+
+function templateIdentity(template){ return String(template&&((template.id!=null&&template.id)||template.key)||''); }
+function sortedTaskTemplates(templates){
+  return (templates||[]).slice().sort((a,b)=>{
+    const left=String(a.title||a.task_title||'');
+    const right=String(b.title||b.task_title||'');
+    return left.localeCompare(right,'ru',{sensitivity:'base',numeric:true})||
+      templateIdentity(a).localeCompare(templateIdentity(b));
+  });
+}
+function syncTaskTemplateSelector(templates){
+  TASK_TEMPLATE_OVERVIEW=sortedTaskTemplates(templates);
+  const selected=$('ntTemplate').value;
+  $('ntTemplate').innerHTML='<option value="">Без шаблона</option>'+TASK_TEMPLATE_OVERVIEW.map(template=>
+    '<option value="'+esc(templateIdentity(template))+'">'+esc(template.title||template.task_title||'Без названия')+'</option>').join('');
+  if(TASK_TEMPLATE_OVERVIEW.some(template=>templateIdentity(template)===selected)) $('ntTemplate').value=selected;
+}
+function unwrapTemplate(data){ return (data&&data.template)||(data&&data.item)||data||{}; }
+async function fetchTaskTemplate(template){
+  if(!template||template.id==null) return template||{};
+  return unwrapTemplate(await api('/api/admin/task-templates/'+encodeURIComponent(String(template.id))));
+}
+let TEMPLATE_EDITOR={mode:'create',id:null,generation:0,photoAction:'remove',photoData:'',photoUrl:'',sourceId:null,sourceVersionId:null,initial:''};
+function templateEditorValues(){
+  const reward=Number(($('tplReward').value||'').replace(/\D/g,''))||0;
+  const max=$('tplMode').value==='all'?Math.max(1,Number(($('tplMaxParticipants').value||'').replace(/\D/g,''))||1):1;
+  return {
+    title:$('tplName').value.trim(),task_title:$('tplTaskTitle').value.trim(),type:$('tplType').value,
+    details:$('tplDetails').value.trim(),reward:reward,mode:$('tplMode').value,
+    evidence_policy:$('tplEvidence').value,max_participants:max,
+    budget_cap:$('tplMode').value==='all'?(Number(($('tplBudgetCap').value||'').replace(/\D/g,''))||reward*max):reward,
+    photo_action:TEMPLATE_EDITOR.photoAction,photo_data:TEMPLATE_EDITOR.photoAction==='replace'?TEMPLATE_EDITOR.photoData:null
+  };
+}
+function templateEditorSignature(){ return JSON.stringify(templateEditorValues()); }
+function templateEditorDirty(){ return Boolean(TEMPLATE_EDITOR.initial&&templateEditorSignature()!==TEMPLATE_EDITOR.initial); }
+function renderTemplateEditorPhoto(){
+  const src=TEMPLATE_EDITOR.photoAction==='replace'?TEMPLATE_EDITOR.photoData:
+    (TEMPLATE_EDITOR.photoAction==='keep'?TEMPLATE_EDITOR.photoUrl:'');
+  $('tplPhotoCurrent').src=src||''; $('tplPhotoCurrent').classList.toggle('hidden',!src);
+  $('tplPhotoRemove').classList.toggle('hidden',!src);
+  $('tplPhotoText').innerHTML=src?'<b>Заменить фото</b><br>Выбранное изображение видно выше':'<b>📷 Выбрать фото</b><br>JPG, PNG или WebP';
+}
+function fillTemplateEditor(template,mode,sourceId){
+  TEMPLATE_EDITOR={mode:mode,id:mode==='edit'?String(template.id):null,generation:Number(template.generation||0),
+    photoAction:template.photo_url?'keep':'remove',photoData:'',photoUrl:template.photo_url||'',
+    sourceId:sourceId||null,sourceVersionId:template.version_id!=null?String(template.version_id):null,initial:''};
+  $('tplEditorTitle').textContent=mode==='edit'?'Изменить шаблон':mode==='copy'?'Создать копию':'Новый шаблон';
+  $('tplEditorLead').textContent=mode==='edit'?'Изменение создаст новую версию; опубликованные задания не поменяются.':
+    (mode==='copy'?'Копия станет отдельным шаблоном и не изменит оригинал.':'Сохрани настройки, которые часто повторяются.');
+  $('tplName').value=mode==='copy'?'Копия — '+(template.title||'шаблон'):(template.title||'');
+  $('tplTaskTitle').value=template.task_title||template.title||'';
+  $('tplType').innerHTML=(STATE.task_types||[]).map(t=>'<option value="'+esc(t.key)+'">'+t.emoji+' '+esc(t.title)+'</option>').join('');
+  $('tplType').value=template.type||$('tplType').value;
+  $('tplDetails').value=template.details||''; $('tplReward').value=template.reward||'';
+  $('tplMode').value=template.mode||'open'; $('tplEvidence').value=template.evidence_policy||'after_required';
+  $('tplMaxParticipants').value=template.max_participants||(template.mode==='all'?10:1);
+  $('tplBudgetCap').value=template.budget_cap||template.reward||''; $('tplPhoto').value='';
+  clearInvalid(['tplName','tplTaskTitle','tplReward','tplBudgetCap','tplPhoto'],'tplEditorError');
+  $('tplEditorCopy').classList.add('hidden');
+  $('tplEditorSave').textContent='Сохранить шаблон';
+  renderTemplateEditorPhoto(); TEMPLATE_EDITOR.initial=templateEditorSignature();
+  $('templateEditorSheet').classList.remove('hidden'); setTimeout(()=>$('tplName').focus(),80);
+}
+async function openTemplateEditor(mode,template){
+  if(!hasCap('task.template.manage')) return;
+  try{ fillTemplateEditor(template?await fetchTaskTemplate(template):{},mode,template&&template.id); }
+  catch(e){ toast('Не удалось открыть шаблон: '+e.message); }
+}
+async function closeTemplateEditor(){
+  if(templateEditorDirty()){
+    const discard=await confirmTemplateAction({title:'Закрыть без сохранения?',lead:'Введённые изменения будут потеряны.',okLabel:'Закрыть'});
+    if(!discard) return;
+  }
+  $('templateEditorSheet').classList.add('hidden');
+}
+$('tplEditorCancel').onclick=closeTemplateEditor;
+$('templateEditorSheet').onclick=e=>{ if(e.target===$('templateEditorSheet')) closeTemplateEditor(); };
+$('tplNew').onclick=()=>openTemplateEditor('create',null);
+$('tplEditorCopy').onclick=()=>{
+  const sourceId=TEMPLATE_EDITOR.sourceId||TEMPLATE_EDITOR.id;
+  const sourceVersionId=TEMPLATE_EDITOR.sourceVersionId;
+  TEMPLATE_EDITOR.mode='copy'; TEMPLATE_EDITOR.id=null; TEMPLATE_EDITOR.generation=0;
+  TEMPLATE_EDITOR.sourceId=sourceId; TEMPLATE_EDITOR.sourceVersionId=sourceVersionId;
+  $('tplEditorTitle').textContent='Создать копию';
+  $('tplEditorLead').textContent='Все введённые изменения сохранены в форме. Копия станет отдельным шаблоном.';
+  if(!$('tplName').value.startsWith('Копия — ')) $('tplName').value='Копия — '+$('tplName').value;
+  $('tplEditorError').textContent=''; $('tplEditorCopy').classList.add('hidden');
+  $('tplEditorSave').textContent='Сохранить копию'; $('tplName').focus();
+};
+$('tplPhoto').onchange=async()=>{
+  const file=$('tplPhoto').files&&$('tplPhoto').files[0]; if(!file) return;
+  $('tplPhotoText').textContent='Обрабатываю фотографию…';
+  try{ TEMPLATE_EDITOR.photoData=await compressImage(file,1280,.82); TEMPLATE_EDITOR.photoAction='replace'; renderTemplateEditorPhoto(); buzz('ok'); }
+  catch(e){ $('tplEditorError').textContent=e.message; renderTemplateEditorPhoto(); }
+};
+$('tplPhotoRemove').onclick=()=>{
+  TEMPLATE_EDITOR.photoAction='remove'; TEMPLATE_EDITOR.photoData=''; TEMPLATE_EDITOR.photoUrl=''; $('tplPhoto').value='';
+  renderTemplateEditorPhoto(); buzz('tap');
+};
+function templateWriteOperation(scope,signature){
+  const key='bibitasks_template_'+scope;
+  try{ const old=JSON.parse(sessionStorage.getItem(key)||'null'); if(old&&old.signature===signature&&old.id) return {key:key,id:old.id}; }catch(e){}
+  const operation={key:key,id:newOperationId()};
+  try{ sessionStorage.setItem(key,JSON.stringify({id:operation.id,signature:signature})); }catch(e){}
+  return operation;
+}
+function clearTemplateWrite(operation){ try{ if(operation) sessionStorage.removeItem(operation.key); }catch(e){} }
+function validateTemplateEditor(body){
+  if(body.title.length<3) return {field:'tplName',message:'Назови шаблон для библиотеки.'};
+  if(body.task_title.length<3) return {field:'tplTaskTitle',message:'Укажи понятный заголовок задания.'};
+  if(body.reward<1||body.reward>300) return {field:'tplReward',message:'Награда должна быть от 1 до 300 бибибонусов.'};
+  if(body.mode==='all'&&body.budget_cap<body.reward*body.max_participants) return {field:'tplBudgetCap',message:'Лимита не хватит всем исполнителям.'};
+  const hasPhoto=body.photo_action==='replace'||(body.photo_action==='keep'&&TEMPLATE_EDITOR.photoUrl);
+  if(body.evidence_policy==='before_and_after_required'&&!hasPhoto) return {field:'tplPhoto',message:'Для формата «до и после» добавь исходное фото.'};
+  return null;
+}
+$('tplEditorSave').onclick=async()=>{
+  if(!hasCap('task.template.manage')) return;
+  clearInvalid(['tplName','tplTaskTitle','tplReward','tplBudgetCap','tplPhoto'],'tplEditorError');
+  const body=templateEditorValues(),error=validateTemplateEditor(body);
+  if(error){ reportInvalid(error.field,error.message,'tplEditorError'); buzz('no'); return; }
+  const editing=TEMPLATE_EDITOR.mode==='edit';
+  if(editing) body.expected_generation=TEMPLATE_EDITOR.generation;
+  if(TEMPLATE_EDITOR.mode==='copy'){
+    body.copied_from_id=TEMPLATE_EDITOR.sourceId;
+    body.copied_from_version_id=TEMPLATE_EDITOR.sourceVersionId;
+  }
+  const signature=JSON.stringify(body),operation=templateWriteOperation(editing?'update_'+TEMPLATE_EDITOR.id:'create',signature);
+  body.operation_id=operation.id;
+  const button=$('tplEditorSave'),old=button.textContent; button.disabled=true; button.textContent='Сохраняю…';
+  try{
+    await api(editing?'/api/admin/task-templates/'+encodeURIComponent(TEMPLATE_EDITOR.id)+'/versions':'/api/admin/task-templates',
+      {method:'POST',body:JSON.stringify(body)});
+    clearTemplateWrite(operation); TEMPLATE_EDITOR.initial=''; $('templateEditorSheet').classList.add('hidden');
+    toast(editing?'Новая версия шаблона сохранена.':'Шаблон создан.'); await loadTemplateLibrary('active');
+  }catch(e){
+    if(e.status&&e.status<500) clearTemplateWrite(operation);
+    $('tplEditorError').textContent=e.status===409?'Шаблон уже изменил другой сотрудник. Введённые данные сохранены — нажми «Сохранить как копию».':e.message;
+    $('tplEditorCopy').classList.toggle('hidden',!(e.status===409&&editing));
+    $('tplEditorError').tabIndex=-1; $('tplEditorError').focus(); buzz('no');
+  }finally{ button.disabled=false; button.textContent=old; }
+};
+function templateCard(template){
+  const photo=template.photo_url?'<img src="'+esc(template.photo_url)+'" alt="Фото шаблона «'+esc(template.title||'')+'»">':'';
+  const archived=template.status==='archived';
+  const id=esc(String(template.id));
+  const title=esc(template.title||template.task_title||'Без названия');
+  return '<article class="template-card'+(photo?'':' no-photo')+'" data-template-card="'+id+'">'+photo+
+    '<div><div class="tt">'+title+'</div><div class="ty">'+esc(template.task_title||'')+'</div>'+
+    '<div class="meta"><span class="pill">Версия '+Number(template.version_number||1)+'</span><span class="pill '+(archived?'warn':'on')+'">'+(archived?'Архив':'Активен')+'</span></div></div>'+
+    '<div class="acts">'+(hasCap('task.create')&&!archived?'<button class="btn btn-volt sm" data-tplapply="'+id+'" aria-label="Применить шаблон «'+title+'»">Применить</button>':'')+
+    '<button class="mini" data-tpledit="'+id+'" aria-label="Изменить шаблон «'+title+'»">Изменить</button><button class="mini" data-tplcopy="'+id+'" aria-label="Копировать шаблон «'+title+'»">Копировать</button>'+
+    '<button class="mini '+(archived?'':'warn')+'" data-tplstatus-action="'+id+'" aria-label="'+(archived?'Восстановить':'Архивировать')+' шаблон «'+title+'»">'+(archived?'Восстановить':'Архивировать')+'</button></div></article>';
+}
+function bindTemplateLibrary(){
+  const find=id=>TASK_TEMPLATE_LIBRARY.find(item=>String(item.id)===String(id));
+  $('tplLibrary').querySelectorAll('[data-tplapply]').forEach(button=>button.onclick=async()=>{
+    const item=find(button.dataset.tplapply); if(!item) return;
+    if(await applyTaskTemplateItem(item,false)){
+      activateTaskMode(document.querySelector('[data-taskmode="taskCreateMode"]'),false); setWizardStep(1,false); $('ntTemplate').focus();
+    }
+  });
+  $('tplLibrary').querySelectorAll('[data-tpledit]').forEach(button=>button.onclick=()=>openTemplateEditor('edit',find(button.dataset.tpledit)));
+  $('tplLibrary').querySelectorAll('[data-tplcopy]').forEach(button=>button.onclick=()=>openTemplateEditor('copy',find(button.dataset.tplcopy)));
+  $('tplLibrary').querySelectorAll('[data-tplstatus-action]').forEach(button=>button.onclick=async()=>{
+    const item=find(button.dataset.tplstatusAction); if(!item) return;
+    const restore=item.status==='archived';
+    if(!await confirmTemplateAction({title:restore?'Восстановить шаблон?':'Архивировать шаблон?',
+      lead:restore?'Он снова появится среди активных.':'Уже созданные задания не изменятся.',okLabel:restore?'Восстановить':'Архивировать'})) return;
+    const payload={status:restore?'active':'archived',expected_generation:Number(item.generation||0),
+      note:restore?'Восстановлено из библиотеки шаблонов':'Архивировано из библиотеки шаблонов'};
+    const operation=templateWriteOperation('status_'+item.id,JSON.stringify(payload)); payload.operation_id=operation.id;
+    try{
+      await api('/api/admin/task-templates/'+encodeURIComponent(String(item.id))+'/status',{method:'POST',body:JSON.stringify(payload)});
+      clearTemplateWrite(operation); toast(restore?'Шаблон восстановлен.':'Шаблон перемещён в архив.'); await loadTemplateLibrary(TASK_TEMPLATE_STATUS);
+    }catch(e){ if(e.status&&e.status<500) clearTemplateWrite(operation); toast(e.status===409?'Шаблон уже изменился. Список обновлён.':e.message); if(e.status===409) await loadTemplateLibrary(TASK_TEMPLATE_STATUS); }
+  });
+}
+function renderTemplateLibrary(){
+  const query=($('tplSearch').value||'').trim().toLocaleLowerCase('ru-RU');
+  const shown=sortedTaskTemplates(TASK_TEMPLATE_LIBRARY).filter(template=>{
+    if(!query) return true;
+    return [template.title,template.task_title,template.details]
+      .some(value=>String(value||'').toLocaleLowerCase('ru-RU').includes(query));
+  });
+  $('tplLibrary').innerHTML=shown.length?shown.map(templateCard).join(''):
+    '<div class="empty">'+(query?'По такому запросу шаблонов нет.':
+      (TASK_TEMPLATE_STATUS==='archived'?'Архив пуст.':'Шаблонов пока нет. Создай первый.'))+'</div>';
+  $('tplLibraryStatus').textContent=query
+    ? 'Показано: '+shown.length+' из '+TASK_TEMPLATE_LIBRARY.length
+    : 'Найдено: '+TASK_TEMPLATE_LIBRARY.length;
+  bindTemplateLibrary();
+}
+async function loadTemplateLibrary(status){
+  if(!hasCap('task.template.manage')) return;
+  TASK_TEMPLATE_STATUS=status||'active';
+  document.querySelectorAll('[data-tplstatus]').forEach(button=>{
+    const selected=button.dataset.tplstatus===TASK_TEMPLATE_STATUS;
+    button.classList.toggle('on',selected); button.setAttribute('aria-pressed',selected?'true':'false');
+  });
+  $('tplLibraryStatus').textContent='Загружаю шаблоны…'; $('tplLibrary').setAttribute('aria-busy','true');
+  try{
+    const items=[],seenIds=new Set(),seenCursors=new Set();
+    let cursor=null,completed=false;
+    for(let page=0;page<100;page++){
+      const query='?status='+encodeURIComponent(TASK_TEMPLATE_STATUS)+'&limit=100'+
+        (cursor?'&after_id='+encodeURIComponent(cursor):'');
+      const data=await api('/api/admin/task-templates'+query);
+      const batch=Array.isArray(data)?data:(data.items||data.templates||[]);
+      batch.forEach(template=>{
+        const id=templateIdentity(template);
+        if(!seenIds.has(id)){ seenIds.add(id); items.push(template); }
+      });
+      const next=Array.isArray(data)?null:(data.next_cursor||null);
+      if(!next){ completed=true; break; }
+      const normalized=String(next);
+      if(seenCursors.has(normalized)) throw new Error('Сервер повторил страницу шаблонов. Попробуй ещё раз.');
+      seenCursors.add(normalized); cursor=normalized;
+    }
+    if(!completed) throw new Error('Библиотека слишком большая для одной загрузки. Уточни фильтр и повтори.');
+    TASK_TEMPLATE_LIBRARY=sortedTaskTemplates(items);
+    if(TASK_TEMPLATE_STATUS==='active') syncTaskTemplateSelector(TASK_TEMPLATE_LIBRARY);
+    renderTemplateLibrary();
+    return true;
+  }catch(e){ $('tplLibraryStatus').textContent='Не удалось загрузить шаблоны.'; showRetry('tplLibrary',e.message,()=>loadTemplateLibrary(TASK_TEMPLATE_STATUS)); return false; }
+  finally{ $('tplLibrary').setAttribute('aria-busy','false'); }
+}
+document.querySelectorAll('[data-tplstatus]').forEach(button=>button.onclick=()=>loadTemplateLibrary(button.dataset.tplstatus));
+$('tplSearch').oninput=renderTemplateLibrary;
+
+/* ── применение шаблона и фотография задания ─────────────── */
+let TASK_PHOTO_DATA = '';
+let TASK_TEMPLATE_CONTEXT={id:null,versionId:null,photoAction:'remove',photoUrl:''};
+let TASK_TEMPLATE_APPLY_SEQUENCE=0, TASK_TEMPLATE_RECOVERY_ID=null, TASK_TEMPLATE_RECOVERY_CODE='';
+const TASK_TEMPLATE_AUTHORITATIVE_FIELDS=[
+  'ntType','ntTitle','ntDetails','ntReward','ntMode','ntEvidence','ntMaxParticipants','ntBudgetCap'
+];
+function setTaskTemplateLocked(locked){
+  TASK_TEMPLATE_AUTHORITATIVE_FIELDS.forEach(id=>{
+    const field=$(id); if(!field) return;
+    field.disabled=Boolean(locked);
+    const described=new Set((field.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(locked) described.add('ntTemplateLockHint'); else described.delete('ntTemplateLockHint');
+    if(described.size) field.setAttribute('aria-describedby',Array.from(described).join(' '));
+    else field.removeAttribute('aria-describedby');
+  });
+  $('ntTemplateLockHint').classList.toggle('hidden',!locked);
+}
+function hideTaskTemplateRecovery(){
+  TASK_TEMPLATE_RECOVERY_ID=null; TASK_TEMPLATE_RECOVERY_CODE='';
+  $('ntTemplateRecovery').classList.add('hidden');
+}
+function taskFormHasTemplateChanges(){
+  return Boolean($('ntTitle').value.trim()||$('ntDetails').value.trim()||$('ntReward').value.trim()||TASK_PHOTO_DATA||TASK_TEMPLATE_CONTEXT.id);
+}
+function resetTaskPhotoView(){
+  $('ntPhoto').value=''; $('ntPhotoPreview').src=''; $('ntPhotoPreview').classList.add('hidden');
+  $('ntPhotoClear').classList.add('hidden');
+  $('ntPhotoText').innerHTML='<b>📷 Выбрать фото</b><br>JPG, PNG или WebP — приложение уменьшит его перед отправкой';
+}
+function inheritTaskTemplatePhoto(url){
+  TASK_PHOTO_DATA=''; TASK_TEMPLATE_CONTEXT.photoUrl=url||''; TASK_TEMPLATE_CONTEXT.photoAction=url?'inherit':'remove'; resetTaskPhotoView();
+  if(url){ $('ntPhotoPreview').src=url; $('ntPhotoPreview').classList.remove('hidden'); $('ntPhotoClear').classList.remove('hidden');
+    $('ntPhotoText').innerHTML='<b>Фото из шаблона</b><br>Нажми, чтобы заменить для этого задания'; }
+}
+function detachTaskTemplate(){
+  ++TASK_TEMPLATE_APPLY_SEQUENCE;
+  const inherited=TASK_TEMPLATE_CONTEXT.id&&TASK_TEMPLATE_CONTEXT.photoAction==='inherit';
+  TASK_TEMPLATE_CONTEXT={id:null,versionId:null,photoAction:TASK_PHOTO_DATA?'replace':'remove',photoUrl:''};
+  if(inherited) resetTaskPhotoView();
+  $('ntTemplate').value=''; $('ntTemplate').dataset.lastValue='';
+  $('ntTemplate').setAttribute('aria-busy','false');
+  setTaskTemplateLocked(false); hideTaskTemplateRecovery();
+  updateTaskMode(); updateEvidenceUI();
+}
+async function applyTaskTemplateItem(source,quiet,options){
+  if(!source) return false;
+  const settings=options||{}, requestId=settings.requestId||++TASK_TEMPLATE_APPLY_SEQUENCE;
+  const previousPhoto={action:TASK_TEMPLATE_CONTEXT.photoAction,data:TASK_PHOTO_DATA};
+  if(!settings.skipConfirm&&taskFormHasTemplateChanges()&&!await confirmTemplateAction({title:'Заменить заполненные поля?',
+    lead:'Шаблон заменит название, описание, награду, режим отчёта и фото. Город, адрес и сроки останутся.',okLabel:'Применить шаблон'})) return false;
+  if(requestId!==TASK_TEMPLATE_APPLY_SEQUENCE) return false;
+  $('ntTemplate').setAttribute('aria-busy','true');
+  let template;
+  try{ template=await fetchTaskTemplate(source); }
+  catch(e){ if(requestId===TASK_TEMPLATE_APPLY_SEQUENCE) toast('Шаблон не загрузился: '+e.message); return false; }
+  finally{ if(requestId===TASK_TEMPLATE_APPLY_SEQUENCE) $('ntTemplate').setAttribute('aria-busy','false'); }
+  if(requestId!==TASK_TEMPLATE_APPLY_SEQUENCE) return false;
   $('ntType').value = template.type || 'fix_zone';
   $('ntTitle').value = template.task_title || template.title || '';
   $('ntDetails').value = template.details || '';
@@ -3277,22 +3675,53 @@ function applyTaskTemplate(quiet){
   $('ntMaxParticipants').value = template.max_participants || (template.mode==='all'?10:1);
   $('ntBudgetCap').value = template.budget_cap ||
     (Number(template.reward||0)*Number($('ntMaxParticipants').value||1) || '');
+  TASK_TEMPLATE_CONTEXT={id:template.id!=null?String(template.id):null,
+    versionId:template.version_id!=null?String(template.version_id):null,
+    photoAction:template.photo_url?'inherit':'remove',photoUrl:template.photo_url||''};
+  inheritTaskTemplatePhoto(template.photo_url||'');
+  if(settings.preserveTaskPhoto&&previousPhoto.action==='replace'&&previousPhoto.data){
+    TASK_PHOTO_DATA=previousPhoto.data; TASK_TEMPLATE_CONTEXT.photoAction='replace';
+    $('ntPhotoPreview').src=TASK_PHOTO_DATA; $('ntPhotoPreview').classList.remove('hidden');
+    $('ntPhotoClear').classList.remove('hidden');
+    $('ntPhotoText').innerHTML='<b>Фото готово</b><br>Сохранено после обновления шаблона';
+  }else if(settings.preserveTaskPhoto&&previousPhoto.action==='remove'){
+    clearTaskPhoto();
+  }
+  $('ntTemplate').value=templateIdentity(source); $('ntTemplate').dataset.lastValue=templateIdentity(source);
   updateTaskMode();
   updateEvidenceUI();
+  setTaskTemplateLocked(true); hideTaskTemplateRecovery();
   $('ntReward').dispatchEvent(new Event('input'));
-  if(!quiet){ buzz('ok'); toast('Шаблон применён — проверь детали.'); }
+  if(!quiet){ buzz('ok'); toast('Шаблон применён. Основные поля защищены версией шаблона.'); }
+  return true;
+}
+async function applyTaskTemplate(quiet){
+  const identity=$('ntTemplate').value;
+  const requestId=++TASK_TEMPLATE_APPLY_SEQUENCE;
+  if(!identity){ detachTaskTemplate(); return true; }
+  const template=TASK_TEMPLATE_OVERVIEW.find(item=>templateIdentity(item)===identity);
+  if(!template) return false;
+  const applied=await applyTaskTemplateItem(template,quiet,{requestId:requestId});
+  if(!applied&&requestId===TASK_TEMPLATE_APPLY_SEQUENCE) $('ntTemplate').value=$('ntTemplate').dataset.lastValue||'';
+  return applied;
 }
 $('ntTemplateApply').onclick = ()=>applyTaskTemplate(false);
 $('ntTemplate').onchange = ()=>applyTaskTemplate(false);
+$('ntTemplateDetach').onclick=()=>{ detachTaskTemplate(); $('ntTemplate').focus(); };
+$('ntTemplateReapply').onclick=async()=>{
+  if($('ntTemplateReapply').dataset.action==='refresh'){
+    await recoverStaleTaskTemplate(TASK_TEMPLATE_RECOVERY_CODE||'template_state_changed'); return;
+  }
+  const template=TASK_TEMPLATE_OVERVIEW.find(item=>templateIdentity(item)===TASK_TEMPLATE_RECOVERY_ID);
+  if(!template){ toast('Шаблон больше недоступен. Выбери другой или продолжи без шаблона.'); return; }
+  const applied=await applyTaskTemplateItem(template,false,{skipConfirm:true,preserveTaskPhoto:true});
+  if(applied){ setWizardStep(1,false); $('ntTemplate').focus(); }
+};
 
-let TASK_PHOTO_DATA = '';
 function clearTaskPhoto(){
-  TASK_PHOTO_DATA = '';
-  $('ntPhoto').value = '';
-  $('ntPhotoPreview').src = '';
-  $('ntPhotoPreview').classList.add('hidden');
-  $('ntPhotoClear').classList.add('hidden');
-  $('ntPhotoText').innerHTML = '<b>📷 Выбрать фото</b><br>JPG, PNG или WebP — приложение уменьшит его перед отправкой';
+  TASK_PHOTO_DATA='';
+  if(TASK_TEMPLATE_CONTEXT.id){ TASK_TEMPLATE_CONTEXT.photoAction='remove'; TASK_TEMPLATE_CONTEXT.photoUrl=''; }
+  resetTaskPhotoView();
 }
 async function compressTaskPhoto(file){
   return compressImage(file,1280,.82);
@@ -3303,6 +3732,7 @@ $('ntPhoto').onchange = async ()=>{
   $('ntPhotoText').textContent = 'Обрабатываю фотографию…';
   try{
     TASK_PHOTO_DATA = await compressTaskPhoto(file);
+    if(TASK_TEMPLATE_CONTEXT.id) TASK_TEMPLATE_CONTEXT.photoAction='replace';
     $('ntPhotoPreview').src = TASK_PHOTO_DATA;
     $('ntPhotoPreview').classList.remove('hidden');
     $('ntPhotoClear').classList.remove('hidden');
@@ -3380,6 +3810,10 @@ function collectTaskBody(){
     announce: mode!=='personal' && $('ntAnnounce').classList.contains('on'),
     assigned_to: mode==='personal' ? ($('ntAssignee').value||null) : null,
     photo_data: TASK_PHOTO_DATA || null,
+    template_id: TASK_TEMPLATE_CONTEXT.id,
+    template_version_id: TASK_TEMPLATE_CONTEXT.versionId,
+    template_photo_action: TASK_TEMPLATE_CONTEXT.id
+      ? TASK_TEMPLATE_CONTEXT.photoAction : (TASK_PHOTO_DATA?'replace':'remove'),
     evidence_policy: $('ntEvidence').value,
     max_participants: maxParticipants,
     budget_cap: mode==='all'
@@ -3394,7 +3828,8 @@ function taskValidation(body,step){
   if(step>=2&&body.city.length<2) return {field:'ntCity',message:'Укажи город задания.'};
   if(step>=2&&body.address.length<3) return {field:'ntAddr',message:'Укажи адрес или ориентир.'};
   if(step>=2&&$('ntMode').value==='personal'&&!body.assigned_to) return {field:'ntAssignee',message:'Выбери сотрудника.'};
-  if(step>=2&&body.evidence_policy==='before_and_after_required'&&!body.photo_data){
+  const hasBriefPhoto=Boolean(body.photo_data||(TASK_TEMPLATE_CONTEXT.photoAction==='inherit'&&TASK_TEMPLATE_CONTEXT.photoUrl));
+  if(step>=2&&body.evidence_policy==='before_and_after_required'&&!hasBriefPhoto){
     return {field:'ntPhoto',message:'Для отчёта «до и после» добавь исходную фотографию.'};
   }
   if(Boolean(body.slot_start)!==Boolean(body.slot_end)){
@@ -3407,12 +3842,12 @@ function taskValidation(body,step){
   return null;
 }
 function openTaskPreview(body){
-  const evidence={none:'Комментарий',after_required:'Фото после',before_and_after_required:'Фото до и после'}[body.evidence_policy]||body.evidence_policy;
+  const evidence={none:'Комментарий',comment_only:'Комментарий',after_required:'Фото после',before_and_after_required:'Фото до и после'}[body.evidence_policy]||body.evidence_policy;
   const assignee=$('ntMode').value==='personal' ? ($('ntAssignee').selectedOptions[0]?.textContent||'—') :
     ($('ntMode').value==='all'?'Каждый участник':'Первый свободный участник');
   $('taskPreviewBody').innerHTML=
     '<div class="preview-block"><b>'+esc(body.title)+'</b><span class="ty">'+esc(body.details||'Без дополнительного описания')+'</span></div>'+
-    (body.photo_data?'<img class="task-photo" src="'+esc(body.photo_data)+'" alt="Исходное фото задания">':'')+
+    ((body.photo_data||TASK_TEMPLATE_CONTEXT.photoUrl)?'<img class="task-photo" src="'+esc(body.photo_data||TASK_TEMPLATE_CONTEXT.photoUrl)+'" alt="Исходное фото задания">':'')+
     '<div class="preview-block"><b>📍 '+esc(body.city)+' · '+esc(body.address)+'</b><span class="ty">'+esc(assignee)+'</span></div>'+
     '<div class="preview-block"><b>+'+body.reward+'⚡ одному · лимит '+body.budget_cap+'⚡</b><span class="ty">'+
       body.max_participants+' '+plural(body.max_participants,'исполнитель','исполнителя','исполнителей')+' · '+esc(evidence)+'</span></div>'+
@@ -3436,17 +3871,58 @@ $('ntCreate').onclick=()=>{
 };
 $('ntPreviewBack').onclick=()=>$('taskPreviewSheet').classList.add('hidden');
 $('taskPreviewSheet').onclick=e=>{ if(e.target===$('taskPreviewSheet')) $('taskPreviewSheet').classList.add('hidden'); };
+async function recoverStaleTaskTemplate(errorCode){
+  const templateId=TASK_TEMPLATE_CONTEXT.id;
+  TASK_TEMPLATE_RECOVERY_ID=templateId; TASK_TEMPLATE_RECOVERY_CODE=errorCode;
+  TASK_PREVIEW_BODY=null; TASK_DRAFT_OPERATION_ID=null; clearTaskCreateOperation();
+  $('taskPreviewSheet').classList.add('hidden'); setWizardStep(1,false);
+  $('ntTemplateRecovery').classList.remove('hidden');
+  $('ntTemplateReapply').classList.add('hidden');
+  $('ntTemplateReapply').dataset.action='apply';
+  $('ntTemplateReapply').textContent='Применить обновлённый шаблон';
+  $('ntTemplateRecoveryText').textContent=errorCode==='template_archived'
+    ? 'Шаблон архивирован. Город, адрес, сроки, исполнитель и выбранное фото сохранены.'
+    : 'Шаблон изменился после заполнения. Город, адрес, сроки, исполнитель и выбранное фото сохранены.';
+  const loaded=await loadTemplateLibrary('active');
+  const latest=loaded&&TASK_TEMPLATE_OVERVIEW.find(item=>templateIdentity(item)===templateId);
+  TASK_TEMPLATE_RECOVERY_ID=templateId; TASK_TEMPLATE_RECOVERY_CODE=errorCode;
+  if(latest){
+    $('ntTemplate').value=templateId; $('ntTemplate').dataset.lastValue=templateId;
+    $('ntTemplateReapply').classList.remove('hidden');
+    $('ntTemplateRecoveryText').textContent='Шаблон обновился. Локальные место, сроки, исполнитель и фото сохранены — примени новую версию и снова проверь задание.';
+  }else if(!loaded){
+    $('ntTemplateRecoveryText').textContent='Не удалось обновить шаблон. Локальные данные сохранены — повтори загрузку или продолжи без шаблона.';
+    $('ntTemplateReapply').dataset.action='refresh';
+    $('ntTemplateReapply').textContent='Обновить список';
+    $('ntTemplateReapply').classList.remove('hidden');
+  }else{
+    $('ntTemplateRecoveryText').textContent='Шаблон больше не активен. Локальные место, сроки, исполнитель и фото сохранены — выбери другой или продолжи без шаблона.';
+  }
+  $('ntTemplateRecovery').focus({preventScroll:true});
+}
 $('ntPublish').onclick=()=>{
   if(!TASK_PREVIEW_BODY) return;
   const body=Object.assign({},TASK_PREVIEW_BODY,{operation_id:TASK_DRAFT_OPERATION_ID||newOperationId()});
   const mode=$('ntMode').value;
   press($('ntPublish'),mode==='personal'?'Назначаю…':'Публикую…', async ()=>{
-    const d = await api('/api/admin/task/create',{method:'POST',body:JSON.stringify(body)});
+    let d;
+    try{ d=await api('/api/admin/task/create',{method:'POST',body:JSON.stringify(body)}); }
+    catch(e){
+      const code=e.data&&e.data.error;
+      if(e.status===409&&['template_archived','template_version_stale','template_state_changed'].includes(code)){
+        buzz('no'); await recoverStaleTaskTemplate(code); return;
+      }
+      throw e;
+    }
+    if(!d) return;
     buzz('ok');
     try{ localStorage.setItem('bibitasks_task_city', body.city); }catch(e){}
     ['ntTitle','ntDetails','ntAddr','ntReward','ntBudgetCap','ntSlotStart','ntSlotEnd']
       .forEach(id=>$(id).value='');
     clearTaskPhoto();
+    TASK_TEMPLATE_CONTEXT={id:null,versionId:null,photoAction:'remove',photoUrl:''};
+    $('ntTemplate').value=''; $('ntTemplate').dataset.lastValue='';
+    setTaskTemplateLocked(false); hideTaskTemplateRecovery();
     clearTaskCreateOperation();
     TASK_PREVIEW_BODY=null; TASK_DRAFT_OPERATION_ID=null;
     $('taskPreviewSheet').classList.add('hidden'); setWizardStep(1,false);

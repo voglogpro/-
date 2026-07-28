@@ -13,7 +13,9 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import sys
+import uuid
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -29,6 +31,7 @@ from sqlalchemy import create_engine
 from db_migration import ALEMBIC_HEAD
 from db_migration.access_contract import CAPABILITIES_V1
 from db_migration.metadata import metadata
+from db_migration.template_contract import SYSTEM_TEMPLATE_SEEDS
 from db_migration.types import (
     ConversionError, parse_bigint, parse_bool01, parse_date, parse_json, parse_utc,
 )
@@ -46,11 +49,17 @@ JSON_SHAPES = {
     ("staff_access_changes", "result_json"): "object",
     ("staff_access_events", "before_json"): "object",
     ("staff_access_events", "after_json"): "object",
+    ("task_template_events", "before_json"): "object",
+    ("task_template_events", "after_json"): "object",
+    ("task_template_events", "result_json"): "object",
 }
 CANONICAL_JSON_COLUMNS = {
     ("staff_access_changes", "result_json"),
     ("staff_access_events", "before_json"),
     ("staff_access_events", "after_json"),
+    ("task_template_events", "before_json"),
+    ("task_template_events", "after_json"),
+    ("task_template_events", "result_json"),
 }
 ALLOWED = {
     ("members", "role"): {"candidate", "applicant", "helper", "employee", "admin"},
@@ -81,6 +90,19 @@ ALLOWED = {
     ("staff_access_changes", "status"): {"pending", "applied", "rejected"},
     ("staff_access_events", "preset"): {"scout", "reviewer", "cashier", "owner"},
     ("staff_access_events", "event_type"): {"assign", "revoke", "env_sync"},
+    ("task_templates", "origin"): {"system", "manual"},
+    ("task_templates", "status"): {"active", "archived"},
+    ("task_template_versions", "task_type"): {
+        "relocate", "fix_zone", "charge", "rescue",
+        "community", "referral", "photo_check",
+    },
+    ("task_template_versions", "mode"): {"open", "personal", "all"},
+    ("task_template_versions", "evidence_policy"): {
+        "none", "comment_only", "photo_required", "before_after",
+    },
+    ("task_template_events", "event_type"): {
+        "created", "version_created", "archived", "activated",
+    },
 }
 FORBIDDEN_DSN_QUERY_KEYS = {"host", "hostaddr", "port", "service", "dbname", "user"}
 
@@ -175,6 +197,76 @@ def iter_transformed_rows(source, table_name):
                     raise ConversionError("latitude outside range")
                 if converted["lng"] is not None and not -180 <= converted["lng"] <= 180:
                     raise ConversionError("longitude outside range")
+                if (converted["template_id"] is None) != (
+                    converted["template_version_id"] is None
+                ):
+                    raise ConversionError("partial task template provenance")
+                for name in ("template_id", "template_version_id"):
+                    if converted[name] is None:
+                        continue
+                    try:
+                        if str(uuid.UUID(converted[name])) != converted[name]:
+                            raise ValueError
+                    except (ValueError, AttributeError):
+                        raise ConversionError("task template provenance is not canonical UUID")
+            if table_name in ("task_templates", "task_template_versions"):
+                for name in (
+                    ("id",) if table_name == "task_templates"
+                    else ("id", "template_id")
+                ):
+                    value = str(converted[name])
+                    try:
+                        if str(uuid.UUID(value)) != value:
+                            raise ValueError
+                    except (ValueError, AttributeError):
+                        raise ConversionError("template identifier is not canonical UUID")
+            if table_name == "task_templates":
+                if not re.fullmatch(r"[a-z][a-z0-9_]{2,49}", converted["key"]):
+                    raise ConversionError("template key is not a canonical slug")
+                try:
+                    if str(uuid.UUID(str(converted["current_version_id"]))) != converted["current_version_id"]:
+                        raise ValueError
+                except (ValueError, AttributeError):
+                    raise ConversionError("current template version is not canonical UUID")
+                if converted["status"] == "active" and (
+                    converted["archived_by"] is not None
+                    or converted["archived_at"] is not None
+                ):
+                    raise ConversionError("active template has archive metadata")
+                if converted["status"] == "archived" and (
+                    converted["archived_by"] is None
+                    or converted["archived_at"] is None
+                ):
+                    raise ConversionError("archived template lacks archive metadata")
+            if table_name == "task_template_versions":
+                for name in ("photo_sha256", "content_hash"):
+                    value = converted[name]
+                    if value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)):
+                        raise ConversionError("invalid template SHA-256")
+                content = {
+                    name: converted[name]
+                    for name in (
+                        "title", "task_type", "task_title", "details", "reward",
+                        "mode", "evidence_policy", "max_participants", "budget_cap",
+                        "photo_media_id", "photo_sha256",
+                    )
+                }
+                expected_hash = hashlib.sha256(json.dumps(
+                    content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                if converted["content_hash"] != expected_hash:
+                    raise ConversionError("template content hash mismatch")
+            if table_name == "task_template_events":
+                if not re.fullmatch(r"[0-9a-f]{64}", str(converted["request_hash"])):
+                    raise ConversionError("invalid template event request hash")
+                for name in ("template_id", "template_version_id"):
+                    if converted[name] is None:
+                        continue
+                    try:
+                        if str(uuid.UUID(converted[name])) != converted[name]:
+                            raise ValueError
+                    except (ValueError, AttributeError):
+                        raise ConversionError("template event reference is not canonical UUID")
         except ConversionError as exc:
             raise DataError(
                 f"invalid source value in {table_name} at row {row_number}: {exc}"
@@ -184,6 +276,77 @@ def iter_transformed_rows(source, table_name):
 
 def transform_rows(source, table_name):
     return list(iter_transformed_rows(source, table_name))
+
+
+def _validate_template_relations(source):
+    checks = {
+        "current template version": """
+            SELECT COUNT(*) FROM task_templates t
+            LEFT JOIN task_template_versions v
+              ON v.template_id=t.id AND v.id=t.current_version_id
+            WHERE v.id IS NULL
+        """,
+        "template version sequence": """
+            SELECT COUNT(*) FROM (
+              SELECT template_id FROM task_template_versions GROUP BY template_id
+              HAVING MIN(version_number)<>1 OR COUNT(*)<>MAX(version_number)
+                 OR COUNT(DISTINCT version_number)<>COUNT(*)
+            )
+        """,
+        "template generation": """
+            SELECT COUNT(*) FROM task_templates t
+            WHERE t.generation<>COALESCE((SELECT MAX(e.generation)
+                    FROM task_template_events e WHERE e.template_id=t.id),0)
+               OR t.generation<>(SELECT COUNT(*) FROM task_template_events e
+                    WHERE e.template_id=t.id)
+        """,
+        "template media": """
+            SELECT COUNT(*) FROM task_template_versions v
+            LEFT JOIN media_objects m ON m.id=v.photo_media_id
+            WHERE v.photo_media_id IS NOT NULL AND (
+              m.id IS NULL OR m.state<>'ready' OR m.purpose<>'task_template_brief'
+              OR m.sha256<>v.photo_sha256
+            )
+        """,
+        "template event version": """
+            SELECT COUNT(*) FROM task_template_events e
+            LEFT JOIN task_template_versions v
+              ON v.template_id=e.template_id AND v.id=e.template_version_id
+            WHERE e.template_version_id IS NOT NULL AND v.id IS NULL
+        """,
+        "task template provenance": """
+            SELECT COUNT(*) FROM tasks t
+            LEFT JOIN task_template_versions v
+              ON v.template_id=t.template_id AND v.id=t.template_version_id
+            WHERE (t.template_id IS NULL)<>(t.template_version_id IS NULL)
+               OR (t.template_id IS NOT NULL AND v.id IS NULL)
+        """,
+    }
+    for label, sql in checks.items():
+        if int(source.execute(sql).fetchone()[0]):
+            raise DataError(f"invalid source task-template relation: {label}")
+
+    for seed in SYSTEM_TEMPLATE_SEEDS:
+        row = source.execute("""
+            SELECT t.key,t.origin,v.version_number,v.content_hash,
+                   v.max_participants,v.budget_cap,
+                   v.evidence_policy
+            FROM task_templates t
+            LEFT JOIN task_template_versions v
+              ON v.template_id=t.id AND v.id=?
+            WHERE t.id=?
+        """, (seed["version_id"], seed["id"])).fetchone()
+        expected = (
+            seed["key"], "system", 1, seed["content_hash"],
+            seed["max_participants"], seed["budget_cap"],
+            seed["evidence_policy"],
+        )
+        if row is None or tuple(row) != expected:
+            raise DataError(f"built-in task-template seed mismatch: {seed['key']}")
+    if int(source.execute(
+        "SELECT COUNT(*) FROM task_templates WHERE origin='system'"
+    ).fetchone()[0]) != len(SYSTEM_TEMPLATE_SEEDS):
+        raise DataError("unexpected built-in task-template seed")
 
 
 def _primary_key_digest(rows, columns, *, source_values=False):
@@ -286,6 +449,7 @@ def run(
         for table_name in TABLE_ORDER:
             for _row in iter_transformed_rows(source, table_name):
                 pass
+        _validate_template_relations(source)
     if file_sha256(source_path) != before_hash:
         raise SourceError("source changed during preflight")
     report = {

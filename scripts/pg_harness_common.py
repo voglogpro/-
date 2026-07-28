@@ -14,8 +14,11 @@ SOURCE_COLUMNS = {
     "members": "user_id full_name username phone city help_type transport availability about tags application_note role status bonus done_count referred_by created_at approved_at approved_by applied_at city_change_requested city_change_requested_at chat_xp ref_confirmed group_membership_status group_joined_at group_left_at".split(),
     "awards": "id code emoji title description bonus repeatable active created_by created_at".split(),
     "media_objects": "id backend object_key purpose state content_type size_bytes sha256 upload_operation_id request_hash created_at ready_at delete_after deleted_at last_error reconcile_attempts version_id checked_at".split(),
+    "task_templates": "id key origin status generation current_version_id created_by created_at updated_by updated_at archived_by archived_at".split(),
+    "task_template_versions": "id template_id version_number title task_type task_title details reward mode evidence_policy max_participants budget_cap photo_media_id photo_sha256 content_hash created_by created_at".split(),
+    "task_template_events": "id template_id template_version_id event_type generation actor_id operation_id request_hash note before_json after_json result_json created_at".split(),
     "analytics_subjects": "subject_id user_id created_at".split(),
-    "tasks": "id type title details lat lng address city reward status created_by created_at claimed_by claimed_at done_at proof_note review_note assigned_to slot_start slot_end repeatable photo_file photo_media_id operation_id request_hash completion_operation_id completion_request_hash submission_attempt evidence_policy max_participants budget_cap cancel_operation_id cancel_request_hash cancelled_at cancelled_by cancel_reason expired_at version".split(),
+    "tasks": "id type title details lat lng address city reward status created_by created_at claimed_by claimed_at done_at proof_note review_note assigned_to slot_start slot_end repeatable photo_file photo_media_id operation_id request_hash completion_operation_id completion_request_hash submission_attempt evidence_policy max_participants budget_cap cancel_operation_id cancel_request_hash cancelled_at cancelled_by cancel_reason expired_at version template_id template_version_id".split(),
     "referral_rewards": "referee_id referrer_id amount created_at".split(),
     "referral_tokens": "token referrer_id created_at expires_at".split(),
     "referral_milestone_rewards": "user_id threshold amount created_at".split(),
@@ -58,6 +61,7 @@ IDENTITY_TABLES = {
     "member_awards", "task_outbox", "product_events", "task_disputes",
     "admin_role_changes", "manual_grant_reversals",
     "staff_access_grants", "staff_access_changes", "staff_access_events",
+    "task_template_events",
 }
 
 EXPECTED_SOURCE_INDEXES = {
@@ -86,13 +90,27 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_media_gc", "idx_product_events_dedupe", "idx_product_events_funnel",
     "idx_product_events_subject", "idx_product_events_task",
     "idx_product_events_expiry",
+    "idx_task_templates_status", "idx_task_template_versions_template",
+    "idx_task_template_versions_media", "idx_task_template_events_template",
+}
+EXPECTED_SOURCE_TRIGGERS = {
+    "task_template_versions_immutable_update",
+    "task_template_versions_immutable_delete",
+    "task_templates_key_immutable",
+    "task_template_events_immutable_update",
+    "task_template_events_immutable_delete",
+    "tasks_template_provenance_insert",
+    "tasks_template_provenance_update",
+    "task_templates_current_version_update",
+    "task_template_events_provenance_insert",
 }
 
-# Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
-# PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
-# rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "0bcf5cfc4a5de781f885394e843f35e8ae6f2905a1ce9b81e3780c8d42e68ed3"
-EXPECTED_SOURCE_USER_VERSION = 298
+# Filled from a canonical post-init_db schema-299 fixture,
+# including table SQL, ordered PRAGMA column metadata, explicit index SQL, and
+# integrity/immutable trigger SQL. Any semantic schema drift is rejected before reading
+# business rows.
+EXPECTED_SOURCE_SCHEMA_SHA256 = "15b6940d3b4239b9daf4d40ba0f28b9431552da2bcaf5b78961023c60fe3900e"
+EXPECTED_SOURCE_USER_VERSION = 299
 
 
 class HarnessError(RuntimeError):
@@ -161,6 +179,15 @@ def source_schema_fingerprint(connection) -> str:
             "kind": "index", "name": name, "table": row[0] if row else None,
             "sql": re.sub(r"\s+", " ", str(row[1] if row else "")).strip(),
         })
+    for name in sorted(EXPECTED_SOURCE_TRIGGERS):
+        row = connection.execute(
+            "SELECT tbl_name,sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (name,),
+        ).fetchone()
+        manifest.append({
+            "kind": "trigger", "name": name, "table": row[0] if row else None,
+            "sql": re.sub(r"\s+", " ", str(row[1] if row else "")).strip(),
+        })
     canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -190,6 +217,13 @@ def validate_source_schema(connection) -> dict[str, int]:
     }
     if indexes != EXPECTED_SOURCE_INDEXES:
         raise SourceError("source index manifest does not match the cutover build")
+    triggers = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        )
+    }
+    if triggers != EXPECTED_SOURCE_TRIGGERS:
+        raise SourceError("source trigger manifest does not match the cutover build")
     fingerprint = source_schema_fingerprint(connection)
     if fingerprint != EXPECTED_SOURCE_SCHEMA_SHA256:
         raise SourceError("source schema fingerprint does not match the cutover build")

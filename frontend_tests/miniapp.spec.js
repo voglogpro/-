@@ -86,6 +86,24 @@ const OWNER_CAPABILITIES = Array.from(new Set([
   'telegram.inbox.redrive', 'operations.health.view',
 ]));
 
+const TEMPLATE_ID = '11111111-1111-4111-8111-111111111111';
+const TEMPLATE_VERSION_ID = '71111111-1111-4111-8111-111111111111';
+function taskTemplate(overrides = {}) {
+  return {
+    id: TEMPLATE_ID, key: 'parking', generation: 5, version_id: TEMPLATE_VERSION_ID, version_number: 3,
+    status: 'active', title: 'Парковка у ТЦ', task_title: 'Поправить парковку байков',
+    type: 'fix_zone', details: 'Выровнять байки и освободить проход', reward: 80,
+    mode: 'open', evidence_policy: 'after_required', max_participants: 1,
+    budget_cap: 80, photo_url: 'https://example.test/template-parking.jpg',
+    ...overrides,
+  };
+}
+
+const TEMPLATE_TASK_TYPES = [
+  { key: 'fix_zone', title: 'Парковка', emoji: '🚲' },
+  { key: 'photo_check', title: 'Фото-проверка', emoji: '📷' },
+];
+
 async function openMiniApp(page, options = {}) {
   let currentState = options.initialState || state();
   const requests = [];
@@ -97,8 +115,12 @@ async function openMiniApp(page, options = {}) {
   let applyCall = 0;
   let memberSearchCall = 0;
   let taskCreateCall = 0;
+  let templateWriteCall = 0;
   let stateCall = 0;
   let lastAdminOverview = null;
+  const templateStore = options.templateStore
+    ? JSON.parse(JSON.stringify(options.templateStore))
+    : { active: [], archived: [] };
 
   await page.route('https://telegram.org/js/telegram-web-app.js', route =>
     route.fulfill({ status: 200, contentType: 'application/javascript', body: '' })
@@ -302,6 +324,80 @@ async function openMiniApp(page, options = {}) {
         body: JSON.stringify(value),
       });
     }
+    if (url.pathname === '/api/admin/task-templates' && request.method() === 'GET' && options.templateStore) {
+      const status = url.searchParams.get('status') || 'active';
+      const allItems = status === 'all'
+        ? [...(templateStore.active || []), ...(templateStore.archived || [])]
+        : (templateStore[status] || []);
+      const afterId = url.searchParams.get('after_id');
+      const afterIndex = afterId == null ? -1 : allItems.findIndex(item => String(item.id) === afterId);
+      const start = afterId == null ? 0 : afterIndex + 1;
+      const requestedLimit = Math.max(1, Number(url.searchParams.get('limit')) || 50);
+      const pageSize = Math.min(requestedLimit, options.templatePageSize || requestedLimit);
+      const items = allItems.slice(start, start + pageSize);
+      const nextCursor = start + items.length < allItems.length && items.length
+        ? String(items[items.length - 1].id) : null;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items, next_cursor: nextCursor }),
+      });
+    }
+    const templateDetail = url.pathname.match(/^\/api\/admin\/task-templates\/([^/]+)$/);
+    if (templateDetail && request.method() === 'GET' && options.templateStore) {
+      const id = decodeURIComponent(templateDetail[1]);
+      const delay = Number((options.templateDetailDelays || {})[id] || 0);
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+      const item = [...(templateStore.active || []), ...(templateStore.archived || [])]
+        .find(value => String(value.id) === id);
+      return route.fulfill({
+        status: item ? 200 : 404,
+        contentType: 'application/json',
+        body: JSON.stringify(item ? { template: item } : { message: 'Шаблон не найден' }),
+      });
+    }
+    const templateVersion = url.pathname.match(/^\/api\/admin\/task-templates\/([^/]+)\/versions$/);
+    const templateStatus = url.pathname.match(/^\/api\/admin\/task-templates\/([^/]+)\/status$/);
+    const templateCreate = url.pathname === '/api/admin/task-templates' && request.method() === 'POST';
+    if ((templateCreate || templateVersion || templateStatus) && options.templateStore) {
+      const sequence = options.templateWriteResponses || [];
+      const configured = sequence.length
+        ? sequence[Math.min(templateWriteCall, sequence.length - 1)]
+        : { status: 200, body: { ok: true } };
+      templateWriteCall += 1;
+      if ((configured.status || 200) < 400) {
+        if (templateCreate) {
+          const id = `99999999-9999-4999-8999-${String(templateWriteCall).padStart(12, '0')}`;
+          templateStore.active.push({
+            ...body, id, generation: 1,
+            version_id: `89999999-9999-4999-8999-${String(templateWriteCall).padStart(12, '0')}`,
+            version_number: 1,
+            status: 'active', photo_url: body.photo_action === 'replace' ? 'https://example.test/template-new.jpg' : '',
+          });
+        } else if (templateVersion) {
+          const id = decodeURIComponent(templateVersion[1]);
+          const item = [...templateStore.active, ...templateStore.archived].find(value => String(value.id) === id);
+          if (item) Object.assign(item, body, {
+            generation: Number(item.generation || 0) + 1,
+            version_id: `79999999-9999-4999-8999-${String(templateWriteCall).padStart(12, '0')}`,
+            version_number: Number(item.version_number || 0) + 1,
+            photo_url: body.photo_action === 'remove' ? '' :
+              body.photo_action === 'replace' ? 'https://example.test/template-updated.jpg' : item.photo_url,
+          });
+        } else if (templateStatus) {
+          const id = decodeURIComponent(templateStatus[1]);
+          const from = body.status === 'active' ? templateStore.archived : templateStore.active;
+          const to = body.status === 'active' ? templateStore.active : templateStore.archived;
+          const index = from.findIndex(item => String(item.id) === id);
+          if (index >= 0) to.push({ ...from.splice(index, 1)[0], status: body.status, generation: Number(body.expected_generation || 0) + 1 });
+        }
+      }
+      return route.fulfill({
+        status: configured.status || 200,
+        contentType: 'application/json',
+        body: JSON.stringify(configured.body || { ok: true }),
+      });
+    }
     if (url.pathname === '/api/admin/task/approve' && options.approveResponses) {
       const sequence = options.approveResponses;
       const value = sequence[Math.min(approveCall, sequence.length - 1)];
@@ -357,7 +453,7 @@ async function openMiniApp(page, options = {}) {
 
   await page.goto('/index.html');
   if (!options.expectInitialFailure) await expect(page.locator('#app')).toBeVisible();
-  return { requests, setState(value) { currentState = value; } };
+  return { requests, templateStore, setState(value) { currentState = value; } };
 }
 
 test('первый вход отличает ошибку подписи Telegram от аварии сервиса', async ({ page }) => {
@@ -1629,4 +1725,393 @@ test('доступ использует maker-checker, generation и идемп�
     change_id: 11, decision: 'approve', note: 'Сотрудник и завершение смены проверены',
   });
   expect(decision.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+});
+
+test('библиотека шаблонов разделяет capability управления и публикации', async ({ page }) => {
+  const template = taskTemplate();
+  await openMiniApp(page, {
+    initialState: staffState(['task.template.manage'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await expect(page.locator('[data-taskmode="taskTemplateMode"]')).toBeVisible();
+  await expect(page.locator('#ntCreate')).toBeHidden();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+  await expect(page.locator(`[data-template-card="${TEMPLATE_ID}"]`)).toBeVisible();
+  await expect(page.locator(`[data-template-card="${TEMPLATE_ID}"] [data-tplapply]`)).toHaveCount(0);
+  await expect(page.locator('#tplLibrary')).toHaveAttribute('aria-busy', 'false');
+
+  const creator = await page.context().newPage();
+  await openMiniApp(creator, {
+    initialState: staffState(['task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview(),
+  });
+  await creator.locator('#nav [data-tab="tab-admin"]').click();
+  await creator.locator('[data-asub="adSubCreate"]').click();
+  await expect(creator.locator('[data-taskmode="taskTemplateMode"]')).toBeHidden();
+  await expect(creator.locator('#ntCreate')).toBeVisible();
+  await creator.close();
+});
+
+test('активный шаблон архивируется и восстанавливается с generation и operation_id', async ({ page }) => {
+  const template = taskTemplate();
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+  await page.getByRole('button', { name: 'Архивировать' }).click();
+  await expect(page.locator('#tplConfirmLead')).toContainText('созданные задания не изменятся');
+  await page.locator('#tplConfirmOk').click();
+  await expect(page.locator('#tplLibrary')).toContainText('Шаблонов пока нет');
+  const archive = harness.requests.find(item => item.path === `/api/admin/task-templates/${TEMPLATE_ID}/status`);
+  expect(archive.body).toMatchObject({ status: 'archived', expected_generation: 5 });
+  expect(archive.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+
+  await page.getByRole('button', { name: 'Архив' }).click();
+  await expect(page.locator(`[data-template-card="${TEMPLATE_ID}"]`)).toContainText('Архив');
+  await page.getByRole('button', { name: 'Восстановить' }).click();
+  await page.locator('#tplConfirmOk').click();
+  const writes = harness.requests.filter(item => item.path === `/api/admin/task-templates/${TEMPLATE_ID}/status`);
+  expect(writes).toHaveLength(2);
+  expect(writes[1].body).toMatchObject({ status: 'active', expected_generation: 6 });
+});
+
+test('dirty apply требует подтверждение и публикация наследует версию и фото шаблона', async ({ page }) => {
+  const template = taskTemplate({ evidence_policy: 'before_and_after_required' });
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('#ntTitle').fill('Мой несохранённый черновик');
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+  await expect(page.locator('#templateConfirmSheet')).toBeVisible();
+  await page.locator('#tplConfirmCancel').click();
+  await expect(page.locator('#ntTitle')).toHaveValue('Мой несохранённый черновик');
+  await expect(page.locator('#ntTemplate')).toHaveValue('');
+
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+  await page.locator('#tplConfirmOk').click();
+  await expect(page.locator('#ntTitle')).toHaveValue('Поправить парковку байков');
+  await expect(page.locator('#ntPhotoPreview')).toHaveAttribute('src', template.photo_url);
+  await expect(page.locator('#ntPhotoText')).toContainText('Фото из шаблона');
+  await page.evaluate(() => setWizardStep(2, false));
+  await page.locator('#ntCity').fill('Краснодар');
+  await page.locator('#ntAddr').fill('ул. Красная, 1');
+  await page.evaluate(() => setWizardStep(3, false));
+  await page.locator('#ntCreate').click();
+  await expect(page.locator('#taskPreviewBody img')).toHaveAttribute('src', template.photo_url);
+  await page.locator('#ntPublish').click();
+  await expect.poll(() => harness.requests.some(item => item.path === '/api/admin/task/create')).toBe(true);
+  const request = harness.requests.find(item => item.path === '/api/admin/task/create');
+  expect(request.body).toMatchObject({
+    template_id: TEMPLATE_ID, template_version_id: TEMPLATE_VERSION_ID, template_photo_action: 'inherit', photo_data: null,
+  });
+});
+
+test('фото шаблона можно заменить и удалить только для создаваемого задания', async ({ page }) => {
+  const template = taskTemplate({ evidence_policy: 'comment_only' });
+  await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+  await page.evaluate(() => setWizardStep(2, false));
+  expect(await page.evaluate(() => collectTaskBody().evidence_policy)).toBe('comment_only');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  await page.locator('#ntPhoto').setInputFiles({ name: 'parking.png', mimeType: 'image/png', buffer: png });
+  await expect(page.locator('#ntPhotoText')).toContainText('Фото готово');
+  expect(await page.evaluate(() => collectTaskBody().template_photo_action)).toBe('replace');
+  expect(await page.evaluate(() => collectTaskBody().photo_data.startsWith('data:image/jpeg'))).toBe(true);
+  await page.locator('#ntPhotoClear').click();
+  const body = await page.evaluate(() => collectTaskBody());
+  expect(body.template_photo_action).toBe('remove');
+  expect(body.photo_data).toBeNull();
+});
+
+test('применённый шаблон блокирует authoritative поля и отсоединяется без потери текста', async ({ page }) => {
+  const template = taskTemplate();
+  await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+
+  for (const id of ['ntType', 'ntTitle', 'ntDetails', 'ntReward', 'ntMode', 'ntEvidence', 'ntMaxParticipants', 'ntBudgetCap']) {
+    await expect(page.locator(`#${id}`)).toBeDisabled();
+    await expect(page.locator(`#${id}`)).toHaveAttribute('aria-describedby', /ntTemplateLockHint/);
+  }
+  await expect(page.locator('#ntTemplateLockHint')).toContainText('выбери «Без шаблона»');
+  for (const id of ['ntCity', 'ntAddr', 'ntSlotStart', 'ntSlotEnd', 'ntAssigneeSearch', 'ntPhoto']) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+  }
+
+  await page.locator('#ntTemplate').selectOption('');
+  await expect(page.locator('#ntTemplateLockHint')).toBeHidden();
+  await expect(page.locator('#ntTitle')).toBeEnabled();
+  await expect(page.locator('#ntTitle')).toHaveValue(template.task_title);
+  await expect(page.locator('#ntPhotoPreview')).toBeHidden();
+});
+
+test('поиск сортирует библиотеку по названию и действия называют шаблон для screen reader', async ({ page }) => {
+  const first = taskTemplate({
+    id: '11111111-1111-4111-8111-111111111112',
+    version_id: '71111111-1111-4111-8111-111111111112',
+    title: 'Яма у вокзала', task_title: 'Проверить яму',
+  });
+  const second = taskTemplate({
+    id: '11111111-1111-4111-8111-111111111113',
+    version_id: '71111111-1111-4111-8111-111111111113',
+    title: 'Аварийная парковка', task_title: 'Поправить парковку',
+  });
+  await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [first, second] }),
+    templateStore: { active: [first, second], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+
+  await expect(page.locator('#tplLibrary .template-card .tt')).toHaveText(['Аварийная парковка', 'Яма у вокзала']);
+  await expect(page.getByRole('button', { name: 'Применить шаблон «Аварийная парковка»' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Изменить шаблон «Аварийная парковка»' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Копировать шаблон «Аварийная парковка»' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Архивировать шаблон «Аварийная парковка»' })).toBeVisible();
+  await page.locator('#tplSearch').fill('яма');
+  await expect(page.locator('#tplLibrary .template-card')).toHaveCount(1);
+  await expect(page.locator('#tplLibraryStatus')).toHaveText('Показано: 1 из 2');
+  await expect(page.locator('#tplLibrary')).toContainText('Яма у вокзала');
+});
+
+test('последний выбор шаблона побеждает ответы, пришедшие не по порядку', async ({ page }) => {
+  const slow = taskTemplate({ title: 'Медленный шаблон', task_title: 'Старый выбор' });
+  const fastId = '11111111-1111-4111-8111-111111111114';
+  const fast = taskTemplate({
+    id: fastId, version_id: '71111111-1111-4111-8111-111111111114',
+    title: 'Быстрый шаблон', task_title: 'Последний выбор',
+  });
+  await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [slow, fast] }),
+    templateStore: { active: [slow, fast], archived: [] },
+    templateDetailDelays: { [TEMPLATE_ID]: 180, [fastId]: 5 },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+  await page.locator('#ntTemplate').selectOption(fastId);
+  await expect(page.locator('#ntTitle')).toHaveValue('Последний выбор');
+  await page.waitForTimeout(220);
+  await expect(page.locator('#ntTemplate')).toHaveValue(fastId);
+  await expect(page.locator('#ntTitle')).toHaveValue('Последний выбор');
+});
+
+test('stale версия сохраняет локальные поля и безопасно применяет обновлённый шаблон', async ({ page }) => {
+  const template = taskTemplate({ evidence_policy: 'comment_only' });
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+    taskCreateResponses: [
+      { status: 409, body: { error: 'template_version_stale', current_version_id: 'new-version' } },
+      { status: 200, body: { ok: true, announcement_status: 'not_requested' } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('#ntTemplate').selectOption(TEMPLATE_ID);
+  await page.evaluate(() => setWizardStep(2, false));
+  await page.locator('#ntCity').fill('Краснодар');
+  await page.locator('#ntAddr').fill('ул. Сохранённая, 7');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  await page.locator('#ntPhoto').setInputFiles({ name: 'local.png', mimeType: 'image/png', buffer: png });
+  Object.assign(harness.templateStore.active[0], {
+    version_id: '71111111-1111-4111-8111-111111111199',
+    version_number: 4, generation: 6, task_title: 'Обновлённое задание', reward: 95,
+  });
+  await page.evaluate(() => setWizardStep(3, false));
+  await page.locator('#ntCreate').click();
+  await page.locator('#ntPublish').click();
+
+  await expect(page.locator('#ntTemplateRecovery')).toBeVisible();
+  await expect(page.locator('#ntTemplateRecoveryText')).toContainText('Локальные место, сроки, исполнитель и фото сохранены');
+  await expect(page.locator('#ntCity')).toHaveValue('Краснодар');
+  await expect(page.locator('#ntAddr')).toHaveValue('ул. Сохранённая, 7');
+  await page.locator('#ntTemplateReapply').click();
+  await expect(page.locator('#ntTitle')).toHaveValue('Обновлённое задание');
+  await expect(page.locator('#ntReward')).toHaveValue('95');
+  await expect(page.locator('#ntPhotoText')).toContainText('Сохранено после обновления');
+  await expect(page.locator('#ntTemplateRecovery')).toBeHidden();
+  await page.evaluate(() => setWizardStep(3, false));
+  await page.locator('#ntCreate').click();
+  await expect(page.locator('#taskPreviewBody')).toContainText('Обновлённое задание');
+  await expect(page.locator('#taskPreviewBody')).toContainText('+95⚡');
+  await page.locator('#ntPublish').click();
+  await expect.poll(() => harness.requests.filter(item => item.path === '/api/admin/task/create').length).toBe(2);
+  const retry = harness.requests.filter(item => item.path === '/api/admin/task/create')[1];
+  expect(retry.body).toMatchObject({
+    city: 'Краснодар', address: 'ул. Сохранённая, 7',
+    template_version_id: '71111111-1111-4111-8111-111111111199',
+    title: 'Обновлённое задание', reward: 95, template_photo_action: 'replace',
+  });
+  expect(retry.body.photo_data).toMatch(/^data:image\/jpeg/);
+});
+
+test('создание, новая версия и копия шаблона используют правильные endpoints', async ({ page }) => {
+  const template = taskTemplate();
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+
+  await page.locator('#tplNew').click();
+  await page.locator('#tplName').fill('Фото-проверка');
+  await page.locator('#tplTaskTitle').fill('Проверить парковку');
+  await page.locator('#tplType').selectOption('photo_check');
+  await page.locator('#tplEvidence').selectOption('comment_only');
+  await page.locator('#tplReward').fill('50');
+  await page.locator('#tplEditorSave').click();
+  await expect.poll(() => harness.requests.filter(item => item.path === '/api/admin/task-templates' && item.method === 'POST').length).toBe(1);
+  const created = harness.requests.find(item => item.path === '/api/admin/task-templates' && item.method === 'POST');
+  expect(created.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(created.body.photo_action).toBe('remove');
+  expect(created.body.evidence_policy).toBe('comment_only');
+
+  await page.locator(`[data-template-card="${TEMPLATE_ID}"] [data-tplcopy]`).click();
+  await expect(page.locator('#tplName')).toHaveValue('Копия — Парковка у ТЦ');
+  await page.locator('#tplEditorSave').click();
+  await expect.poll(() => harness.requests.filter(item =>
+    item.path === '/api/admin/task-templates' && item.method === 'POST'
+  ).length).toBe(2);
+  const copies = harness.requests.filter(item => item.path === '/api/admin/task-templates' && item.method === 'POST');
+  expect(copies[1].body).toMatchObject({
+    copied_from_id: TEMPLATE_ID,
+    copied_from_version_id: TEMPLATE_VERSION_ID,
+    photo_action: 'keep',
+  });
+
+  await page.locator(`[data-template-card="${TEMPLATE_ID}"] [data-tpledit]`).click();
+  await page.locator('#tplDetails').fill('Новое описание без изменения старых заданий');
+  await page.locator('#tplPhotoRemove').click();
+  await page.locator('#tplEditorSave').click();
+  await expect.poll(() => harness.requests.some(item => item.path === `/api/admin/task-templates/${TEMPLATE_ID}/versions`)).toBe(true);
+  const version = harness.requests.find(item => item.path === `/api/admin/task-templates/${TEMPLATE_ID}/versions`);
+  expect(version.body).toMatchObject({ expected_generation: 5, photo_action: 'remove' });
+});
+
+test('библиотека загружает все страницы и сохраняет в селекторе больше 50 шаблонов', async ({ page }) => {
+  const templates = Array.from({ length: 65 }, (_, index) => {
+    const serial = String(index + 1).padStart(12, '0');
+    return taskTemplate({
+      id: `11111111-1111-4111-8111-${serial}`,
+      version_id: `71111111-1111-4111-8111-${serial}`,
+      key: `parking-${index + 1}`,
+      title: `Шаблон ${index + 1}`,
+      task_title: `Задание ${index + 1}`,
+    });
+  });
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage', 'task.create'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: templates }),
+    templateStore: { active: templates, archived: [] },
+    templatePageSize: 50,
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await expect(page.locator('#ntTemplate option')).toHaveCount(66);
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+  await expect(page.locator('#tplLibrary .template-card')).toHaveCount(65);
+  await expect(page.locator('#ntTemplate option')).toHaveCount(66);
+  await expect(page.locator('#tplLibraryStatus')).toHaveText('Найдено: 65');
+  const reads = harness.requests.filter(item =>
+    item.path === '/api/admin/task-templates' && item.method === 'GET'
+  );
+  expect(reads).toHaveLength(2);
+  expect(reads[1].query).toContain('after_id=11111111-1111-4111-8111-000000000050');
+});
+
+test('неоднозначное сохранение шаблона повторяется с тем же operation_id', async ({ page }) => {
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview(),
+    templateStore: { active: [], archived: [] },
+    templateWriteResponses: [
+      { status: 503, body: { message: 'Ответ не подтверждён' } },
+      { status: 200, body: { ok: true } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+  await page.locator('#tplNew').click();
+  await page.locator('#tplName').fill('Ночной осмотр');
+  await page.locator('#tplTaskTitle').fill('Осмотреть парковку ночью');
+  await page.locator('#tplReward').fill('60');
+  await page.locator('#tplEditorSave').click();
+  await expect(page.locator('#templateEditorSheet')).toBeVisible();
+  await expect(page.locator('#tplEditorError')).toContainText('Ответ не подтверждён');
+  await page.locator('#tplEditorSave').click();
+  await expect.poll(() => harness.requests.filter(item => item.path === '/api/admin/task-templates' && item.method === 'POST').length).toBe(2);
+  const writes = harness.requests.filter(item => item.path === '/api/admin/task-templates' && item.method === 'POST');
+  expect(writes[1].body.operation_id).toBe(writes[0].body.operation_id);
+});
+
+test('409 при редактировании сохраняет форму как копию, а mobile библиотека не создаёт горизонтальный скролл', async ({ page }) => {
+  const template = taskTemplate();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['task.template.manage'], { task_types: TEMPLATE_TASK_TYPES }),
+    adminOverview: emptyAdminOverview({ task_templates: [template] }),
+    templateStore: { active: [template], archived: [] },
+    templateWriteResponses: [
+      { status: 409, body: { message: 'generation conflict' } },
+      { status: 200, body: { ok: true } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.locator('[data-taskmode="taskTemplateMode"]').click();
+  await page.locator(`[data-template-card="${TEMPLATE_ID}"] [data-tpledit]`).click();
+  await page.locator('#tplDetails').fill('Изменение, которое нельзя потерять');
+  await page.locator('#tplEditorSave').click();
+  await expect(page.locator('#templateEditorSheet')).toBeVisible();
+  await expect(page.locator('#tplDetails')).toHaveValue('Изменение, которое нельзя потерять');
+  await expect(page.locator('#tplEditorError')).toContainText('Введённые данные сохранены');
+  const request = harness.requests.find(item => item.path === `/api/admin/task-templates/${TEMPLATE_ID}/versions`);
+  expect(request.body.expected_generation).toBe(5);
+  await expect(page.locator('#tplEditorCopy')).toBeVisible();
+  await page.locator('#tplEditorCopy').click();
+  await expect(page.locator('#tplEditorTitle')).toHaveText('Создать копию');
+  await expect(page.locator('#tplDetails')).toHaveValue('Изменение, которое нельзя потерять');
+  await expect(page.locator('#tplName')).toHaveValue('Копия — Парковка у ТЦ');
+  await page.locator('#tplEditorSave').click();
+  await expect(page.locator('#templateEditorSheet')).toBeHidden();
+  const copy = harness.requests.filter(item => item.path === '/api/admin/task-templates' && item.method === 'POST').at(-1);
+  expect(copy.body).toMatchObject({
+    copied_from_id: TEMPLATE_ID,
+    copied_from_version_id: TEMPLATE_VERSION_ID,
+    details: 'Изменение, которое нельзя потерять',
+  });
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const columns = await page.locator(`[data-template-card="${TEMPLATE_ID}"] .acts`).evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length);
+  expect(columns).toBe(2);
 });

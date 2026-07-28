@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     Double,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -122,6 +123,18 @@ tasks = Table(
     Column("cancel_reason", Text),
     Column("expired_at", DateTime(timezone=True)),
     Column("version", Integer, nullable=False, server_default=text("1")),
+    Column("template_id", Text),
+    Column("template_version_id", Text),
+    ForeignKeyConstraint(
+        ("template_id", "template_version_id"),
+        ("task_template_versions.template_id", "task_template_versions.id"),
+        name="fk_tasks_template_version", ondelete="RESTRICT",
+        deferrable=True, initially="DEFERRED",
+    ),
+    CheckConstraint(
+        "(template_id IS NULL)=(template_version_id IS NULL)",
+        name="tasks_template_provenance_pair",
+    ),
 )
 
 bonus_ledger = Table(
@@ -231,6 +244,146 @@ media_objects = Table(
     Column("checked_at", DateTime(timezone=True)),
     UniqueConstraint("upload_operation_id", name="uq_media_objects_upload_operation_id"),
     UniqueConstraint("backend", "object_key", name="uq_media_objects_backend_object_key"),
+)
+
+task_templates = Table(
+    "task_templates", metadata,
+    Column("id", Text, primary_key=True),
+    Column("key", Text, nullable=False),
+    Column("origin", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("current_version_id", Text, nullable=False),
+    Column("created_by", BigInteger, fk("members.user_id")),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_by", BigInteger, fk("members.user_id")),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("archived_by", BigInteger, fk("members.user_id")),
+    Column("archived_at", DateTime(timezone=True)),
+    UniqueConstraint("key", name="uq_task_templates_key"),
+    CheckConstraint("origin IN ('system','manual')", name="task_templates_origin"),
+    CheckConstraint("status IN ('active','archived')", name="task_templates_status"),
+    CheckConstraint("generation > 0", name="task_templates_generation"),
+    CheckConstraint(
+        "key ~ '^[a-z][a-z0-9_]{2,49}$'",
+        name="task_templates_key",
+    ),
+    CheckConstraint(
+        "(status='active' AND archived_by IS NULL AND archived_at IS NULL) OR "
+        "(status='archived' AND archived_by IS NOT NULL AND archived_at IS NOT NULL)",
+        name="task_templates_archive_state",
+    ),
+)
+
+task_template_versions = Table(
+    "task_template_versions", metadata,
+    Column("id", Text, primary_key=True),
+    Column("template_id", Text, fk("task_templates.id"), nullable=False),
+    Column("version_number", Integer, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("task_type", Text, nullable=False),
+    Column("task_title", Text, nullable=False),
+    Column("details", Text, nullable=False, server_default=text("''")),
+    Column("reward", BigInteger, nullable=False),
+    Column("mode", Text, nullable=False),
+    Column("evidence_policy", Text, nullable=False),
+    Column("max_participants", Integer, nullable=False),
+    Column("budget_cap", BigInteger, nullable=False),
+    Column("photo_media_id", Text, fk("media_objects.id")),
+    Column("photo_sha256", Text),
+    Column("content_hash", Text, nullable=False),
+    Column("created_by", BigInteger, fk("members.user_id")),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint(
+        "template_id", "version_number",
+        name="uq_task_template_versions_number",
+    ),
+    UniqueConstraint(
+        "template_id", "id", name="uq_task_template_versions_template_id",
+    ),
+    CheckConstraint("version_number > 0", name="task_template_versions_number"),
+    CheckConstraint(
+        "reward BETWEEN 1 AND 300", name="task_template_versions_reward",
+    ),
+    CheckConstraint(
+        "task_type IN ('relocate','fix_zone','charge','rescue','community',"
+        "'referral','photo_check')",
+        name="task_template_versions_type",
+    ),
+    CheckConstraint(
+        "mode IN ('open','personal','all')", name="task_template_versions_mode",
+    ),
+    CheckConstraint(
+        "evidence_policy IN "
+        "('none','comment_only','photo_required','before_after')",
+        name="task_template_versions_evidence",
+    ),
+    CheckConstraint(
+        "(mode IN ('open','personal') AND max_participants=1 "
+        "AND budget_cap=reward) OR (mode='all' AND max_participants BETWEEN 1 "
+        "AND 500 AND budget_cap BETWEEN reward AND 150000 "
+        "AND reward*max_participants<=budget_cap)",
+        name="task_template_versions_participants",
+    ),
+    CheckConstraint(
+        "(photo_media_id IS NULL)=(photo_sha256 IS NULL)",
+        name="task_template_versions_photo_pair",
+    ),
+    CheckConstraint(
+        "photo_sha256 IS NULL OR photo_sha256 ~ '^[0-9a-f]{64}$'",
+        name="task_template_versions_photo_sha",
+    ),
+    CheckConstraint(
+        "content_hash ~ '^[0-9a-f]{64}$'",
+        name="task_template_versions_content_hash",
+    ),
+    CheckConstraint(
+        "evidence_policy<>'before_after' OR photo_media_id IS NOT NULL",
+        name="task_template_versions_before_after_photo",
+    ),
+)
+
+task_templates.append_constraint(ForeignKeyConstraint(
+    ("id", "current_version_id"),
+    ("task_template_versions.template_id", "task_template_versions.id"),
+    name="fk_task_templates_current_version", ondelete="RESTRICT",
+    deferrable=True, initially="DEFERRED",
+))
+
+task_template_events = Table(
+    "task_template_events", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("template_id", Text, fk("task_templates.id"), nullable=False),
+    Column("template_version_id", Text),
+    Column("event_type", Text, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("actor_id", BigInteger, fk("members.user_id")),
+    Column("operation_id", Text, nullable=False),
+    Column("request_hash", Text, nullable=False),
+    Column("note", Text, nullable=False, server_default=text("''")),
+    Column("before_json", JSONB, nullable=False),
+    Column("after_json", JSONB, nullable=False),
+    Column("result_json", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ("template_id", "template_version_id"),
+        ("task_template_versions.template_id", "task_template_versions.id"),
+        name="fk_task_template_events_version", ondelete="RESTRICT",
+        deferrable=True, initially="DEFERRED",
+    ),
+    UniqueConstraint("operation_id", name="uq_task_template_events_operation"),
+    UniqueConstraint(
+        "template_id", "generation", name="uq_task_template_events_generation",
+    ),
+    CheckConstraint(
+        "event_type IN ('created','version_created','archived','activated')",
+        name="task_template_events_type",
+    ),
+    CheckConstraint("generation > 0", name="task_template_events_generation"),
+    CheckConstraint(
+        "request_hash ~ '^[0-9a-f]{64}$'",
+        name="task_template_events_request_hash",
+    ),
 )
 
 withdrawal_requests = Table(
@@ -889,6 +1042,19 @@ Index(
     telegram_join_requests.c.status, telegram_join_requests.c.requested_at,
 )
 Index("idx_media_gc", media_objects.c.state, media_objects.c.delete_after)
+Index("idx_task_templates_status", task_templates.c.status, task_templates.c.id)
+Index(
+    "idx_task_template_versions_template",
+    task_template_versions.c.template_id, task_template_versions.c.version_number,
+)
+Index(
+    "idx_task_template_versions_media", task_template_versions.c.photo_media_id,
+)
+Index(
+    "idx_task_template_events_template",
+    task_template_events.c.template_id, task_template_events.c.generation,
+    task_template_events.c.id,
+)
 Index(
     "idx_staff_access_one_active",
     staff_access_grants.c.user_id, staff_access_grants.c.preset,
@@ -928,9 +1094,10 @@ IDENTITY_TABLES = (
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
     "staff_access_grants", "staff_access_changes", "staff_access_events",
+    "task_template_events",
 )
 
-if len(metadata.tables) != 38:
-    raise RuntimeError(f"Expected 38 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 47:
-    raise RuntimeError("Expected exactly 47 semantic indexes")
+if len(metadata.tables) != 41:
+    raise RuntimeError(f"Expected 41 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 51:
+    raise RuntimeError("Expected exactly 51 semantic indexes")

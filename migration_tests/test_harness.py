@@ -8,10 +8,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import hashlib
+import uuid
 
 from db_migration.metadata import metadata
 from db_migration import ALEMBIC_HEAD
 from db_migration.access_contract import CAPABILITIES_V1
+from db_migration.template_contract import SYSTEM_TEMPLATE_SEEDS
 from db_migration.types import ConversionError, parse_bigint, parse_json
 from scripts.migrate_sqlite_to_postgres import (
     iter_transformed_rows, validate_database_endpoint,
@@ -26,12 +29,12 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
-        self.assertEqual(ALEMBIC_HEAD, "0007_capability_rbac")
+        self.assertEqual(ALEMBIC_HEAD, "0008_task_template_versioning")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
-        self.assertEqual(len(metadata.tables), 38)
-        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 47)
+        self.assertEqual(len(metadata.tables), 41)
+        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 51)
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
-        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 298)
+        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 299)
 
     def test_incremental_foreign_keys_match_canonical_deferrability(self):
         versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
@@ -41,6 +44,7 @@ class MigrationHarnessTests(unittest.TestCase):
             "0005_manual_grant_reversals.py",
             "0006_join_request_admission.py",
             "0007_capability_rbac.py",
+            "0008_task_template_versioning.py",
         ):
             ddl = (versions / filename).read_text(encoding="utf-8")
             self.assertGreater(ddl.count("FOREIGN KEY"), 0, filename)
@@ -90,6 +94,87 @@ class MigrationHarnessTests(unittest.TestCase):
         self.assertEqual(converted[0]["after_json"]["preset"], "owner")
         with self.assertRaisesRegex(DataError, "row 1"):
             list(iter_transformed_rows(SourceStub('{"preset": "owner", "generation": 1}'), table.name))
+
+    def test_task_template_seed_hashes_and_ids_are_deterministic(self):
+        self.assertEqual(len(SYSTEM_TEMPLATE_SEEDS), 4)
+        self.assertEqual(
+            {seed["key"] for seed in SYSTEM_TEMPLATE_SEEDS},
+            {"parking", "parking_photo", "relocate", "charge"},
+        )
+        for seed in SYSTEM_TEMPLATE_SEEDS:
+            self.assertEqual(str(uuid.UUID(seed["id"])), seed["id"])
+            self.assertEqual(str(uuid.UUID(seed["version_id"])), seed["version_id"])
+            content = {
+                name: seed[name]
+                for name in (
+                    "title", "task_type", "task_title", "details", "reward",
+                    "mode", "evidence_policy", "max_participants", "budget_cap",
+                )
+            }
+            content.update({"photo_media_id": None, "photo_sha256": None})
+            digest = hashlib.sha256(json.dumps(
+                content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            self.assertEqual(digest, seed["content_hash"])
+
+    def test_template_migration_is_immutable_and_forward_only(self):
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations" / "versions" / "0008_task_template_versioning.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("reject_task_template_version_mutation", migration)
+        self.assertIn("reject_task_template_event_mutation", migration)
+        self.assertIn("reject_task_template_key_mutation", migration)
+        self.assertIn("fk_tasks_template_version", migration)
+        self.assertIn("Destructive task-template downgrade is disabled", migration)
+
+    def test_template_key_contract_is_identical_across_runtime_and_postgres(self):
+        root = Path(__file__).resolve().parents[1]
+        runtime = (root / "main.py").read_text(encoding="utf-8")
+        importer = (root / "scripts/migrate_sqlite_to_postgres.py").read_text(
+            encoding="utf-8",
+        )
+        migration = (
+            root / "migrations/versions/0008_task_template_versioning.py"
+        ).read_text(encoding="utf-8")
+        metadata_source = (root / "db_migration/metadata.py").read_text(
+            encoding="utf-8",
+        )
+        canonical = "[a-z][a-z0-9_]{2,49}"
+        self.assertIn(canonical, runtime)
+        self.assertIn(canonical, importer)
+        self.assertIn(canonical, migration)
+        self.assertIn(canonical, metadata_source)
+
+    def test_template_event_json_must_be_canonical(self):
+        table = metadata.tables["task_template_events"]
+        canonical = json.dumps(
+            {"generation": 1, "ok": True}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
+        )
+        row = {
+            "id": 1,
+            "template_id": "80c3f0b4-44fd-4df6-866e-d9872e7aa874",
+            "template_version_id": "d05974dc-2379-4ca5-b049-e862f5938f40",
+            "event_type": "created", "generation": 1, "actor_id": None,
+            "operation_id": "template-event-test", "request_hash": "a" * 64,
+            "note": "", "before_json": "{}", "after_json": canonical,
+            "result_json": canonical, "created_at": "2026-07-28T10:00:00+00:00",
+        }
+
+        class SourceStub:
+            def __init__(self, value):
+                self.value = value
+
+            def execute(self, _sql):
+                return [{**row, "after_json": self.value}]
+
+        converted = list(iter_transformed_rows(SourceStub(canonical), table.name))
+        self.assertTrue(converted[0]["after_json"]["ok"])
+        with self.assertRaisesRegex(DataError, "row 1"):
+            list(iter_transformed_rows(
+                SourceStub('{"ok": true, "generation": 1}'), table.name,
+            ))
 
     def test_integer_and_json_conversion_are_lossless(self):
         self.assertEqual(parse_bigint(42), 42)

@@ -2,6 +2,6 @@
 
 from .metadata import metadata
 
-ALEMBIC_HEAD = "0007_capability_rbac"
+ALEMBIC_HEAD = "0008_task_template_versioning"
 
 __all__ = ["ALEMBIC_HEAD", "metadata"]

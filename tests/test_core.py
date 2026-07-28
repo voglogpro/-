@@ -217,6 +217,462 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(event[0])["capabilities"], [])
         self.assertIn("withdrawal.decide", json.loads(event[1])["capabilities"])
 
+    async def test_versioned_task_template_crud_cas_and_immutable_history(self):
+        admin_id = 991_901_001
+        await self._seed_admin(admin_id)
+        original_admin = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        create_body = {
+            "operation_id": str(uuid.uuid4()),
+            "title": "Parking standard", "type": "fix_zone",
+            "task_title": "Fix the bike parking", "details": "Align every bike",
+            "reward": 75, "mode": "open", "evidence_policy": "after_required",
+        }
+        try:
+            created = response_json(await main.api_admin_task_template_create(
+                DummyRequest(create_body),
+            ))
+            replay = response_json(await main.api_admin_task_template_create(
+                DummyRequest(create_body),
+            ))
+            self.assertTrue(replay["idempotent"])
+            self.assertTrue(created["template_id"])
+            self.assertEqual(created["template_id"], replay["template_id"])
+            self.assertTrue(created["template_id"].startswith(""))
+            version_body = {
+                "operation_id": str(uuid.uuid4()), "expected_generation": 1,
+                "title": "Parking standard", "type": "fix_zone",
+                "task_title": "Fix the bike parking", "details": "Align bikes and clear access",
+                "reward": 80, "mode": "open", "evidence_policy": "after_required",
+                "photo_action": "remove", "note": "Clearer instruction",
+            }
+            version_request = DummyRequest(version_body)
+            version_request.match_info = {"template_id": created["template_id"]}
+            versioned = response_json(
+                await main.api_admin_task_template_version_create(version_request)
+            )
+            self.assertEqual((versioned["generation"], versioned["version_number"]), (2, 2))
+            stale = DummyRequest({**version_body, "operation_id": str(uuid.uuid4())})
+            stale.match_info = {"template_id": created["template_id"]}
+            self.assertEqual(
+                (await main.api_admin_task_template_version_create(stale)).status, 409,
+            )
+        finally:
+            main._require_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            versions = db.execute(
+                "SELECT id FROM task_template_versions WHERE template_id=? "
+                "ORDER BY version_number", (created["template_id"],),
+            ).fetchall()
+            self.assertEqual(len(versions), 2)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                db.execute(
+                    "UPDATE task_template_versions SET reward=90 WHERE id=?",
+                    (versions[0][0],),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                db.execute("DELETE FROM task_template_versions WHERE id=?", (versions[0][0],))
+
+    async def test_template_archive_keeps_task_provenance_and_committed_replay(self):
+        admin_id = 991_901_011
+        await self._seed_admin(admin_id)
+        original_admin = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        with sqlite3.connect(main.DB_PATH) as db:
+            template = db.execute(
+                "SELECT id,current_version_id,generation FROM task_templates "
+                "WHERE key='parking'",
+            ).fetchone()
+        task_body = {
+            "operation_id": str(uuid.uuid4()),
+            "template_id": template[0], "template_version_id": template[1],
+            "template_photo_action": "remove", "city": "Москва",
+            "address": "Тестовая парковка", "announce": False,
+            "type": "rescue", "title": "Must be ignored", "reward": 1,
+        }
+        try:
+            created = response_json(await main.api_admin_task_create(DummyRequest(task_body)))
+            status_request = DummyRequest({
+                "operation_id": str(uuid.uuid4()),
+                "expected_generation": template[2], "status": "archived",
+                "note": "Temporarily retired",
+            })
+            status_request.match_info = {"template_id": template[0]}
+            archived = response_json(await main.api_admin_task_template_status(status_request))
+            self.assertEqual(archived["status"], "archived")
+            replay = response_json(await main.api_admin_task_create(DummyRequest(task_body)))
+            self.assertTrue(replay["idempotent"])
+            blocked = await main.api_admin_task_create(DummyRequest({
+                **task_body, "operation_id": str(uuid.uuid4()),
+            }))
+            self.assertEqual(blocked.status, 409)
+        finally:
+            main._require_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            task = db.execute(
+                "SELECT type,title,reward,template_id,template_version_id FROM tasks WHERE id=?",
+                (created["task_id"],),
+            ).fetchone()
+        self.assertEqual(task[:3], ("fix_zone", "Поправить парковку байков", 80))
+        self.assertEqual(task[3:], template[:2])
+
+    async def test_template_task_rejects_assignee_from_another_city(self):
+        admin_id, assignee_id = 991_901_015, 991_901_016
+        await self._seed_admin(admin_id)
+        await main.upsert_member(
+            assignee_id, full_name="Different city", status="approved",
+            role="employee", city="Санкт-Петербург",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            template = db.execute(
+                "SELECT id,current_version_id FROM task_templates WHERE key='parking'",
+            ).fetchone()
+        operation_id = str(uuid.uuid4())
+        body = {
+            "operation_id": operation_id,
+            "template_id": template[0], "template_version_id": template[1],
+            "template_photo_action": "remove", "city": "Москва",
+            "address": "Тестовая парковка", "assigned_to": assignee_id,
+            "announce": False,
+        }
+        original_admin = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        try:
+            response = await main.api_admin_task_create(DummyRequest(body))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response_json(response)["error"], "assignee_city")
+        with sqlite3.connect(main.DB_PATH) as db:
+            persisted = db.execute(
+                "SELECT 1 FROM tasks WHERE operation_id=?", (operation_id,),
+            ).fetchone()
+        self.assertIsNone(persisted)
+
+    async def test_template_task_replay_precedes_mutable_assignee_checks_and_claims_registry(self):
+        admin_id, assignee_id = 991_901_017, 991_901_018
+        await self._seed_admin(admin_id)
+        await main.upsert_member(
+            assignee_id, full_name="Replay worker", status="approved",
+            role="employee", city="Москва",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            template = db.execute(
+                "SELECT id,current_version_id FROM task_templates WHERE key='parking'",
+            ).fetchone()
+        operation_id = str(uuid.uuid4())
+        body = {
+            "operation_id": operation_id,
+            "template_id": template[0], "template_version_id": template[1],
+            "template_photo_action": "remove", "city": "Москва",
+            "address": "Replay parking", "assigned_to": assignee_id,
+            "announce": False,
+        }
+        original_admin = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        try:
+            created = response_json(await main.api_admin_task_create(DummyRequest(body)))
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE members SET city='Санкт-Петербург',status='rejected' "
+                    "WHERE user_id=?", (assignee_id,),
+                )
+                db.commit()
+            replay = response_json(await main.api_admin_task_create(DummyRequest(body)))
+            collision = await main.api_admin_task_template_create(DummyRequest({
+                "operation_id": operation_id, "title": "Registry collision",
+                "type": "fix_zone", "task_title": "Must not be created",
+                "details": "Cross-domain UUID", "reward": 50,
+                "mode": "open", "evidence_policy": "none",
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertFalse(created["idempotent"])
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["task_id"], created["task_id"])
+        self.assertEqual(collision.status, 409)
+        self.assertEqual(response_json(collision)["error"], "operation_conflict")
+        with sqlite3.connect(main.DB_PATH) as db:
+            registry = db.execute(
+                "SELECT command_type,actor_id FROM operation_registry WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            self.assertEqual(registry, ("task_create", admin_id))
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM task_template_events WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+    async def test_template_upload_is_scheduled_for_cleanup_after_expected_conflict(self):
+        admin_id = 991_901_019
+        await self._seed_admin(admin_id)
+        image_buffer = BytesIO()
+        Image.new("RGB", (12, 12), "orange").save(image_buffer, format="PNG")
+        photo_data = "data:image/png;base64," + base64.b64encode(
+            image_buffer.getvalue()
+        ).decode("ascii")
+        operation_id = str(uuid.uuid4())
+        original_admin = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        try:
+            response = await main.api_admin_task_template_create(DummyRequest({
+                "operation_id": operation_id, "key": "parking",
+                "title": "Duplicate parking", "type": "fix_zone",
+                "task_title": "Duplicate must fail", "details": "Cleanup upload",
+                "reward": 50, "mode": "open", "evidence_policy": "photo_required",
+                "photo_action": "replace", "photo_data": photo_data,
+            }))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response_json(response)["error"], "template_key_exists")
+        with sqlite3.connect(main.DB_PATH) as db:
+            media = db.execute(
+                "SELECT state,delete_after FROM media_objects WHERE upload_operation_id=?",
+                (f"template:{operation_id}:brief",),
+            ).fetchone()
+        self.assertEqual(media[0], "ready")
+        self.assertTrue(media[1])
+
+    async def test_sqlite_template_provenance_triggers_reject_cross_template_links(self):
+        with sqlite3.connect(main.DB_PATH) as db:
+            templates = db.execute(
+                "SELECT id,current_version_id FROM task_templates ORDER BY id LIMIT 2",
+            ).fetchall()
+            self.assertEqual(len(templates), 2)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "provenance"):
+                db.execute(
+                    "INSERT INTO tasks (type,title,reward,status,created_at,template_id,"
+                    "template_version_id) VALUES ('fix_zone','Bad provenance',50,'open',?,?,?)",
+                    (main.now_iso(), templates[0][0], templates[1][1]),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "current version mismatch"):
+                db.execute(
+                    "UPDATE task_templates SET current_version_id=? WHERE id=?",
+                    (templates[1][1], templates[0][0]),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "event provenance"):
+                db.execute(
+                    "INSERT INTO task_template_events "
+                    "(template_id,template_version_id,event_type,generation,operation_id,"
+                    "request_hash,before_json,after_json,result_json,created_at) "
+                    "VALUES (?,?,'activated',999,?,?,'{}','{}','{}',?)",
+                    (
+                        templates[0][0], templates[1][1], f"bad-event:{uuid.uuid4()}",
+                        "f" * 64, main.now_iso(),
+                    ),
+                )
+
+    async def test_template_photo_copy_is_protected_from_media_gc_and_tx_rbac(self):
+        admin_id, unprivileged_id = 991_901_021, 991_901_022
+        await self._seed_admin(admin_id)
+        await main.upsert_member(unprivileged_id, status="approved", role="employee")
+        image_buffer = BytesIO()
+        Image.new("RGB", (12, 12), "green").save(image_buffer, format="PNG")
+        photo_data = "data:image/png;base64," + base64.b64encode(
+            image_buffer.getvalue()
+        ).decode("ascii")
+        original_admin = main._require_admin
+        actor = admin_id
+
+        async def authorized(_request):
+            return actor, None
+
+        main._require_admin = authorized
+        try:
+            source = response_json(await main.api_admin_task_template_create(DummyRequest({
+                "operation_id": str(uuid.uuid4()), "title": "Photo source",
+                "type": "photo_check", "task_title": "Inspect this parking",
+                "details": "Use the attached reference", "reward": 50,
+                "mode": "open", "evidence_policy": "before_and_after_required",
+                "photo_data": photo_data,
+            })))
+            copy_body = {
+                "operation_id": str(uuid.uuid4()), "copied_from_id": source["template_id"],
+                "copied_from_version_id": source["version_id"],
+                "photo_action": "keep", "title": "Photo copy", "type": "photo_check",
+                "task_title": "Inspect the copied parking", "details": "Same reference",
+                "reward": 50, "mode": "open",
+                "evidence_policy": "before_and_after_required",
+            }
+            copied = response_json(await main.api_admin_task_template_create(
+                DummyRequest(copy_body),
+            ))
+            source_version_request = DummyRequest({
+                "operation_id": str(uuid.uuid4()), "expected_generation": 1,
+                "title": "Photo source updated", "type": "photo_check",
+                "task_title": "Inspect this parking", "details": "Updated source",
+                "reward": 50, "mode": "open",
+                "evidence_policy": "before_and_after_required", "photo_action": "keep",
+            })
+            source_version_request.match_info = {"template_id": source["template_id"]}
+            self.assertEqual(
+                (await main.api_admin_task_template_version_create(source_version_request)).status,
+                200,
+            )
+            copy_replay = response_json(await main.api_admin_task_template_create(
+                DummyRequest(copy_body),
+            ))
+            self.assertTrue(copy_replay["idempotent"])
+            self.assertEqual(copy_replay["copied_from_version_id"], source["version_id"])
+            actor = unprivileged_id
+            denied = await main.api_admin_task_template_create(DummyRequest({
+                "operation_id": str(uuid.uuid4()), "title": "Denied template",
+                "type": "fix_zone", "task_title": "This must not persist",
+                "details": "No capability", "reward": 50, "mode": "open",
+                "evidence_policy": "none",
+            }))
+            self.assertEqual(denied.status, 403)
+        finally:
+            main._require_admin = original_admin
+        with sqlite3.connect(main.DB_PATH) as db:
+            media_rows = db.execute(
+                "SELECT v.template_id,v.photo_media_id,m.object_key FROM task_template_versions v "
+                "JOIN media_objects m ON m.id=v.photo_media_id "
+                "WHERE v.template_id IN (?,?) ORDER BY v.template_id",
+                (source["template_id"], copied["template_id"]),
+            ).fetchall()
+            self.assertEqual(len({row[1] for row in media_rows}), 1)
+            media_id = media_rows[0][1]
+            db.execute(
+                "UPDATE media_objects SET created_at=?,delete_after=? WHERE id=?",
+                ("2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00", media_id),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT state FROM media_objects WHERE id=?", (media_id,)).fetchone()[0],
+                "ready",
+            )
+
+    async def test_comment_only_completion_requires_a_real_comment(self):
+        worker_id = 991_901_031
+        await main.upsert_member(worker_id, status="approved", role="employee")
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_at,evidence_policy) "
+                "VALUES ('fix_zone','Comment gate','Москва','Адрес',30,'closed',?,'comment_only')",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,reward_snapshot) "
+                "VALUES (?,?,'claimed',?,30)",
+                (task_id, worker_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_worker = main._require_worker
+
+        async def authorized(_request):
+            return worker_id, None
+
+        main._require_worker = authorized
+        try:
+            rejected = await main.api_task_complete(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "note": "  ", "proof_photos": [],
+                "operation_id": str(uuid.uuid4()),
+            }))
+            accepted = await main.api_task_complete(DummyRequest({
+                "task_id": task_id, "assignment_id": assignment_id,
+                "note": "Parking aligned", "proof_photos": [],
+                "operation_id": str(uuid.uuid4()),
+            }))
+        finally:
+            main._require_worker = original_worker
+        self.assertEqual((rejected.status, response_json(rejected)["error"]), (400, "comment_required"))
+        self.assertEqual(accepted.status, 200)
+
+    async def test_dynamic_template_version_write_uses_heavy_capacity_lane(self):
+        template_id = str(uuid.uuid4())
+        request = SimpleNamespace(
+            method="POST",
+            path=f"/api/admin/task-templates/{template_id}/versions",
+        )
+        previous = main._api_capacity["active_heavy"]
+        main._api_capacity["active_heavy"] = main.API_HEAVY_INFLIGHT_MAX
+
+        async def must_not_run(_request):
+            raise AssertionError("heavy handler must be rejected before execution")
+
+        try:
+            response = await main.capacity_middleware(request, must_not_run)
+        finally:
+            main._api_capacity["active_heavy"] = previous
+        self.assertEqual((response.status, response_json(response)["error"]), (503, "server_busy"))
+        self.assertTrue(main._is_heavy_api_request(request))
+
+    async def test_runtime_template_seeds_match_migration_contract(self):
+        from db_migration.template_contract import (
+            SYSTEM_TEMPLATE_SEEDS, SYSTEM_TEMPLATE_SEED_AT,
+        )
+
+        self.assertEqual(main.TASK_TEMPLATE_SEED_AT, SYSTEM_TEMPLATE_SEED_AT)
+        expected = {item["key"]: item for item in SYSTEM_TEMPLATE_SEEDS}
+        normalized = {}
+        for seed in main.TASK_TEMPLATES:
+            mode = seed.get("mode") or "open"
+            reward = int(seed["reward"])
+            max_participants = 10 if mode == "all" else 1
+            content = {
+                "title": seed["title"], "task_type": seed["type"],
+                "task_title": seed["task_title"], "details": seed.get("details") or "",
+                "reward": reward, "mode": mode,
+                "evidence_policy": main._evidence_policy(
+                    seed.get("evidence_policy") or "after_required"
+                ),
+                "max_participants": max_participants,
+                "budget_cap": reward * max_participants,
+                "photo_media_id": None, "photo_sha256": None,
+            }
+            template_id, version_id = main._task_template_seed_ids(seed["key"])
+            normalized[seed["key"]] = {
+                **{key: content[key] for key in (
+                    "title", "task_type", "task_title", "details", "reward", "mode",
+                    "evidence_policy", "max_participants", "budget_cap",
+                )},
+                "id": template_id, "version_id": version_id,
+                "key": seed["key"],
+                "content_hash": main._task_template_content_hash(content),
+            }
+        self.assertEqual(normalized, expected)
+        with sqlite3.connect(main.DB_PATH) as db:
+            rows = db.execute(
+                "SELECT t.key,t.id,t.current_version_id,v.content_hash "
+                "FROM task_templates t JOIN task_template_versions v "
+                "ON v.id=t.current_version_id WHERE t.origin='system' ORDER BY t.key"
+            ).fetchall()
+        self.assertEqual(
+            rows,
+            sorted((key, item["id"], item["version_id"], item["content_hash"])
+                   for key, item in expected.items()),
+        )
+
     @staticmethod
     def _join_request_event(
         user_id, invite_url, *, update_id, user_chat_id=None,

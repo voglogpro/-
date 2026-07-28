@@ -249,6 +249,80 @@ def reconcile(
                        ON m.id=e.media_id WHERE e.media_id IS NOT NULL AND m.id IS NULL)
                     + (SELECT COUNT(*) FROM task_outbox o LEFT JOIN media_objects m
                        ON m.id=o.media_id WHERE o.media_id IS NOT NULL AND m.id IS NULL)
+                    + (SELECT COUNT(*) FROM task_template_versions v LEFT JOIN media_objects m
+                       ON m.id=v.photo_media_id
+                       WHERE v.photo_media_id IS NOT NULL AND m.id IS NULL)
+                """,
+                "task_template_current_version": """
+                    SELECT COUNT(*) FROM task_templates t
+                    LEFT JOIN task_template_versions v
+                      ON v.template_id=t.id AND v.id=t.current_version_id
+                    WHERE v.id IS NULL
+                """,
+                "task_template_version_sequence": """
+                    SELECT COUNT(*) FROM (
+                      SELECT template_id FROM task_template_versions
+                      GROUP BY template_id
+                      HAVING MIN(version_number)<>1
+                         OR COUNT(*)<>MAX(version_number)
+                         OR COUNT(DISTINCT version_number)<>COUNT(*)
+                    ) q
+                """,
+                "task_template_generation": """
+                    SELECT COUNT(*) FROM task_templates t
+                    WHERE t.generation<>COALESCE((SELECT MAX(e.generation)
+                            FROM task_template_events e WHERE e.template_id=t.id),0)
+                       OR t.generation<>(SELECT COUNT(*) FROM task_template_events e
+                            WHERE e.template_id=t.id)
+                """,
+                "task_template_media_integrity": """
+                    SELECT COUNT(*) FROM task_template_versions v
+                    JOIN media_objects m ON m.id=v.photo_media_id
+                    WHERE v.photo_media_id IS NOT NULL AND (
+                      m.state<>'ready' OR m.purpose<>'task_template_brief'
+                      OR m.sha256<>v.photo_sha256
+                    )
+                """,
+                "task_template_event_version": """
+                    SELECT COUNT(*) FROM task_template_events e
+                    LEFT JOIN task_template_versions v
+                      ON v.template_id=e.template_id AND v.id=e.template_version_id
+                    WHERE e.template_version_id IS NOT NULL AND v.id IS NULL
+                """,
+                "task_template_task_provenance": """
+                    SELECT COUNT(*) FROM tasks t
+                    LEFT JOIN task_template_versions v
+                      ON v.template_id=t.template_id AND v.id=t.template_version_id
+                    WHERE (t.template_id IS NULL)<>(t.template_version_id IS NULL)
+                       OR (t.template_id IS NOT NULL AND v.id IS NULL)
+                """,
+                "task_template_system_seed": """
+                    SELECT (SELECT COUNT(*) FROM (
+                      VALUES
+                        ('f679a68c-ef2a-561f-b191-96fc89b306e4','parking',
+                         '455586eb-d473-5c43-b522-a3b093bfd5af',
+                         '3a57569012e4a11f73067b4b524311c8517c4f78ce78e8852eacbcdbf929acc2',1,80),
+                        ('2f6cee00-51f1-5cf2-9dda-487711836f2f','parking_photo',
+                         '81cfc2f7-6106-5707-add0-4234710e85a0',
+                         'cd85abc8d5a1dee6e80bac320abe939da8bdecb2e7627fd5972a2502279b870a',10,500),
+                        ('e482a568-3a00-5e77-b668-ca19ba42fbaa','relocate',
+                         '10ba0a01-7474-50d4-9cd8-06d027ca85af',
+                         '56fc16f014d13187aab36bfd78662ab05f8820bce47e6ef02c57abc6547749cd',1,100),
+                        ('cf1573ed-f6ce-58f5-a18f-d3bf239c4b9b','charge',
+                         'cc48e39d-6578-5793-a383-879bc7913193',
+                         'ada4d56af8db5c3ee83f8f49aeaefdae9736fd09dfc8eb01e3be7503b6897c8e',1,120)
+                    ) AS expected(id,key,version_id,content_hash,max_participants,budget_cap)
+                    LEFT JOIN task_templates t ON t.id=expected.id
+                    LEFT JOIN task_template_versions v
+                      ON v.template_id=t.id AND v.id=expected.version_id
+                    WHERE t.id IS NULL OR t.key<>expected.key OR t.origin<>'system'
+                       OR v.version_number<>1 OR v.content_hash<>expected.content_hash
+                       OR v.max_participants<>expected.max_participants
+                       OR v.budget_cap<>expected.budget_cap
+                       OR v.evidence_policy<>'photo_required'
+                    ) + CASE WHEN (
+                      SELECT COUNT(*) FROM task_templates WHERE origin='system'
+                    )<>4 THEN 1 ELSE 0 END
                 """,
                 "inbox_processing_lease": """
                     SELECT COUNT(*) FROM telegram_update_inbox
@@ -349,6 +423,7 @@ def reconcile(
                 "admin_role_changes",
                 "staff_access_grants", "staff_access_changes",
                 "staff_access_events",
+                "task_template_events",
                 ):
                     sequence_name = target.execute(text(
                     "SELECT pg_get_serial_sequence(:table_name,'id')"

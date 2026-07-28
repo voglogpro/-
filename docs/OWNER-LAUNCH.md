@@ -109,7 +109,7 @@ platform: linux/amd64
 Release workflow публикует SPDX SBOM и SLSA provenance.
 
 Этот образ подтверждает только прежний baseline. Он не содержит новых scripts и
-флагов candidate v1, monitor/recovery и текущей schema 298. Поэтому приведённый digest
+флагов candidate v1, monitor/recovery и текущей schema 299. Поэтому приведённый digest
 нельзя использовать для запуска текущего worktree v2.10.0. До публикации и
 проверки нового immutable image действует terminal **NO-GO**.
 

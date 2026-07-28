@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -121,15 +122,96 @@ def main():
             "'image/jpeg',4,?,'media-upload-fixture','media-request-fixture',?,?,0)",
             ("a" * 64, stamp, stamp),
         )
+        template_media_sha = "b" * 64
+        db.execute(
+            "INSERT INTO media_objects "
+            "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+            "upload_operation_id,request_hash,created_at,ready_at,reconcile_attempts) "
+            "VALUES ('media-template-fixture','local','template-fixture.jpg',"
+            "'task_template_brief','ready','image/jpeg',4,?,"
+            "'media-template-upload-fixture','media-template-request-fixture',?,?,0)",
+            (template_media_sha, stamp, stamp),
+        )
+        template_id = "80c3f0b4-44fd-4df6-866e-d9872e7aa874"
+        template_version_id = "d05974dc-2379-4ca5-b049-e862f5938f40"
+        template_content = {
+            "title": "Fixture template",
+            "task_type": "fix_zone",
+            "task_title": "Fixture versioned task",
+            "details": "Synthetic migration template",
+            "reward": 90,
+            "mode": "open",
+            "evidence_policy": "photo_required",
+            "max_participants": 1,
+            "budget_cap": 90,
+            "photo_media_id": "media-template-fixture",
+            "photo_sha256": template_media_sha,
+        }
+        template_content_hash = hashlib.sha256(json.dumps(
+            template_content, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        db.execute(
+            "INSERT INTO task_templates "
+            "(id,key,origin,status,generation,current_version_id,created_by,"
+            "created_at,updated_by,updated_at) VALUES "
+            "(?, 'fixture_template','manual','active',1,?,101,?,101,?)",
+            (template_id, template_version_id, stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO task_template_versions "
+            "(id,template_id,version_number,title,task_type,task_title,details,"
+            "reward,mode,evidence_policy,max_participants,budget_cap,photo_media_id,"
+            "photo_sha256,content_hash,created_by,created_at) "
+            "VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,101,?)",
+            (
+                template_version_id, template_id, template_content["title"],
+                template_content["task_type"], template_content["task_title"],
+                template_content["details"], template_content["reward"],
+                template_content["mode"], template_content["evidence_policy"],
+                template_content["max_participants"], template_content["budget_cap"],
+                template_content["photo_media_id"], template_content["photo_sha256"],
+                template_content_hash, stamp,
+            ),
+        )
+        template_after = {
+            "id": template_id, "key": "fixture_template", "origin": "manual",
+            "status": "active", "generation": 1,
+            "current_version_id": template_version_id,
+            "version": {
+                **template_content, "id": template_version_id,
+                "version_number": 1, "content_hash": template_content_hash,
+            },
+        }
+        template_result = {
+            "generation": 1, "idempotent": False, "ok": True,
+            "status": "active", "template_id": template_id,
+            "version_id": template_version_id, "version_number": 1,
+        }
+        db.execute(
+            "INSERT INTO task_template_events "
+            "(template_id,template_version_id,event_type,generation,actor_id,"
+            "operation_id,request_hash,note,before_json,after_json,result_json,created_at) "
+            "VALUES (?,?,'created',1,101,'task-template-create-fixture',?,'',?,?,?,?)",
+            (
+                template_id, template_version_id, template_content_hash,
+                json.dumps({}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                json.dumps(template_after, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                json.dumps(template_result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                stamp,
+            ),
+        )
         db.execute(
             "INSERT INTO tasks "
             "(id,type,title,details,address,city,reward,status,created_by,created_at,"
             "repeatable,photo_file,photo_media_id,operation_id,request_hash,"
-            "submission_attempt,evidence_policy,max_participants,budget_cap,version) "
+            "submission_attempt,evidence_policy,max_participants,budget_cap,"
+            "template_id,template_version_id,version) "
             "VALUES (1001,'fix_zone','Тестовое задание','Без реальных данных',"
             "'Тестовый адрес','Краснодар',100,'closed',101,?,0,'media-fixture.jpg',"
             "'media-fixture','task-create-fixture','task-request-fixture',1,"
-            "'photo_required',1,100,1)", (stamp,),
+            "'photo_required',1,100,?,?,1)",
+            (stamp, template_id, template_version_id),
         )
         db.execute(
             "INSERT INTO task_assignments "
@@ -318,6 +400,10 @@ def main():
                 (
                     "access-request-fixture",
                     "staff_access_request", "4" * 64, 101, stamp,
+                ),
+                (
+                    "task-template-create-fixture", "task_template_create",
+                    template_content_hash, 101, stamp,
                 ),
             ],
         )
