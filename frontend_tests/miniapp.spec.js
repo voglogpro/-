@@ -628,6 +628,39 @@ test('скаут видит честную проверку без фото и �
   await expect(page.locator('#evidenceSheet')).toBeHidden();
 });
 
+test('скаут различает этапы вступления и безопасно повторяет решение Telegram', async ({ page }) => {
+  const requestKey = 'b'.repeat(64);
+  const overview = {
+    pending: [], pending_total: 0, rejected: [], review: [], review_total: 0,
+    team: [], awards: [], granted: [], withdrawals: [], open_tasks: [],
+    task_templates: [], recent_decisions: [], role_changes: [], manual_grants: [],
+    join_requests: [{
+      request_key: requestKey, user_id: 202, full_name: 'Иван',
+      username: 'ivan', city: 'Краснодар', source: 'bot_invite',
+      status: 'manual_required', decision: 'approve',
+      requested_at: '2026-07-28T09:00:00+00:00', last_error: 'TelegramBadRequest',
+    }],
+  };
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }), adminOverview: overview,
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+
+  await expect(page.locator('#adJoinRequests')).toContainText('Нужно внимание');
+  await expect(page.locator('#adJoinRequests')).toContainText('TelegramBadRequest');
+  await page.getByRole('button', { name: 'Повторить одобрение' }).click();
+  await page.locator('#askText').fill('Проверил заявку в Telegram');
+  await page.locator('#askOk').click();
+
+  await expect.poll(() => harness.requests.some(item =>
+    item.path === '/api/admin/join-request/retry'
+    && item.body.request_key === requestKey
+    && item.body.decision === 'approve'
+    && item.body.reason === 'Проверил заявку в Telegram'
+    && /^[0-9a-f-]{36}$/.test(item.body.operation_id)
+  )).toBe(true);
+});
+
 test('Escape отменяет обязательный ввод, а пустое значение не принимается', async ({ page }) => {
   await openMiniApp(page);
   await page.evaluate(() => {

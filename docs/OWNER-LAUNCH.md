@@ -171,13 +171,34 @@ updates и не показывает текст, имя автора или toke
 маркеры вручную.
 
 Production-файл генерируется контейнером, поэтому секреты не попадают в shell
-history. Ниже заменяются только домен и реальные ID из таблицы:
+history. Сначала бот создаёт управляемую join-request ссылку. Её значение держим
+только в переменной процесса и сразу передаём генератору защищённого env:
+
+```bash
+read -rsp 'BOT_TOKEN: ' BOT_TOKEN; echo
+export BOT_TOKEN
+GROUP_ID=-1000000000001
+docker run --rm -e BOT_TOKEN -e BOT_USERNAME=BbGalterbot -e GROUP_ID \
+  "$BIBITASKS_IMAGE" python scripts/telegram_join_request_link.py || true
+JOIN_REQUEST_REPORT="$(docker run --rm -e BOT_TOKEN \
+  -e BOT_USERNAME=BbGalterbot -e GROUP_ID "$BIBITASKS_IMAGE" \
+  python scripts/telegram_join_request_link.py \
+  --apply --confirm-bot @BbGalterbot)"
+JOIN_REQUEST_INVITE_URL="$(printf '%s' "$JOIN_REQUEST_REPORT" | jq -er \
+  'select(.ok == true and .creator_verified == true) | .invite_url')"
+unset JOIN_REQUEST_REPORT
+export JOIN_REQUEST_INVITE_URL
+```
+
+Не выводите `JOIN_REQUEST_INVITE_URL`, не помещайте его в Git или evidence pack.
+Ниже заменяются только домен и реальные ID из таблицы:
 
 ```bash
 read -rsp 'BOT_TOKEN: ' BOT_TOKEN; echo
 read -rsp 'MONITOR_ALERT_BOT_TOKEN (отдельный бот): ' MONITOR_ALERT_BOT_TOKEN; echo
 export BOT_TOKEN MONITOR_ALERT_BOT_TOKEN
 docker run --rm --user 0:0 -e BOT_TOKEN \
+  -e JOIN_REQUEST_INVITE_URL \
   -e MONITOR_ALERT_BOT_TOKEN \
   -v /etc/bibitasks:/secure "$BIBITASKS_IMAGE" \
   python scripts/bootstrap_production_env.py \
@@ -187,12 +208,13 @@ docker run --rm --user 0:0 -e BOT_TOKEN \
   --privacy-url https://tasks.example.com/privacy \
   --privacy-controller-name 'Юридическое имя оператора' \
   --privacy-contact '@ответственный_за_данные' \
+  --join-request-invite-url "$JOIN_REQUEST_INVITE_URL" \
   --group-id -1000000000001 --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
   --webapp-shortname bibibike \
   --topic-news 11 --topic-chat 12 --topic-work 13 \
   --topic-franchise 14 --ops-topic-tasks 21
-unset BOT_TOKEN MONITOR_ALERT_BOT_TOKEN
+unset BOT_TOKEN MONITOR_ALERT_BOT_TOKEN JOIN_REQUEST_INVITE_URL
 sudo chmod 0600 /etc/bibitasks/bibitasks.env \
   /etc/bibitasks/monitor-alert-bot-token \
   /etc/bibitasks/monitor-health-token

@@ -11,6 +11,7 @@ import json
 import html
 import ipaddress
 import os
+import re
 import sys
 import argparse
 import urllib.error
@@ -146,6 +147,24 @@ def _safe_https_url(value):
     return parsed.geturl()
 
 
+def _join_request_url(value):
+    raw = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").casefold() not in {"t.me", "telegram.me"}
+        or port not in (None, 443) or parsed.username or parsed.password
+        or parsed.query or parsed.fragment
+        or not re.fullmatch(r"/\+[A-Za-z0-9_-]{16,128}", parsed.path)
+    ):
+        return ""
+    return f"https://t.me{parsed.path}"
+
+
 def probe_privacy_policy(url, timeout=10):
     """Fetch a bounded same-origin policy page without forwarding secrets."""
     request = urllib.request.Request(
@@ -194,6 +213,8 @@ def run_preflight(
     privacy_url = _safe_https_url(env.get("PRIVACY_URL"))
     webapp_shortname = str(env.get("WEBAPP_SHORTNAME", "")).strip()
     require_main_mini_app = _truthy(env.get("PREFLIGHT_REQUIRE_MAIN_MINI_APP"))
+    join_request_enabled = _truthy(env.get("JOIN_REQUEST_ADMISSION_ENABLED"))
+    join_request_url = _join_request_url(env.get("JOIN_REQUEST_INVITE_URL"))
     route_id = str(env.get("WEBHOOK_ROUTE_ID", "")).strip()
     topic_names = (
         "TOPIC_NEWS", "TOPIC_CHAT", "TOPIC_WORK", "TOPIC_FRANCHISE",
@@ -242,6 +263,15 @@ def run_preflight(
         "PRIVACY_CONTROLLER_NAME or PRIVACY_CONTACT is missing",
     )
     add("WEBAPP_SHORTNAME", bool(webapp_shortname), "configured", "missing")
+    add(
+        "managed join-request admission", join_request_enabled,
+        "enabled", "JOIN_REQUEST_ADMISSION_ENABLED must be true",
+    )
+    add(
+        "managed join-request URL", bool(join_request_url),
+        "modern t.me/+ invite configured",
+        "JOIN_REQUEST_INVITE_URL must be a modern https://t.me/+ link",
+    )
     add("bot profile copy", bool(expected_description and expected_short_description and expected_menu_text), "configured", "description, short description or menu text is missing")
     add(
         "public group copy configured", bool(expected_group_description),
@@ -362,6 +392,12 @@ def run_preflight(
     if public_chat:
         add("public chat type", public_chat.get("type") == "supergroup", "supergroup", f"unexpected type {public_chat.get('type')!r}")
         add("public forum mode", bool(public_chat.get("is_forum")), "topics enabled", "topics/forum mode is disabled")
+        add(
+            "public join-by-request gate",
+            public_chat.get("join_by_request") is True,
+            "public username requires a join request",
+            "join_by_request is disabled; the public username bypasses admission",
+        )
         actual_group_username = _username(public_chat.get("username"))
         add("public group username", actual_group_username == group_username, f"@{actual_group_username}", f"expected @{group_username}, got @{actual_group_username or 'private'}")
         title = str(public_chat.get("title", "")).strip()
@@ -385,6 +421,11 @@ def run_preflight(
     if public_member:
         add("public bot admin", public_member.get("status") == "administrator", "administrator", f"status is {public_member.get('status')!r}")
         add("public delete permission", bool(public_member.get("can_delete_messages")), "can delete service/moderated messages", "can_delete_messages is missing")
+        add(
+            "public invite permission", bool(public_member.get("can_invite_users")),
+            "can receive and decide join requests",
+            "can_invite_users is missing",
+        )
     ops_member = invoke("getChatMember", {"chat_id": ops_group_id, "user_id": bot_id})
     if ops_member:
         active = ops_member.get("status") in {"member", "administrator", "creator"}
@@ -396,6 +437,15 @@ def run_preflight(
         if webhook:
             actual_webhook = str(webhook.get("url", "")).strip()
             add("webhook URL", bool(route_id and actual_webhook == expected_webhook), "matches configured HTTPS route", "missing or differs from configured route")
+            allowed_updates = {
+                str(item) for item in (webhook.get("allowed_updates") or [])
+            }
+            add(
+                "webhook join-request updates",
+                "chat_join_request" in allowed_updates,
+                "chat_join_request is requested",
+                "chat_join_request is missing from allowed_updates",
+            )
             pending = int(webhook.get("pending_update_count") or 0)
             add("webhook backlog", pending < 100, f"{pending} pending updates", f"backlog is {pending}", warning=True)
             add("webhook last error", not webhook.get("last_error_date"), "no recorded delivery error", "Telegram reports a recent webhook delivery error", warning=True)

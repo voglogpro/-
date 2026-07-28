@@ -46,6 +46,7 @@ class BootstrapConfig:
     privacy_url: str
     privacy_controller_name: str
     privacy_contact: str
+    join_request_invite_url: str
     bot_username: str = "BbGalterbot"
     group_username: str = "bbbikefan"
     expected_bot_name: str = "БибиЗадачи · Бибибайк"
@@ -82,6 +83,24 @@ def _safe_privacy_url(value):
     ):
         return ""
     return raw
+
+
+def _join_request_url(value):
+    raw = str(value or "").strip()
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").casefold() not in {"t.me", "telegram.me"}
+        or port not in (None, 443) or parsed.username or parsed.password
+        or parsed.query or parsed.fragment
+        or not re.fullmatch(r"/\+[A-Za-z0-9_-]{16,128}", parsed.path)
+    ):
+        return ""
+    return f"https://t.me{parsed.path}"
 
 
 def validate_config(config: BootstrapConfig, bot_token: str):
@@ -121,6 +140,10 @@ def validate_config(config: BootstrapConfig, bot_token: str):
     expected_privacy_url = config.public_base_url.strip().rstrip("/") + "/privacy"
     if _safe_privacy_url(config.privacy_url) != expected_privacy_url:
         errors.append("PRIVACY_URL must equal PUBLIC_BASE_URL + /privacy")
+    if not _join_request_url(config.join_request_invite_url):
+        errors.append(
+            "JOIN_REQUEST_INVITE_URL must be a modern https://t.me/+ invite link"
+        )
     for name, value in (
         ("PRIVACY_CONTROLLER_NAME", config.privacy_controller_name),
         ("PRIVACY_CONTACT", config.privacy_contact),
@@ -144,6 +167,7 @@ def validate_config(config: BootstrapConfig, bot_token: str):
         config.expected_bot_name, config.expected_group_title,
         config.withdraw_contact, config.privacy_url,
         config.privacy_controller_name, config.privacy_contact,
+        config.join_request_invite_url,
     )):
         errors.append("text values must not contain line breaks")
     if errors:
@@ -187,6 +211,11 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "DISPUTE_OPEN_DAYS": "30",
         "REQUIRED_CHAT": f"@{group_username}",
         "REQUIRED_CHAT_URL": f"https://t.me/{group_username}",
+        "JOIN_REQUEST_ADMISSION_ENABLED": "true",
+        "JOIN_REQUEST_INVITE_URL": _join_request_url(
+            config.join_request_invite_url
+        ),
+        "JOIN_REQUEST_APPLICATION_SLA_HOURS": "72",
         "GROUP_USERNAME": group_username,
         "GROUP_ID": str(config.group_id),
         "TOPIC_NEWS": str(config.topic_news),
@@ -338,6 +367,7 @@ def main():
     parser.add_argument("--privacy-url", required=True)
     parser.add_argument("--privacy-controller-name", required=True)
     parser.add_argument("--privacy-contact", required=True)
+    parser.add_argument("--join-request-invite-url", required=True)
     parser.add_argument("--group-id", type=_supergroup_id, required=True)
     parser.add_argument("--ops-group-id", type=_supergroup_id, required=True)
     parser.add_argument("--admin-id", type=_positive_id, action="append", required=True)
@@ -368,6 +398,7 @@ def main():
         privacy_url=args.privacy_url,
         privacy_controller_name=args.privacy_controller_name,
         privacy_contact=args.privacy_contact,
+        join_request_invite_url=args.join_request_invite_url,
         bot_username=args.bot_username,
         group_username=args.group_username,
     )

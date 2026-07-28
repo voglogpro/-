@@ -39,15 +39,16 @@ from cryptography.fernet import Fernet, InvalidToken
 from scripts.recovery_key_canary import ensure_recovery_key_canary
 from pydantic import ValidationError
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
-    CallbackQuery, BufferedInputFile, ChatMemberUpdated, Update,
+    CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
 APP_VERSION = "v2.10.0"
 BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
-SQLITE_SCHEMA_VERSION = 296
+SQLITE_SCHEMA_VERSION = 297
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -98,6 +99,29 @@ def _clean_username(raw):
     return value.lstrip("@").split("/")[0]
 
 
+def _truthy_env(name, default=""):
+    return str(os.getenv(name, default) or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _join_request_url(raw):
+    value = str(raw or "").strip()
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https" or parsed.hostname not in {"t.me", "telegram.me"}
+        or port not in (None, 443) or parsed.username or parsed.password
+        or parsed.query or parsed.fragment
+        or not re.fullmatch(r"/\+[A-Za-z0-9_-]{16,128}", parsed.path)
+    ):
+        return None
+    return f"https://t.me{parsed.path}"
+
+
 # Ник бота для непрозрачных реферальных ссылок: https://t.me/<BOT_USERNAME>?start=rf_<token>
 # ВНИМАНИЕ: bbbikefan — это ГРУППА, а не бот. Диплинки понимают только боты,
 # поэтому реферальные ссылки идут на BbGalterbot и никогда не содержат Telegram ID.
@@ -108,6 +132,16 @@ BOT_USERNAME = _clean_username(os.getenv("BOT_USERNAME", "BbGalterbot"))
 # ВАЖНО: бот должен быть администратором этого чата, иначе Telegram
 # не даст проверить подписку и вернёт ошибку.
 REQUIRED_CHAT = (os.getenv("REQUIRED_CHAT", "@bbbikefan") or "").strip()
+JOIN_REQUEST_ADMISSION_ENABLED = _truthy_env(
+    "JOIN_REQUEST_ADMISSION_ENABLED", "false",
+)
+JOIN_REQUEST_INVITE_URL_RAW = (
+    os.getenv("JOIN_REQUEST_INVITE_URL", "") or ""
+).strip()
+JOIN_REQUEST_INVITE_URL = _join_request_url(JOIN_REQUEST_INVITE_URL_RAW)
+JOIN_REQUEST_APPLICATION_SLA_HOURS = _bounded_int_env(
+    "JOIN_REQUEST_APPLICATION_SLA_HOURS", 72, 1, 720,
+)
 
 # ── Группа и её подтемы ───────────────────────────────────────
 # Ссылка вида https://t.me/bbbikefan/3 — это id подтемы (message_thread_id).
@@ -157,6 +191,8 @@ def _required_chat_id():
 
 def _required_chat_url():
     """Ссылка, которую показываем человеку в кнопке «Подписаться»."""
+    if JOIN_REQUEST_ADMISSION_ENABLED:
+        return JOIN_REQUEST_INVITE_URL
     explicit = (os.getenv("REQUIRED_CHAT_URL", "") or "").strip()
     if explicit:
         return _safe_https_url(explicit)
@@ -382,6 +418,14 @@ def _validate_update_receiver_config():
         )
     if PRIVACY_URL_RAW and PRIVACY_URL is None:
         raise RuntimeError("PRIVACY_URL must be a public HTTPS URL without credentials")
+    if JOIN_REQUEST_INVITE_URL_RAW and JOIN_REQUEST_INVITE_URL is None:
+        raise RuntimeError(
+            "JOIN_REQUEST_INVITE_URL must be a modern https://t.me/+ invite link"
+        )
+    if JOIN_REQUEST_ADMISSION_ENABLED and JOIN_REQUEST_INVITE_URL is None:
+        raise RuntimeError(
+            "JOIN_REQUEST_INVITE_URL is required when join-request admission is enabled"
+        )
     if BIBITASKS_ENVIRONMENT == "production" and (
         TELEGRAM_RETRY_BASE_SECONDS,
         TELEGRAM_RETRY_MAX_SECONDS,
@@ -457,6 +501,10 @@ def _validate_update_receiver_config():
                 raise RuntimeError(f"{name} must use HTTPS")
     if TELEGRAM_UPDATE_MODE == "polling":
         return
+    if BIBITASKS_ENVIRONMENT == "production" and not JOIN_REQUEST_ADMISSION_ENABLED:
+        raise RuntimeError(
+            "Webhook production mode requires JOIN_REQUEST_ADMISSION_ENABLED=true"
+        )
     if not OPS_GROUP_ID:
         raise RuntimeError("Webhook production mode requires numeric private OPS_GROUP_ID")
     if not GROUP_ID:
@@ -1259,6 +1307,26 @@ async def init_db():
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_join_requests (
+                request_key TEXT PRIMARY KEY,
+                update_id INTEGER UNIQUE,
+                chat_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                invite_link_sha256 TEXT,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                decision TEXT,
+                decision_queued_at TEXT,
+                decided_at TEXT,
+                joined_at TEXT,
+                manual_retry_reason TEXT,
+                manual_retry_by INTEGER,
+                manual_retry_at TEXT,
+                last_error TEXT
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS published_posts (
                 kind        TEXT PRIMARY KEY,
                 chat_id     INTEGER NOT NULL,
@@ -1367,6 +1435,16 @@ async def init_db():
         for name in ("city_change_requested", "city_change_requested_at"):
             if name not in member_columns:
                 await db.execute(f"ALTER TABLE members ADD COLUMN {name} TEXT")
+                member_columns.add(name)
+        for name, sql_type in (
+            ("group_membership_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("group_joined_at", "TEXT"),
+            ("group_left_at", "TEXT"),
+        ):
+            if name not in member_columns:
+                await db.execute(
+                    f"ALTER TABLE members ADD COLUMN {name} {sql_type}"
+                )
                 member_columns.add(name)
         for name in (
             "city", "help_type", "transport", "availability",
@@ -1856,6 +1934,10 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_task_outbox_delivery "
             "ON task_outbox(status, available_at, id)")
         await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_join_requests_user_status "
+            "ON telegram_join_requests(user_id,status,requested_at)"
+        )
+        await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_telegram_inbox_delivery "
             "ON telegram_update_inbox(status, available_at, update_id)")
         await db.execute(
@@ -2311,6 +2393,17 @@ async def _schedule_expired_evidence_media():
                 (row["id"],),
             )
 
+        await db.execute(
+            "UPDATE telegram_join_requests SET manual_retry_reason=NULL,"
+            "last_error=NULL WHERE status IN ('joined','declined') "
+            "AND COALESCE(joined_at,decided_at,requested_at) "
+            "GLOB '????-??-??T??:??:??*' "
+            "AND datetime(COALESCE(joined_at,decided_at,requested_at)) "
+            "IS NOT NULL AND datetime(COALESCE(joined_at,decided_at,requested_at))"
+            "<datetime(?)",
+            (evidence_cutoff,),
+        )
+
         media_ids = sorted(proof_media | brief_media)
         for media_id in media_ids:
             await db.execute(
@@ -2386,7 +2479,9 @@ def now_iso():
 
 
 ANALYTICS_EVENTS = {
-    "group_member_joined", "bot_started", "referral_bound", "referral_link_invalid",
+    "group_join_requested", "group_join_request_expired",
+    "group_join_request_retried", "group_member_joined", "group_member_left",
+    "bot_started", "referral_bound", "referral_link_invalid",
     "miniapp_authenticated", "application_submitted", "application_resubmitted",
     "application_decided",
     "task_catalog_served", "task_created", "task_published",
@@ -3448,6 +3543,60 @@ async def _grant_referral_milestones_in_tx(db, user_id, by=None):
     return count, total
 
 
+async def _confirm_referral_if_ready_in_tx(db, user_id, by=None):
+    """Confirm a referral exactly once after approval and authoritative join."""
+    row = await (await db.execute(
+        "SELECT status,group_membership_status,referred_by,ref_confirmed "
+        "FROM members WHERE user_id=?",
+        (int(user_id),),
+    )).fetchone()
+    if not row:
+        return None, 0, 0
+    referred_by = row[2]
+    if (
+        row[0] != "approved" or row[1] != "member"
+        or not referred_by or int(referred_by) == int(user_id) or int(row[3] or 0)
+    ):
+        return None, 0, 0
+    changed = await db.execute(
+        "UPDATE members SET ref_confirmed=1 WHERE user_id=? "
+        "AND ref_confirmed=0 AND status='approved' "
+        "AND group_membership_status='member'",
+        (int(user_id),),
+    )
+    if changed.rowcount != 1:
+        return None, 0, 0
+    count, total = await _grant_referral_milestones_in_tx(
+        db, int(referred_by), by=by,
+    )
+    await _track_event_in_tx(
+        db, "referral_confirmed", "backend", user_id=int(user_id),
+        outcome="approved_and_joined",
+        dedupe_key=f"referral_confirmed:{int(user_id)}",
+    )
+    return int(referred_by), count, total
+
+
+def _referral_progress_message(count, total):
+    if total:
+        return (
+            f"🎉 Реферальная ступень достигнута!\n"
+            f"Одобрено друзей: {count}\n"
+            f"Начислено: +{total} бибибонусов."
+        )
+    next_threshold = next(
+        (item_count for item_count, _ in REFERRAL_MILESTONES if item_count > count),
+        None,
+    )
+    return (
+        f"👥 Новый друг одобрен и вступил в сообщество: {count}"
+        + (
+            f" из {next_threshold} до следующей награды."
+            if next_threshold else ". Все ступени пройдены!"
+        )
+    )
+
+
 async def sync_referral_milestones(user_id, by=None):
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -3706,6 +3855,101 @@ async def _enqueue_admins_in_tx(db, event_key, text, *, start=None):
         )
 
 
+async def _queue_join_request_decision_in_tx(db, request_key, decision):
+    """Durably queue one approve/decline without calling Telegram in a DB tx."""
+    if decision not in {"approve", "decline"}:
+        raise ValueError("unsupported join-request decision")
+    row = await (await db.execute(
+        "SELECT request_key,chat_id,user_id,source,status,decision "
+        "FROM telegram_join_requests WHERE request_key=?",
+        (request_key,),
+    )).fetchone()
+    if not row:
+        return False
+    terminal = "approved" if decision == "approve" else "declined"
+    if row["status"] in {terminal, "joined"}:
+        return True
+    if decision == "approve" and row["source"] != "bot_invite":
+        return False
+    if row["decision"] and row["decision"] != decision and row["status"] in {
+        "approve_queued", "decline_queued", "approved", "declined",
+    }:
+        return False
+    event_key = f"join_request:{request_key}:{decision}"
+    await _enqueue_outbox_in_tx(
+        db, event_key, "join_request_decision",
+        {
+            "request_key": request_key,
+            "decision": decision,
+            "chat_id": str(row["chat_id"]),
+            "user_id": int(row["user_id"]),
+        },
+    )
+    await db.execute(
+        "UPDATE task_outbox SET status='pending',attempts=0,available_at=?,"
+        "last_error=NULL WHERE event_key=? AND status='dead'",
+        (now_iso(), event_key),
+    )
+    await db.execute(
+        "UPDATE telegram_join_requests SET status=?,decision=?,"
+        "decision_queued_at=?,last_error=NULL WHERE request_key=?",
+        (
+            "approve_queued" if decision == "approve" else "decline_queued",
+            decision, now_iso(), request_key,
+        ),
+    )
+    return True
+
+
+async def _queue_join_requests_for_user_in_tx(db, user_id, decision):
+    """Queue the latest valid approval or every outstanding decline."""
+    limit = " LIMIT 1" if decision == "approve" else ""
+    rows = await (await db.execute(
+        "SELECT request_key FROM telegram_join_requests "
+        "WHERE user_id=? AND status IN "
+        "('awaiting_application','awaiting_review','manual_required') "
+        "ORDER BY requested_at DESC" + limit,
+        (int(user_id),),
+    )).fetchall()
+    queued = 0
+    for row in rows:
+        if await _queue_join_request_decision_in_tx(db, row[0], decision):
+            queued += 1
+    return queued
+
+
+def _chat_membership_is_active(member):
+    status = getattr(member.status, "value", member.status)
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return status in {"member", "administrator", "creator"}
+
+
+async def _join_request_delivery(item, payload):
+    chat_id = payload["chat_id"]
+    if str(chat_id).lstrip("-").isdigit():
+        chat_id = int(chat_id)
+    user_id = int(payload["user_id"])
+    decision = payload["decision"]
+    try:
+        if decision == "approve":
+            await bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+        elif decision == "decline":
+            await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+        else:
+            raise ValueError("unsupported join-request decision")
+    except TelegramBadRequest as exc:
+        error_code = str(exc).upper()
+        if decision == "decline" and "HIDE_REQUESTER_MISSING" in error_code:
+            return None
+        if decision == "approve" and "USER_ALREADY_PARTICIPANT" in error_code:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+            if _chat_membership_is_active(member):
+                return None
+        raise
+    return None
+
+
 async def _deliver_outbox_item(item):
     payload = json.loads(item["payload_json"])
     if item["event_type"] == "direct":
@@ -3713,6 +3957,8 @@ async def _deliver_outbox_item(item):
             int(item["recipient_id"]), payload["text"],
             reply_markup=_open_app_kb(payload.get("start")),
         )
+    if item["event_type"] == "join_request_decision":
+        return await _join_request_delivery(item, payload)
     if item["event_type"] == "group_task":
         chat_id = item["chat_id"]
         if str(chat_id).lstrip("-").isdigit():
@@ -3900,6 +4146,18 @@ async def outbox_worker():
                         item["id"],
                     ),
                 )
+                if item["event_type"] == "join_request_decision":
+                    payload = json.loads(item["payload_json"])
+                    terminal = (
+                        "approved" if payload["decision"] == "approve"
+                        else "declined"
+                    )
+                    await db.execute(
+                        "UPDATE telegram_join_requests SET "
+                        "status=CASE WHEN status='joined' THEN status ELSE ? END,"
+                        "decided_at=?,last_error=NULL WHERE request_key=?",
+                        (terminal, now_iso(), payload["request_key"]),
+                    )
                 await db.commit()
             if item["event_type"] == "group_task":
                 delivered_payload = json.loads(item["payload_json"])
@@ -3928,6 +4186,20 @@ async def outbox_worker():
                         "WHERE id=?",
                         (status, available.isoformat(), type(exc).__name__, item["id"]),
                     )
+                    if item["event_type"] == "join_request_decision":
+                        payload = json.loads(item["payload_json"])
+                        await db.execute(
+                            "UPDATE telegram_join_requests SET status=?,last_error=? "
+                            "WHERE request_key=?",
+                            (
+                                "manual_required" if status == "dead" else (
+                                    "approve_queued"
+                                    if payload["decision"] == "approve"
+                                    else "decline_queued"
+                                ),
+                                type(exc).__name__, payload["request_key"],
+                            ),
+                        )
                     if status == "dead" and item["event_type"] == "group_publication":
                         await _handle_dead_publication_in_tx(db, item)
                     await db.commit()
@@ -4385,6 +4657,8 @@ async def api_state(request):
         "referral_gate": {
             "required": bool(_required_chat_id()),
             "url": _required_chat_url(),
+            "managed_join_request": JOIN_REQUEST_ADMISSION_ENABLED,
+            "membership_status": m.get("group_membership_status") or "unknown",
             "invited": bool(m["referred_by"]) and m["referred_by"] != uid,
             "confirmed": bool(m["ref_confirmed"]),
         },
@@ -4468,6 +4742,11 @@ async def api_apply(request):
             "UPDATE members SET full_name=?,city=?,about=?,application_note='',"
             "username=?,role='applicant',status='pending',applied_at=? WHERE user_id=?",
             (name, city, about, tg.get("username", ""), applied_at, uid),
+        )
+        await db.execute(
+            "UPDATE telegram_join_requests SET status='awaiting_review' "
+            "WHERE user_id=? AND status='awaiting_application'",
+            (uid,),
         )
         await _track_event_in_tx(
             db, "application_resubmitted" if is_resubmit else "application_submitted",
@@ -4679,12 +4958,44 @@ async def _expire_due_tasks():
     return expired_task_ids, expired_assignments
 
 
+async def _expire_stale_join_requests():
+    """Decline managed requests that never received an application within SLA."""
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=JOIN_REQUEST_APPLICATION_SLA_HOURS)
+    ).isoformat()
+    expired = []
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        rows = await (await db.execute(
+            "SELECT request_key,user_id FROM telegram_join_requests "
+            "WHERE source='bot_invite' AND status='awaiting_application' "
+            "AND requested_at<=? ORDER BY requested_at ASC LIMIT 100",
+            (cutoff,),
+        )).fetchall()
+        for row in rows:
+            if not await _queue_join_request_decision_in_tx(
+                db, row["request_key"], "decline",
+            ):
+                continue
+            expired.append(row["request_key"])
+            await _track_event_in_tx(
+                db, "group_join_request_expired", "backend",
+                user_id=int(row["user_id"]), outcome="decline_queued",
+                dedupe_key=f"group_join_request_expired:{row['request_key']}",
+            )
+        await db.commit()
+    return expired
+
+
 async def lifecycle_worker():
     """Периодически применяет дедлайны без внешнего запроса к API."""
     cycles = 0
     while True:
         try:
             await _expire_due_tasks()
+            await _expire_stale_join_requests()
             await _reconcile_publication_cleanups()
             cycles += 1
             if cycles % 120 == 1:
@@ -6293,6 +6604,22 @@ async def api_admin_overview(request):
             "LEFT JOIN members maker ON maker.user_id=rc.requested_by "
             "WHERE rc.status='pending' ORDER BY rc.requested_at ASC,rc.id ASC"
         )).fetchall()
+        join_requests = await (await db.execute(
+            "SELECT jr.request_key,jr.user_id,jr.source,jr.status,jr.decision,"
+            "jr.requested_at,jr.decision_queued_at,jr.decided_at,jr.joined_at,"
+            "jr.manual_retry_reason,jr.manual_retry_by,jr.manual_retry_at,"
+            "jr.last_error,m.full_name,m.username,m.city "
+            "FROM telegram_join_requests jr "
+            "LEFT JOIN members m ON m.user_id=jr.user_id "
+            "WHERE jr.status NOT IN ('joined','declined') OR jr.request_key IN ("
+            "SELECT recent.request_key FROM telegram_join_requests recent "
+            "WHERE recent.status IN ('joined','declined') "
+            "ORDER BY recent.requested_at DESC LIMIT 100) "
+            "ORDER BY CASE jr.status "
+            "WHEN 'manual_required' THEN 0 WHEN 'awaiting_review' THEN 1 "
+            "WHEN 'awaiting_application' THEN 2 ELSE 3 END,"
+            "jr.requested_at DESC LIMIT 200"
+        )).fetchall()
     review_tasks = [dict(r) for r in review]
     pending_dispute_tasks = [dict(r) for r in pending_disputes]
     recent_decision_tasks = [dict(r) for r in recent_decisions]
@@ -6362,6 +6689,7 @@ async def api_admin_overview(request):
                 if int(r["user_id"]) == int(uid) else ""
             ),
         } for r in role_changes],
+        "join_requests": [dict(r) for r in join_requests],
         "task_templates": TASK_TEMPLATES,
     })
 
@@ -6496,6 +6824,93 @@ async def api_admin_task_announcement_retry(request):
         )
         await db.commit()
     return _json({"ok": True, "status": "pending", "idempotent": False})
+
+
+async def api_admin_join_request_retry(request):
+    """Requeue a failed/manual Telegram admission decision idempotently."""
+    admin_id, err = await _require_admin(request)
+    if err is not None:
+        return err
+    body = await _body(request)
+    request_key = str(body.get("request_key") or "").strip().lower()
+    decision = str(body.get("decision") or "").strip().lower()
+    reason = " ".join(str(body.get("reason") or "").split())[:300]
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if not re.fullmatch(r"[a-f0-9]{64}", request_key):
+        return _json({"error": "request_key"}, status=400)
+    if decision not in {"approve", "decline"}:
+        return _json({"error": "decision"}, status=400)
+    if len(reason) < 3:
+        return _json({
+            "error": "reason",
+            "message": "Коротко укажи причину ручного повтора.",
+        }, status=400)
+    if not operation_id:
+        return _json({"error": "operation_id"}, status=400)
+    request_hash = _request_fingerprint({
+        "request_key": request_key, "decision": decision, "reason": reason,
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _admin_active_in_tx(db, admin_id):
+            await db.rollback()
+            return _json({"error": "admin_revoked"}, status=403)
+        replay = bool(await (await db.execute(
+            "SELECT 1 FROM operation_registry WHERE operation_id=?",
+            (operation_id,),
+        )).fetchone())
+        if not await _claim_operation_in_tx(
+            db, operation_id, "join_request_retry", request_hash, admin_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        row = await (await db.execute(
+            "SELECT status,source,decision FROM telegram_join_requests "
+            "WHERE request_key=?",
+            (request_key,),
+        )).fetchone()
+        if not row:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        terminal = "approved" if decision == "approve" else "declined"
+        if row["status"] in {terminal, "joined"}:
+            await db.commit()
+            return _json({
+                "ok": True, "status": row["status"], "idempotent": True,
+            })
+        if row["status"] not in {
+            "manual_required", "approve_queued", "decline_queued",
+        }:
+            await db.rollback()
+            return _json({
+                "error": "not_retryable", "status": row["status"],
+            }, status=409)
+        queued = await _queue_join_request_decision_in_tx(
+            db, request_key, decision,
+        )
+        if not queued:
+            await db.rollback()
+            return _json({
+                "error": "unsafe_decision",
+                "message": "Одобрение возможно только для проверенной ссылки бота.",
+            }, status=409)
+        await _track_event_in_tx(
+            db, "group_join_request_retried", "backend",
+            user_id=admin_id, outcome=decision,
+            dedupe_key=f"group_join_request_retry:{operation_id}",
+        )
+        await db.execute(
+            "UPDATE telegram_join_requests SET manual_retry_reason=?,"
+            "manual_retry_by=?,manual_retry_at=? WHERE request_key=?",
+            (reason, int(admin_id), now_iso(), request_key),
+        )
+        await db.commit()
+    return _json({
+        "ok": True,
+        "status": "approve_queued" if decision == "approve" else "decline_queued",
+        "idempotent": replay,
+    })
 
 
 async def api_admin_task_announcement_status(request):
@@ -6745,6 +7160,8 @@ async def api_admin_decide(request):
         return _json({"error": "bad_user"}, status=400)
     referral_count = 0
     rewarded_total = 0
+    referrer_id = None
+    join_requests_queued = 0
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
@@ -6797,17 +7214,16 @@ async def api_admin_decide(request):
         if cur.rowcount != 1:
             await db.rollback()
             return _json({"error": "already_decided"}, status=409)
-        if decision == "approve" and m.get("referred_by") and m["referred_by"] != uid:
-            # Одобрение в команду засчитывает реферала так же, как подписка.
-            await db.execute(
-                "UPDATE members SET ref_confirmed=1 WHERE user_id=?", (uid,))
-            referral_count, rewarded_total = await _grant_referral_milestones_in_tx(
-                db, m["referred_by"], by=admin_id
+        if decision == "approve":
+            join_requests_queued = await _queue_join_requests_for_user_in_tx(
+                db, uid, "approve",
             )
-            await _track_event_in_tx(
-                db, "referral_confirmed", "backend", user_id=uid,
-                outcome="approved",
-                dedupe_key=f"referral_confirmed:{uid}",
+            referrer_id, referral_count, rewarded_total = (
+                await _confirm_referral_if_ready_in_tx(db, uid, by=admin_id)
+            )
+        else:
+            join_requests_queued = await _queue_join_requests_for_user_in_tx(
+                db, uid, "decline",
             )
         await _track_event_in_tx(
             db, "application_decided", "backend", user_id=uid,
@@ -6823,33 +7239,20 @@ async def api_admin_decide(request):
             db, f"application:{uid}:decision:{decision}", "direct",
             {"text": user_message, "start": None}, recipient_id=uid,
         )
-        if (
-            decision == "approve" and m.get("referred_by")
-            and m["referred_by"] != uid and referral_count > 0
-        ):
-            if rewarded_total:
-                ref_message = (
-                    f"🎉 Реферальная ступень достигнута!\n"
-                    f"Одобрено друзей: {referral_count}\n"
-                    f"Начислено: +{rewarded_total} бибибонусов."
-                )
-            else:
-                next_threshold = next(
-                    (count for count, _ in REFERRAL_MILESTONES if count > referral_count),
-                    None,
-                )
-                ref_message = (
-                    f"👥 Новый друг одобрен: {referral_count}"
-                    + (f" из {next_threshold} до следующей награды."
-                       if next_threshold else ". Все ступени пройдены!")
-                )
+        if referrer_id and referral_count > 0:
             await _enqueue_outbox_in_tx(
-                db, f"referral:{uid}:confirmed:referrer:{m['referred_by']}",
-                "direct", {"text": ref_message, "start": None},
-                recipient_id=m["referred_by"],
+                db, f"referral:{uid}:confirmed:referrer:{referrer_id}",
+                "direct",
+                {
+                    "text": _referral_progress_message(
+                        referral_count, rewarded_total,
+                    ),
+                    "start": None,
+                },
+                recipient_id=referrer_id,
             )
         await db.commit()
-    return _json({"ok": True})
+    return _json({"ok": True, "join_requests_queued": join_requests_queued})
 
 
 async def api_admin_task_create(request):
@@ -8886,7 +9289,7 @@ async def check_subscription(uid):
 
 
 async def confirm_referral(uid):
-    """Засчитывает приглашённого пригласившему. Идемпотентно."""
+    """Persist a successful getChatMember check and confirm both referral gates."""
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
@@ -8899,41 +9302,23 @@ async def confirm_referral(uid):
         if row["ref_confirmed"]:
             await db.rollback()
             return row["referred_by"], 0, 0
-        if row["status"] != "approved":
-            # Подписка подтверждает вход в воронку, но финансовый прогресс
-            # появляется только после ручного одобрения реального помощника.
-            await db.rollback()
-            return row["referred_by"], 0, 0
-        cur = await db.execute(
-            "UPDATE members SET ref_confirmed=1 WHERE user_id=? AND ref_confirmed=0",
-            (uid,))
-        if cur.rowcount != 1:
-            await db.rollback()
-            return row["referred_by"], 0, 0
-        _, rewarded = await _grant_referral_milestones_in_tx(
-            db, row["referred_by"], by=None)
-        # Считаем сами: выплата ступеней возвращает 0, если сам
-        # пригласивший ещё не одобрен, а прогресс-бар показывать надо.
-        count = int((await (await db.execute(
-            "SELECT COUNT(*) FROM members WHERE referred_by=? AND ref_confirmed=1",
-            (row["referred_by"],))).fetchone())[0])
-        await _track_event_in_tx(
-            db, "referral_confirmed", "backend", user_id=uid,
-            outcome="approved", dedupe_key=f"referral_confirmed:{uid}",
+        await db.execute(
+            "UPDATE members SET group_membership_status='member',"
+            "group_joined_at=COALESCE(group_joined_at,?),group_left_at=NULL "
+            "WHERE user_id=?",
+            (now_iso(), uid),
         )
+        referrer, count, rewarded = await _confirm_referral_if_ready_in_tx(
+            db, uid,
+        )
+        if referrer:
+            await _enqueue_outbox_in_tx(
+                db, f"referral:{uid}:confirmed:referrer:{referrer}", "direct",
+                {"text": _referral_progress_message(count, rewarded), "start": None},
+                recipient_id=referrer,
+            )
         await db.commit()
-    referrer = row["referred_by"]
-    if rewarded:
-        text = (f"🎉 Реферальная ступень достигнута!\n"
-                f"Друзей засчитано: {count}\n"
-                f"Начислено: +{rewarded} бибибонусов.")
-    else:
-        nxt = next((c for c, _ in REFERRAL_MILESTONES if c > count), None)
-        text = (f"👥 Друг подписался на канал. Засчитано: {count}"
-                + (f" из {nxt} до следующей награды." if nxt
-                   else ". Все ступени пройдены!"))
-    _notify(referrer, text, _open_app_kb())
-    return referrer, count, rewarded
+    return referrer or row["referred_by"], count, rewarded
 
 
 async def api_referral_verify(request):
@@ -10326,6 +10711,10 @@ async def start_api_server():
             "/api/admin/task/announcement/retry",
             api_admin_task_announcement_retry,
         )
+        app.router.add_post(
+            "/api/admin/join-request/retry",
+            api_admin_join_request_retry,
+        )
         app.router.add_get(
             "/api/admin/task/announcement/status",
             api_admin_task_announcement_status,
@@ -11180,25 +11569,177 @@ WELCOME_JOIN = (
 )
 
 
+def _join_request_invite_snapshot(request):
+    invite = getattr(request, "invite_link", None)
+    raw_link = str(getattr(invite, "invite_link", "") or "")
+    link_sha256 = hashlib.sha256(raw_link.encode("utf-8")).hexdigest() if raw_link else None
+    creator = getattr(invite, "creator", None)
+    try:
+        creator_id = int(getattr(creator, "id", 0) or 0)
+        expected_bot_id = int(bot.id)
+    except (TypeError, ValueError, AttributeError):
+        creator_id = expected_bot_id = 0
+    valid = bool(
+        JOIN_REQUEST_ADMISSION_ENABLED
+        and JOIN_REQUEST_INVITE_URL
+        and raw_link
+        and hmac.compare_digest(raw_link, JOIN_REQUEST_INVITE_URL)
+        and getattr(invite, "creates_join_request", False) is True
+        and not bool(getattr(invite, "is_revoked", False))
+        and creator_id and creator_id == expected_bot_id
+    )
+    return ("bot_invite" if valid else "unverified"), link_sha256
+
+
+@dp.chat_join_request()
+async def handle_chat_join_request(request: ChatJoinRequest):
+    """Persist a managed request; approval/decline is delivered by the outbox."""
+    if not _is_our_group(request):
+        return
+    user = request.from_user
+    if getattr(user, "is_bot", False):
+        return
+    await _ensure_member(user)
+    occurred = getattr(request, "date", None)
+    if occurred is None:
+        occurred = datetime.now(timezone.utc)
+    elif occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=timezone.utc)
+    requested_at = occurred.astimezone(timezone.utc).isoformat()
+    source, link_sha256 = _join_request_invite_snapshot(request)
+    update_id = _current_update_id.get()
+    request_material = (
+        f"{int(request.chat.id)}:{int(user.id)}:{requested_at}:"
+        f"{link_sha256 or 'no-link'}"
+    )
+    request_key = hashlib.sha256(request_material.encode("utf-8")).hexdigest()
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        inserted = await db.execute(
+            "INSERT OR IGNORE INTO telegram_join_requests "
+            "(request_key,update_id,chat_id,user_id,invite_link_sha256,source,status,"
+            "requested_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                request_key, int(update_id) if update_id is not None else None,
+                str(request.chat.id), int(user.id), link_sha256, source,
+                "manual_required" if source != "bot_invite" else "awaiting_application",
+                requested_at,
+            ),
+        )
+        if inserted.rowcount != 1:
+            await db.rollback()
+            return
+        member = await (await db.execute(
+            "SELECT status,role,applied_at FROM members WHERE user_id=?",
+            (int(user.id),),
+        )).fetchone()
+        status = member["status"] if member else "pending"
+        if source != "bot_invite":
+            await _enqueue_admins_in_tx(
+                db, f"join_request:{request_key}:unverified",
+                "⚠️ Получена заявка в сообщество не через управляемую ссылку. "
+                "Автоматическое решение заблокировано; проверь настройки входа.",
+            )
+        elif status == "approved":
+            await _queue_join_request_decision_in_tx(db, request_key, "approve")
+        elif status == "blocked":
+            await _queue_join_request_decision_in_tx(db, request_key, "decline")
+        else:
+            applied = bool(member and (member["applied_at"] or member["role"] == "applicant"))
+            await db.execute(
+                "UPDATE telegram_join_requests SET status=? WHERE request_key=?",
+                ("awaiting_review" if applied else "awaiting_application", request_key),
+            )
+            user_chat_id = int(getattr(request, "user_chat_id", 0) or 0)
+            if user_chat_id:
+                await _enqueue_outbox_in_tx(
+                    db, f"join_request:{request_key}:participant", "direct",
+                    {
+                        "text": (
+                            "Заявка в сообщество получена. Анкета уже на проверке."
+                            if applied else
+                            "Заявка в сообщество получена. Открой БибиЗадачи и заполни короткую анкету."
+                        ),
+                        "start": None,
+                    },
+                    recipient_id=user_chat_id,
+                )
+            await _enqueue_admins_in_tx(
+                db, f"join_request:{request_key}:admins",
+                "Новая заявка на вступление в сообщество. "
+                + ("Анкета уже ожидает проверки." if applied else "Анкета ещё не заполнена."),
+            )
+        await _track_event_in_tx(
+            db, "group_join_requested", "group", user_id=int(user.id),
+            outcome=source,
+            dedupe_key=f"group_join_request:{request_key}",
+        )
+        await db.commit()
+
+
 @dp.chat_member()
 async def track_group_membership(update: ChatMemberUpdated):
     """Авторитетный переход членства; приветствие остаётся отдельным UX-событием."""
     if not _is_our_group(update):
         return
-    old_status = getattr(update.old_chat_member.status, "value", update.old_chat_member.status)
-    new_status = getattr(update.new_chat_member.status, "value", update.new_chat_member.status)
-    joined = old_status in ("left", "kicked") and new_status in (
-        "member", "administrator", "creator", "restricted",
-    )
-    if not joined or getattr(update.new_chat_member.user, "is_bot", False):
+    old_active = _chat_membership_is_active(update.old_chat_member)
+    new_active = _chat_membership_is_active(update.new_chat_member)
+    joined = not old_active and new_active
+    left = old_active and not new_active
+    if (not joined and not left) or getattr(update.new_chat_member.user, "is_bot", False):
         return
     user = update.new_chat_member.user
     await _ensure_member(user)
     occurred = getattr(update, "date", None)
-    stamp = int(occurred.timestamp()) if occurred else int(time.time())
+    if occurred is None:
+        occurred = datetime.now(timezone.utc)
+    elif occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=timezone.utc)
+    occurred_iso = occurred.astimezone(timezone.utc).isoformat()
+    referrer_id = None
+    referral_count = rewarded_total = 0
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if joined:
+            await db.execute(
+                "UPDATE members SET group_membership_status='member',"
+                "group_joined_at=?,group_left_at=NULL WHERE user_id=?",
+                (occurred_iso, int(user.id)),
+            )
+            await db.execute(
+                "UPDATE telegram_join_requests SET status='joined',joined_at=?,"
+                "last_error=NULL WHERE request_key=(SELECT request_key FROM "
+                "telegram_join_requests WHERE chat_id=? AND user_id=? "
+                "ORDER BY requested_at DESC LIMIT 1)",
+                (occurred_iso, str(update.chat.id), int(user.id)),
+            )
+            referrer_id, referral_count, rewarded_total = (
+                await _confirm_referral_if_ready_in_tx(db, int(user.id))
+            )
+            if referrer_id:
+                await _enqueue_outbox_in_tx(
+                    db, f"referral:{int(user.id)}:confirmed:referrer:{referrer_id}",
+                    "direct",
+                    {"text": _referral_progress_message(referral_count, rewarded_total), "start": None},
+                    recipient_id=referrer_id,
+                )
+        else:
+            await db.execute(
+                "UPDATE members SET group_membership_status='left',group_left_at=? "
+                "WHERE user_id=?",
+                (occurred_iso, int(user.id)),
+            )
+        await db.commit()
+    stamp = int(occurred.timestamp())
     await _track_event_best_effort(
-        "group_member_joined", "group", user_id=user.id,
-        dedupe_key=f"group_join:{update.chat.id}:{user.id}:{stamp}",
+        "group_member_joined" if joined else "group_member_left",
+        "group", user_id=user.id,
+        dedupe_key=(
+            f"group_join:{update.chat.id}:{user.id}:{stamp}" if joined
+            else f"group_left:{update.chat.id}:{user.id}:{stamp}"
+        ),
     )
 
 

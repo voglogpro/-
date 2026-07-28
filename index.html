@@ -776,6 +776,9 @@ select.tinput{appearance:none;background-image:
         <div class="field"><label for="adPendingSearch">Быстрый поиск заявок</label><input class="tinput" id="adPendingSearch" placeholder="Имя, город или комментарий"></div>
         <div id="adPending" aria-live="polite"><div class="empty">Загружаю…</div></div>
         <button class="mini hidden" id="adPendingMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button></div>
+      <div class="card"><div class="eyebrow"><b></b>Вступление в сообщество<span class="cnt" id="adJoinCnt"></span></div>
+        <p class="sub" style="margin-bottom:12px">Здесь отдельно видны анкета, решение Telegram и фактическое вступление. Ошибку доставки можно повторить без двойного эффекта.</p>
+        <div id="adJoinRequests" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
       <div class="card"><div class="eyebrow"><b></b>Отклонённые заявки<span class="cnt" id="adRejectedCnt"></span></div>
         <div id="adRejected" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
       <div class="card"><div class="eyebrow"><b></b>Смена города<span class="cnt" id="adCityCnt"></span></div>
@@ -2498,6 +2501,30 @@ async function loadAdmin(){
       pend.length<Number(d.pending_total||0)?String(pend.length):null
     );
 
+    const joins=d.join_requests||[];
+    const joinLabel={
+      awaiting_application:'Ждёт анкету',awaiting_review:'Анкета на проверке',
+      approve_queued:'Одобрение отправляется',approved:'Одобрено Telegram',
+      joined:'В сообществе',decline_queued:'Отклонение отправляется',
+      declined:'Отклонено',manual_required:'Нужно внимание'
+    };
+    $('adJoinCnt').textContent=joins.filter(j=>!['joined','declined'].includes(j.status)).length||'';
+    $('adJoinRequests').innerHTML=joins.length?joins.map(j=>{
+      const canRetry=j.status==='manual_required'&&(
+        j.decision==='decline'||(j.source==='bot_invite'&&j.decision==='approve')
+      );
+      const retryDecision=j.decision==='approve'?'approve':'decline';
+      return '<div class="task"><div class="row1"><div class="tico">👥</div><div>'+
+        '<div class="tt">'+esc(j.full_name||('ID '+j.user_id))+'</div>'+
+        '<div class="ty">'+esc(j.city||'город не указан')+(j.username?' · @'+esc(j.username):'')+'</div></div></div>'+
+        '<div class="meta"><span class="pill '+(j.status==='manual_required'?'warn':j.status==='joined'?'on':'hot')+'">'+esc(joinLabel[j.status]||j.status)+'</span></div>'+
+        '<div class="ty">Запрос: '+esc(fmtDate(j.requested_at))+'</div>'+
+        (j.last_error?'<div class="dt">Доставка: '+esc(j.last_error)+'</div>':'')+
+        (j.manual_retry_reason?'<div class="dt">Последний повтор: '+esc(j.manual_retry_reason)+'</div>':'')+
+        (canRetry?'<div class="acts"><button class="mini" data-join-retry="'+esc(j.request_key)+'" data-join-decision="'+retryDecision+'">'+(retryDecision==='approve'?'Повторить одобрение':'Повторить отклонение')+'</button></div>':'')+
+        '</div>';
+    }).join(''):'<div class="empty">Заявок на вступление пока нет.</div>';
+
     const rejected = d.rejected || [];
     $('adRejectedCnt').textContent = rejected.length || '';
     $('adRejected').innerHTML = rejected.length ? rejected.map(p=>
@@ -2642,7 +2669,7 @@ async function loadAdmin(){
     return true;
   }catch(e){
     showRetry('adPending',e.message,loadAdmin);
-    ['adRejected','adReview','adOpen','adWithdrawals','adTeam'].forEach(id=>{
+    ['adJoinRequests','adRejected','adReview','adOpen','adWithdrawals','adTeam'].forEach(id=>{
       const el=$(id);
       if(el) el.innerHTML='<div class="empty" role="status">Данные недоступны до повторной загрузки.</div>';
     });
@@ -2651,6 +2678,22 @@ async function loadAdmin(){
 }
 
 function bindAdmin(){
+  document.querySelectorAll('[data-join-retry]').forEach(b=>{
+    b.onclick=async()=>{
+      const reason=await askText({
+        title:b.dataset.joinDecision==='approve'?'Повторить одобрение':'Повторить отклонение',
+        lead:'Укажи, что проверено. Причина сохранится в журнале заявки.',
+        placeholder:'Проверил состояние заявки в Telegram',required:true,
+        okLabel:'Вернуть в очередь'});
+      if(reason===null) return;
+      press(b,'…',async()=>{
+        await api('/api/admin/join-request/retry',{method:'POST',body:JSON.stringify({
+          request_key:b.dataset.joinRetry,decision:b.dataset.joinDecision,
+          reason:reason,operation_id:newOperationId()})});
+        toast('Решение возвращено в очередь Telegram.'); await loadAdmin();
+      });
+    };
+  });
   document.querySelectorAll('[data-city-approve],[data-city-reject]').forEach(b=>{
     b.onclick=()=>press(b,'…',async()=>{
       const approve=b.hasAttribute('data-city-approve');

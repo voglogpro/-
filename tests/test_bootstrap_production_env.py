@@ -30,6 +30,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
             privacy_url="https://tasks.example.test/privacy",
             privacy_controller_name="ООО Бибибайк",
             privacy_contact="@privacy_bibibike",
+            join_request_invite_url="https://t.me/+abcdefghijklmnopQRSTUV",
         )
 
     def test_generated_production_secrets_are_independent_and_complete(self):
@@ -50,6 +51,11 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(values["PRIVACY_CONTACT"], "@privacy_bibibike")
         self.assertEqual(values["EVIDENCE_RETENTION_DAYS"], "90")
         self.assertEqual(values["DISPUTE_OPEN_DAYS"], "30")
+        self.assertEqual(values["JOIN_REQUEST_ADMISSION_ENABLED"], "true")
+        self.assertEqual(
+            values["JOIN_REQUEST_INVITE_URL"],
+            "https://t.me/+abcdefghijklmnopQRSTUV",
+        )
         self.assertEqual(values["TOPIC_WORK"], "13")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
         self.assertEqual(values["MANUAL_GRANT_DAILY_LIMIT"], "300")
@@ -126,6 +132,20 @@ class BootstrapProductionEnvTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(ValueError, field.upper()):
                         build_environment(config, token)
+
+    def test_join_request_invite_url_is_required_and_strict(self):
+        token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"
+        for value in (
+            "", "http://t.me/+abcdefghijklmnop",
+            "https://t.me/bbbikefan", "https://example.test/+abcdefghijklmnop",
+            "https://t.me/+short", "https://t.me/+abcdefghijklmnop?admin=1",
+        ):
+            with self.subTest(value=value):
+                config = BootstrapConfig(
+                    **{**self.config().__dict__, "join_request_invite_url": value}
+                )
+                with self.assertRaisesRegex(ValueError, "JOIN_REQUEST_INVITE_URL"):
+                    build_environment(config, token)
 
     def test_monitor_secrets_are_separate_restricted_and_never_overwritten(self):
         token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"

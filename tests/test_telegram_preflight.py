@@ -19,6 +19,8 @@ def base_env():
         "PRIVACY_CONTACT": "@privacy_bibibike",
         "WEBAPP_SHORTNAME": "bibibike",
         "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
+        "JOIN_REQUEST_ADMISSION_ENABLED": "true",
+        "JOIN_REQUEST_INVITE_URL": "https://t.me/+abcdefghijklmnopQRSTUV",
         "TELEGRAM_UPDATE_MODE": "webhook",
         "WEBHOOK_ROUTE_ID": "route_" + "x" * 40,
         "PREFLIGHT_EXPECTED_BOT_NAME": "БибиЗадачи · Бибибайк",
@@ -53,6 +55,7 @@ def good_api(method, params=None):
         if params["chat_id"] == -1001111111111:
             return {
                 "type": "supergroup", "is_forum": True,
+                "join_by_request": True,
                 "username": "bbbikefan",
                 "title": "Бибибайк | Сообщество помощников",
                 "description": base_env()["PREFLIGHT_EXPECTED_GROUP_DESCRIPTION"],
@@ -60,12 +63,18 @@ def good_api(method, params=None):
         return {"type": "supergroup", "is_forum": True, "title": "БибиЗадачи OPS"}
     if method == "getChatMember":
         if params["chat_id"] == -1001111111111:
-            return {"status": "administrator", "can_delete_messages": True}
+            return {
+                "status": "administrator", "can_delete_messages": True,
+                "can_invite_users": True,
+            }
         return {"status": "member"}
     if method == "getWebhookInfo":
         return {
             "url": "https://tasks.example.test/telegram/webhook/route_" + "x" * 40,
             "pending_update_count": 0,
+            "allowed_updates": [
+                "message", "callback_query", "chat_member", "chat_join_request",
+            ],
         }
     if method == "getChatMenuButton":
         return {
@@ -131,6 +140,34 @@ class TelegramPreflightTests(unittest.TestCase):
             "same-origin privacy policy",
             {item["name"] for item in report["checks"] if item["status"] == "fail"},
         )
+
+    def test_join_request_gate_permissions_and_webhook_update_are_required(self):
+        variants = (
+            ("getChat", "join_by_request", False, "public join-by-request gate"),
+            ("getChatMember", "can_invite_users", False, "public invite permission"),
+            ("getWebhookInfo", "allowed_updates", ["message"], "webhook join-request updates"),
+        )
+        for method_name, field, value, expected_check in variants:
+            with self.subTest(check=expected_check):
+                def broken(method, params=None):
+                    result = good_api(method, params)
+                    if method != method_name:
+                        return result
+                    if method == "getChat" and params["chat_id"] != -1001111111111:
+                        return result
+                    if method == "getChatMember" and params["chat_id"] != -1001111111111:
+                        return result
+                    return {**result, field: value}
+
+                report = run_preflight(base_env(), broken, good_privacy)
+                self.assertFalse(report["ok"])
+                self.assertIn(
+                    expected_check,
+                    {
+                        item["name"] for item in report["checks"]
+                        if item["status"] == "fail"
+                    },
+                )
 
     def test_public_ops_or_brand_mismatch_fails(self):
         def mismatched(method, params=None):

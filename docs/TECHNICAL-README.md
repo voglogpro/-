@@ -44,6 +44,7 @@ python scripts/bootstrap_production_env.py \
   --privacy-url https://tasks.example.com/privacy \
   --privacy-controller-name 'Юридическое имя оператора' \
   --privacy-contact '@ответственный_за_данные' \
+  --join-request-invite-url 'https://t.me/+ССЫЛКА_СОЗДАННАЯ_БОТОМ' \
   --group-id -1000000000001 \
   --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
@@ -142,7 +143,8 @@ Webhook сначала сохраняет update в `telegram_update_inbox`, о�
   Наличие dead update считается деградацией и требует ручного redrive, а старая
   необработанная очередь (`telegram_inbox_stale=true`) отключает readiness.
 
-Целевая production-архитектура и план миграции описаны в [ADR-001](ADR-001-professional-architecture.md). Telegram-настройка — в [чек-листе интеграции](TELEGRAM-INTEGRATION.md).
+Целевая production-архитектура и план миграции описаны в [ADR-001](ADR-001-professional-architecture.md). Telegram-настройка — в [чек-листе интеграции](TELEGRAM-INTEGRATION.md), а безопасное создание и проверка ссылки на вступление — в [операторском регламенте](JOIN-REQUEST-OPERATIONS.md).
+План безопасного удаления профиля находится в [IDENTITY-ERASURE-MIGRATION.md](IDENTITY-ERASURE-MIGRATION.md); self-service erasure пока не реализован и остаётся блокирующим gate.
 Ежедневные действия и правила пилота — в [операционном регламенте](PILOT-OPERATIONS.md).
 Изолированная репетиция PostgreSQL — в [migration harness](POSTGRES-MIGRATION-HARNESS.md); рабочий `main.py` пока остаётся SQLite-only.
 Immutable image, backup cadence и безопасный rollback пилота — в [release/recovery runbook](RELEASE-AND-RECOVERY.md).

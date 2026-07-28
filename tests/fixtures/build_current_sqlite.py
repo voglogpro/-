@@ -66,6 +66,17 @@ def main():
             "VALUES (101,'manual','fixture-authority',?)", (stamp,),
         )
         db.execute(
+            "INSERT INTO telegram_join_requests "
+            "(request_key,update_id,chat_id,user_id,invite_link_sha256,source,status,"
+            "requested_at,decision,decision_queued_at,manual_retry_reason,"
+            "manual_retry_by,manual_retry_at) VALUES (?,?,?,?,?,'bot_invite',"
+            "'approve_queued',?,'approve',?,?,?,?)",
+            (
+                "j" * 64, 99002, "-1001111111111", 102, "a" * 64,
+                stamp, stamp, "Проверенный повтор", 101, stamp,
+            ),
+        )
+        db.execute(
             "INSERT INTO media_objects "
             "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
             "upload_operation_id,request_hash,created_at,ready_at,reconcile_attempts) "

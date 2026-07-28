@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 SOURCE_COLUMNS = {
-    "members": "user_id full_name username phone city help_type transport availability about tags application_note role status bonus done_count referred_by created_at approved_at approved_by applied_at city_change_requested city_change_requested_at chat_xp ref_confirmed".split(),
+    "members": "user_id full_name username phone city help_type transport availability about tags application_note role status bonus done_count referred_by created_at approved_at approved_by applied_at city_change_requested city_change_requested_at chat_xp ref_confirmed group_membership_status group_joined_at group_left_at".split(),
     "awards": "id code emoji title description bonus repeatable active created_by created_at".split(),
     "media_objects": "id backend object_key purpose state content_type size_bytes sha256 upload_operation_id request_hash created_at ready_at delete_after deleted_at last_error reconcile_attempts version_id checked_at".split(),
     "analytics_subjects": "subject_id user_id created_at".split(),
@@ -38,6 +38,7 @@ SOURCE_COLUMNS = {
     "telegram_update_inbox": "update_id payload_json payload_sha256 status attempts available_at received_at processed_at last_error locked_by locked_at dead_at redrive_operation_id redrive_request_hash redrive_reason redriven_by redriven_at".split(),
     "telegram_update_effects": "update_id effect_key created_at".split(),
     "telegram_update_redrive_commands": "operation_id request_hash update_id admin_id reason result_status created_at".split(),
+    "telegram_join_requests": "request_key update_id chat_id user_id invite_link_sha256 source status requested_at decision decision_queued_at decided_at joined_at manual_retry_reason manual_retry_by manual_retry_at last_error".split(),
     "published_posts": "kind chat_id topic message_ids published_at published_by operation_id".split(),
     "publication_jobs": "kind operation_id status requested_by created_at completed_at".split(),
     "publication_delivery_parts": "operation_id part_index message_id created_at".split(),
@@ -73,6 +74,7 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_member_awards_operation", "idx_member_awards_revoke_operation",
     "idx_member_awards_maker_time",
     "idx_task_outbox_delivery",
+    "idx_join_requests_user_status",
     "idx_telegram_inbox_delivery", "idx_telegram_inbox_redrive_operation",
     "idx_media_gc", "idx_product_events_dedupe", "idx_product_events_funnel",
     "idx_product_events_subject", "idx_product_events_task",
@@ -82,8 +84,8 @@ EXPECTED_SOURCE_INDEXES = {
 # Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
 # PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
 # rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "86517096c4a9c06e119283767ccfd0bb4af4051b565fe570b543bf96b6eb381a"
-EXPECTED_SOURCE_USER_VERSION = 296
+EXPECTED_SOURCE_SCHEMA_SHA256 = "3a3f57d30f91d9644008319dab7afc29399bc87b8bd0091b8089417fbe2b06ac"
+EXPECTED_SOURCE_USER_VERSION = 297
 
 
 class HarnessError(RuntimeError):

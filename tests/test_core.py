@@ -65,6 +65,390 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             status="approved", role="admin",
         )
 
+    @staticmethod
+    def _join_request_event(
+        user_id, invite_url, *, update_id, user_chat_id=None,
+        revoked=False, creator_id=None, occurred_at=None,
+    ):
+        if creator_id is None:
+            creator_id = main.bot.id
+        return SimpleNamespace(
+            chat=SimpleNamespace(
+                id=-100_770_000_001, type="supergroup", username="bbbikefan",
+            ),
+            from_user=SimpleNamespace(
+                id=user_id, full_name=f"Участник {user_id}",
+                username=f"member_{user_id}", is_bot=False,
+            ),
+            user_chat_id=(2**51 + 12345 if user_chat_id is None else user_chat_id),
+            date=occurred_at or datetime(2026, 7, 28, 9, 0, tzinfo=main.timezone.utc),
+            invite_link=SimpleNamespace(
+                invite_link=invite_url,
+                creator=SimpleNamespace(id=creator_id),
+                creates_join_request=True,
+                is_revoked=revoked,
+            ),
+            _test_update_id=update_id,
+        )
+
+    @staticmethod
+    async def _feed_join_request(request):
+        token = main._current_update_id.set(request._test_update_id)
+        try:
+            await main.handle_chat_join_request(request)
+        finally:
+            main._current_update_id.reset(token)
+
+    @staticmethod
+    def _membership_update(user_id, *, occurred_at=None):
+        user = SimpleNamespace(
+            id=user_id, full_name=f"Участник {user_id}",
+            username=f"member_{user_id}", is_bot=False,
+        )
+        return SimpleNamespace(
+            chat=SimpleNamespace(
+                id=-100_770_000_001, type="supergroup", username="bbbikefan",
+            ),
+            old_chat_member=SimpleNamespace(status="left", user=user),
+            new_chat_member=SimpleNamespace(status="member", user=user),
+            date=occurred_at or datetime(2026, 7, 28, 9, 5, tzinfo=main.timezone.utc),
+        )
+
+    async def test_join_request_handler_registers_required_update_type(self):
+        self.assertIn("chat_join_request", main.dp.resolve_used_update_types())
+
+    async def test_stale_join_request_is_declined_once_after_application_sla(self):
+        user_id = 992_005_001
+        request_key = "a" * 64
+        await main.upsert_member(user_id, status="pending")
+        requested_at = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(hours=main.JOIN_REQUEST_APPLICATION_SLA_HOURS + 1)
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO telegram_join_requests "
+                "(request_key,chat_id,user_id,source,status,requested_at) "
+                "VALUES (?,? ,?,'bot_invite','awaiting_application',?)",
+                (request_key, "-100770000001", user_id, requested_at),
+            )
+            db.commit()
+        first = await main._expire_stale_join_requests()
+        replay = await main._expire_stale_join_requests()
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,decision FROM telegram_join_requests "
+                "WHERE request_key=?", (request_key,),
+            ).fetchone()
+            commands = db.execute(
+                "SELECT COUNT(*) FROM task_outbox WHERE event_key=?",
+                (f"join_request:{request_key}:decline",),
+            ).fetchone()[0]
+            events = db.execute(
+                "SELECT COUNT(*) FROM product_events "
+                "WHERE event_name='group_join_request_expired'",
+            ).fetchone()[0]
+        self.assertEqual(first, [request_key])
+        self.assertEqual(replay, [])
+        self.assertEqual(row, ("decline_queued", "decline"))
+        self.assertEqual((commands, events), (1, 1))
+
+    async def test_admin_can_idempotently_retry_managed_join_decision(self):
+        admin_id, user_id = 992_006_001, 992_006_002
+        request_key = "b" * 64
+        operation_id = str(uuid.uuid4())
+        await self._seed_admin(admin_id)
+        await main.upsert_member(user_id, status="approved")
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO telegram_join_requests "
+                "(request_key,chat_id,user_id,source,status,requested_at,last_error) "
+                "VALUES (?,? ,?,'bot_invite','manual_required',?,'TelegramBadRequest')",
+                (request_key, "-100770000001", user_id, main.now_iso()),
+            )
+            db.commit()
+        original_require = main._require_admin
+
+        async def authorized(_request):
+            return admin_id, None
+
+        main._require_admin = authorized
+        body = {
+            "request_key": request_key,
+            "decision": "approve",
+            "reason": "Проверена заявка и членство",
+            "operation_id": operation_id,
+        }
+        try:
+            first = response_json(await main.api_admin_join_request_retry(
+                DummyRequest(body, admin_id),
+            ))
+            replay = response_json(await main.api_admin_join_request_retry(
+                DummyRequest(body, admin_id),
+            ))
+        finally:
+            main._require_admin = original_require
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,decision,manual_retry_reason,manual_retry_by "
+                "FROM telegram_join_requests WHERE request_key=?", (request_key,),
+            ).fetchone()
+            commands = db.execute(
+                "SELECT COUNT(*) FROM task_outbox WHERE event_key=?",
+                (f"join_request:{request_key}:approve",),
+            ).fetchone()[0]
+        self.assertFalse(first["idempotent"])
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(row, (
+            "approve_queued", "approve", body["reason"], admin_id,
+        ))
+        self.assertEqual(commands, 1)
+
+    async def test_terminal_join_retry_free_text_expires_but_audit_state_remains(self):
+        user_id = 992_007_001
+        request_key = "c" * 64
+        await main.upsert_member(user_id, status="approved")
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(days=main.EVIDENCE_RETENTION_DAYS + 1)
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO telegram_join_requests "
+                "(request_key,chat_id,user_id,source,status,requested_at,decision,"
+                "decided_at,manual_retry_reason,manual_retry_by,manual_retry_at,last_error) "
+                "VALUES (?,? ,?,'bot_invite','declined',?,'decline',?, ?,?,?,?)",
+                (
+                    request_key, "-100770000001", user_id, old, old,
+                    "Свободный комментарий скаута", user_id, old,
+                    "TelegramBadRequest",
+                ),
+            )
+            db.commit()
+        await main._schedule_expired_evidence_media()
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,decision,manual_retry_reason,last_error "
+                "FROM telegram_join_requests WHERE request_key=?", (request_key,),
+            ).fetchone()
+        self.assertEqual(row, ("declined", "decline", None, None))
+
+    async def test_managed_join_request_persists_hash_and_52_bit_user_chat_id_only(self):
+        invite_url = "https://t.me/+ManagedJoinToken_1234567890"
+        user_id = 992_010_001
+        user_chat_id = 2**51 + 987_654_321
+        names = (
+            "GROUP_ID", "GROUP_USERNAME", "JOIN_REQUEST_ADMISSION_ENABLED",
+            "JOIN_REQUEST_INVITE_URL",
+        )
+        original = {name: getattr(main, name) for name in names}
+        try:
+            main.GROUP_ID = -100_770_000_001
+            main.GROUP_USERNAME = "bbbikefan"
+            main.JOIN_REQUEST_ADMISSION_ENABLED = True
+            main.JOIN_REQUEST_INVITE_URL = invite_url
+            request = self._join_request_event(
+                user_id, invite_url, update_id=992_010_101,
+                user_chat_id=user_chat_id,
+            )
+            await self._feed_join_request(request)
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+        expected_hash = main.hashlib.sha256(invite_url.encode("utf-8")).hexdigest()
+        with sqlite3.connect(main.DB_PATH) as db:
+            join_row = db.execute(
+                "SELECT invite_link_sha256,source,status FROM telegram_join_requests "
+                "WHERE user_id=?", (user_id,),
+            ).fetchone()
+            direct_row = db.execute(
+                "SELECT recipient_id,payload_json FROM task_outbox "
+                "WHERE event_key LIKE 'join_request:%:participant'",
+            ).fetchone()
+            join_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(telegram_join_requests)")
+            }
+        self.assertEqual(join_row, (expected_hash, "bot_invite", "awaiting_application"))
+        self.assertEqual(direct_row[0], user_chat_id)
+        self.assertGreater(direct_row[0], 2**31)
+        self.assertNotIn(invite_url, direct_row[1])
+        self.assertIn("invite_link_sha256", join_columns)
+        self.assertNotIn("invite_link", join_columns)
+
+    async def test_unverified_or_revoked_join_link_requires_manual_review_without_approve(self):
+        managed_url = "https://t.me/+ManagedJoinToken_1234567890"
+        unverified_url = "https://t.me/+DifferentJoinToken_123456789"
+        names = (
+            "GROUP_ID", "GROUP_USERNAME", "JOIN_REQUEST_ADMISSION_ENABLED",
+            "JOIN_REQUEST_INVITE_URL",
+        )
+        original = {name: getattr(main, name) for name in names}
+        try:
+            main.GROUP_ID = -100_770_000_001
+            main.GROUP_USERNAME = "bbbikefan"
+            main.JOIN_REQUEST_ADMISSION_ENABLED = True
+            main.JOIN_REQUEST_INVITE_URL = managed_url
+            await self._feed_join_request(self._join_request_event(
+                992_020_001, unverified_url, update_id=992_020_101,
+            ))
+            await self._feed_join_request(self._join_request_event(
+                992_020_002, managed_url, update_id=992_020_102,
+                revoked=True,
+                occurred_at=datetime(2026, 7, 28, 9, 1, tzinfo=main.timezone.utc),
+            ))
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+        with sqlite3.connect(main.DB_PATH) as db:
+            rows = db.execute(
+                "SELECT user_id,source,status,decision FROM telegram_join_requests "
+                "ORDER BY user_id",
+            ).fetchall()
+            decisions = db.execute(
+                "SELECT COUNT(*) FROM task_outbox "
+                "WHERE event_type='join_request_decision'",
+            ).fetchone()[0]
+        self.assertEqual(rows, [
+            (992_020_001, "unverified", "manual_required", None),
+            (992_020_002, "unverified", "manual_required", None),
+        ])
+        self.assertEqual(decisions, 0)
+
+    async def test_application_approval_queues_join_but_referral_waits_for_chat_member(self):
+        managed_url = "https://t.me/+ManagedJoinToken_1234567890"
+        admin_id, referrer_id, applicant_id = 992_030_001, 992_030_002, 992_030_003
+        await self._seed_admin(admin_id)
+        await main.upsert_member(
+            referrer_id, full_name="Пригласивший", status="approved",
+            role="helper", bonus=0,
+        )
+        await main.upsert_member(
+            applicant_id, full_name="Кандидат", status="pending", role="applicant",
+            applied_at=main.now_iso(), referred_by=referrer_id, ref_confirmed=0,
+        )
+        names = (
+            "GROUP_ID", "GROUP_USERNAME", "JOIN_REQUEST_ADMISSION_ENABLED",
+            "JOIN_REQUEST_INVITE_URL", "REFERRAL_MILESTONES", "_require_admin",
+        )
+        original = {name: getattr(main, name) for name in names}
+
+        async def authorized(_request):
+            return admin_id, None
+
+        try:
+            main.GROUP_ID = -100_770_000_001
+            main.GROUP_USERNAME = "bbbikefan"
+            main.JOIN_REQUEST_ADMISSION_ENABLED = True
+            main.JOIN_REQUEST_INVITE_URL = managed_url
+            main.REFERRAL_MILESTONES = [(1, 50)]
+            main._require_admin = authorized
+            await self._feed_join_request(self._join_request_event(
+                applicant_id, managed_url, update_id=992_030_101,
+            ))
+            response = await main.api_admin_decide(DummyRequest({
+                "user_id": applicant_id, "decision": "approve",
+            }, admin_id))
+            with sqlite3.connect(main.DB_PATH) as db:
+                before_join = (
+                    db.execute(
+                        "SELECT status,group_membership_status,ref_confirmed "
+                        "FROM members WHERE user_id=?", (applicant_id,),
+                    ).fetchone(),
+                    db.execute(
+                        "SELECT status,decision FROM telegram_join_requests "
+                        "WHERE user_id=?", (applicant_id,),
+                    ).fetchone(),
+                    db.execute(
+                        "SELECT bonus FROM members WHERE user_id=?", (referrer_id,),
+                    ).fetchone()[0],
+                    db.execute(
+                        "SELECT COUNT(*) FROM task_outbox "
+                        "WHERE event_type='join_request_decision'",
+                    ).fetchone()[0],
+                )
+            await main.track_group_membership(self._membership_update(applicant_id))
+            with sqlite3.connect(main.DB_PATH) as db:
+                after_join = (
+                    db.execute(
+                        "SELECT group_membership_status,ref_confirmed "
+                        "FROM members WHERE user_id=?", (applicant_id,),
+                    ).fetchone(),
+                    db.execute(
+                        "SELECT status FROM telegram_join_requests WHERE user_id=?",
+                        (applicant_id,),
+                    ).fetchone()[0],
+                    db.execute(
+                        "SELECT bonus FROM members WHERE user_id=?", (referrer_id,),
+                    ).fetchone()[0],
+                )
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response_json(response)["join_requests_queued"], 1)
+        self.assertEqual(before_join, (
+            ("approved", "unknown", 0), ("approve_queued", "approve"), 0, 1,
+        ))
+        self.assertEqual(after_join, (("member", 1), "joined", 50))
+
+    async def test_replayed_authoritative_join_does_not_duplicate_referral_reward(self):
+        managed_url = "https://t.me/+ManagedJoinToken_1234567890"
+        referrer_id, applicant_id = 992_040_001, 992_040_002
+        await main.upsert_member(
+            referrer_id, full_name="Пригласивший", status="approved",
+            role="helper", bonus=0,
+        )
+        await main.upsert_member(
+            applicant_id, full_name="Одобренный", status="approved", role="helper",
+            referred_by=referrer_id, ref_confirmed=0,
+        )
+        names = (
+            "GROUP_ID", "GROUP_USERNAME", "JOIN_REQUEST_ADMISSION_ENABLED",
+            "JOIN_REQUEST_INVITE_URL", "REFERRAL_MILESTONES",
+        )
+        original = {name: getattr(main, name) for name in names}
+        try:
+            main.GROUP_ID = -100_770_000_001
+            main.GROUP_USERNAME = "bbbikefan"
+            main.JOIN_REQUEST_ADMISSION_ENABLED = True
+            main.JOIN_REQUEST_INVITE_URL = managed_url
+            main.REFERRAL_MILESTONES = [(1, 50)]
+            await self._feed_join_request(self._join_request_event(
+                applicant_id, managed_url, update_id=992_040_101,
+            ))
+            update = self._membership_update(applicant_id)
+            await main.track_group_membership(update)
+            await main.track_group_membership(update)
+        finally:
+            for name, value in original.items():
+                setattr(main, name, value)
+
+        with sqlite3.connect(main.DB_PATH) as db:
+            result = (
+                db.execute(
+                    "SELECT bonus FROM members WHERE user_id=?", (referrer_id,),
+                ).fetchone()[0],
+                db.execute(
+                    "SELECT ref_confirmed FROM members WHERE user_id=?", (applicant_id,),
+                ).fetchone()[0],
+                db.execute(
+                    "SELECT COUNT(*) FROM referral_milestone_rewards "
+                    "WHERE user_id=? AND threshold=1", (referrer_id,),
+                ).fetchone()[0],
+                db.execute(
+                    "SELECT COUNT(*) FROM product_events "
+                    "WHERE event_name='referral_confirmed'",
+                ).fetchone()[0],
+                db.execute(
+                    "SELECT COUNT(*) FROM task_outbox WHERE event_key=?",
+                    (f"referral:{applicant_id}:confirmed:referrer:{referrer_id}",),
+                ).fetchone()[0],
+            )
+        self.assertEqual(result, (50, 1, 1, 1, 1))
+
     async def test_test_environment_never_bypasses_admin_role(self):
         unknown_id, helper_id, admin_id = 899_900_001, 899_900_002, 899_900_003
         await main.upsert_member(
