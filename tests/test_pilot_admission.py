@@ -160,6 +160,21 @@ class PilotAdmissionUnitTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"BIBITASKS_TEST_BOUND": "0"}):
             with self.assertRaisesRegex(RuntimeError, "between 1 and 4"):
                 main._bounded_int_env("BIBITASKS_TEST_BOUND", 1, 1, 4)
+
+    async def test_load_fixture_switch_is_staging_only(self):
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        original_enabled = main.PILOT_LOAD_TEST_ENABLED
+        try:
+            main.PILOT_LOAD_TEST_ENABLED = True
+            main.BIBITASKS_ENVIRONMENT = "production"
+            with self.assertRaisesRegex(RuntimeError, "allowed only in staging"):
+                main._validate_update_receiver_config()
+            main.BIBITASKS_ENVIRONMENT = "test"
+            with self.assertRaisesRegex(RuntimeError, "allowed only in staging"):
+                main._validate_update_receiver_config()
+        finally:
+            main.BIBITASKS_ENVIRONMENT = original_environment
+            main.PILOT_LOAD_TEST_ENABLED = original_enabled
         with patch.dict(os.environ, {"BIBITASKS_TEST_BOUND": "not-an-int"}):
             with self.assertRaisesRegex(RuntimeError, "must be an integer"):
                 main._bounded_int_env("BIBITASKS_TEST_BOUND", 1, 1, 4)
@@ -318,6 +333,7 @@ class TelegramBackpressureTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, "TELEGRAM_OUTBOX_SOFT_LIMIT", 1),
                 patch.object(main, "_storage_healthcheck", AsyncMock(return_value=True)),
                 patch.object(main, "_worker_alive", return_value=True),
+                patch.object(main, "_process_rss_bytes", return_value=123_456_789),
             ):
                 response = await main.api_health(request)
             payload = json.loads(response.text)
@@ -328,6 +344,9 @@ class TelegramBackpressureTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(payload["outbox_backlogged"])
             self.assertIn("active_reads", payload["api_capacity"])
             self.assertIn("rejected", payload["media_processing_capacity"])
+            self.assertEqual(payload["environment"], "test")
+            self.assertFalse(payload["pilot_load_test_enabled"])
+            self.assertEqual(payload["process_rss_bytes"], 123_456_789)
         finally:
             main._telegram_runtime.update(runtime)
 

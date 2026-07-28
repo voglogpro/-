@@ -8,6 +8,8 @@ release image **v2.9.1**
 
 Технический запуск, переменные окружения и release-процесс описаны в
 [`docs/TECHNICAL-README.md`](docs/TECHNICAL-README.md).
+Пороговый staging-тест наплыва пользователей и его критерии — в
+[`docs/PILOT-CAPACITY.md`](docs/PILOT-CAPACITY.md).
 
 Пошаговый production-запуск для владельца: от VPS и домена до Telegram и
 результата LIVE PASS/FAIL и terminal deployment NO-GO — в
@@ -320,7 +322,7 @@ production `python scripts/telegram_preflight.py` и
 | v2.3.0 | светлая и тёмная тема с сохранением выбора, новый графический логотип |
 | v2.9.0 | профессиональный pilot-контур: приватный OPS, фото и шаблоны, поиск и теги, payout lease, durable Telegram ingress/outbox, backup/restore, CI и миграционный harness PostgreSQL |
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
-| v2.10.0 candidate | анкета без телефона, maker-checker ролей и полного сторно ручных начислений, bounded API/media/Telegram admission, обязательная privacy policy, schema 296, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
+| v2.10.0 candidate | анкета без телефона, maker-checker ролей и полного сторно ручных начислений, управляемые Telegram join requests, bounded API/media/Telegram admission, автоматизированный staging load gate, обязательная privacy policy, schema 297, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
 
 ---
 

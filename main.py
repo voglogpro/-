@@ -207,6 +207,7 @@ TELEGRAM_UPDATE_MODE = (os.getenv("TELEGRAM_UPDATE_MODE", "polling") or "polling
 BIBITASKS_ENVIRONMENT = (
     os.getenv("BIBITASKS_ENVIRONMENT", "production") or "production"
 ).strip().lower()
+PILOT_LOAD_TEST_ENABLED = _truthy_env("PILOT_LOAD_TEST_ENABLED", "false")
 PRIVACY_URL_RAW = (os.getenv("PRIVACY_URL", "") or "").strip()
 PRIVACY_CONTROLLER_NAME_RAW = os.getenv("PRIVACY_CONTROLLER_NAME", "") or ""
 PRIVACY_CONTACT_RAW = os.getenv("PRIVACY_CONTACT", "") or ""
@@ -415,6 +416,10 @@ def _validate_update_receiver_config():
     if BIBITASKS_ENVIRONMENT not in ("production", "staging", "development", "test"):
         raise RuntimeError(
             "BIBITASKS_ENVIRONMENT must be production, staging, development or test"
+        )
+    if PILOT_LOAD_TEST_ENABLED and BIBITASKS_ENVIRONMENT != "staging":
+        raise RuntimeError(
+            "PILOT_LOAD_TEST_ENABLED is allowed only in staging"
         )
     if PRIVACY_URL_RAW and PRIVACY_URL is None:
         raise RuntimeError("PRIVACY_URL must be a public HTTPS URL without credentials")
@@ -10364,6 +10369,20 @@ async def serve_media(request):
     )
 
 
+def _process_rss_bytes():
+    """Return current Linux RSS without adding a runtime dependency."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as status_file:
+            for line in status_file:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 async def api_health(request):
     supplied = request.headers.get("X-Health-Token", "")
     local_request = request.remote in ("127.0.0.1", "::1", None)
@@ -10493,6 +10512,9 @@ async def api_health(request):
     return _json({
         "ok": healthy, "version": BUILD_VERSION,
         "application_version": APP_VERSION,
+        "environment": BIBITASKS_ENVIRONMENT,
+        "pilot_load_test_enabled": PILOT_LOAD_TEST_ENABLED,
+        "process_rss_bytes": _process_rss_bytes(),
         "report_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "index_html": os.path.exists(INDEX_PATH),

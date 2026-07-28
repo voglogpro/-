@@ -226,6 +226,7 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "OPS_GROUP_USERNAME": "",
         "OPS_TOPIC_TASKS": str(config.ops_topic_tasks),
         "BIBITASKS_ENVIRONMENT": "production",
+        "PILOT_LOAD_TEST_ENABLED": "false",
         "ADMIN_IDS": ",".join(str(value) for value in dict.fromkeys(config.admin_ids)),
         "MANUAL_GRANT_DAILY_LIMIT": "300",
         "PORT": "3000",

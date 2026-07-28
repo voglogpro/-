@@ -43,6 +43,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         )
         self.assertEqual(len({values[name] for name in secret_names}), len(secret_names))
         self.assertEqual(values["BIBITASKS_ENVIRONMENT"], "production")
+        self.assertEqual(values["PILOT_LOAD_TEST_ENABLED"], "false")
         self.assertEqual(values["TELEGRAM_UPDATE_MODE"], "webhook")
         self.assertEqual(values["DATA_DIR"], "/app/data")
         self.assertEqual(values["MINI_APP_URL"], "https://tasks.example.test/")

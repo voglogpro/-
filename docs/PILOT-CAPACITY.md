@@ -77,6 +77,45 @@ handler остаётся под своей lease до фактической о�
 после окончания импульса обе очереди уходят ниже soft-порогов не более чем за
 пять минут.
 
+Этот gate автоматизирован в `scripts/pilot_load_test.py`. По умолчанию команда
+только печатает план и ничего не меняет:
+
+```bash
+python scripts/pilot_load_test.py \
+  --base-url https://staging.tasks.example.com
+```
+
+Применяемый запуск разрешён только против отдельного стенда с
+`BIBITASKS_ENVIRONMENT=staging` и явным одноразовым
+`PILOT_LOAD_TEST_ENABLED=true`. Он создаёт синтетические анкеты, задания,
+фотографии и Telegram updates; после сохранения отчёта базу и media bucket
+стенда нужно уничтожить целиком. Запуск против production запрещён проверкой
+`/health/ready`.
+
+Токены передаются только через файлы, а точный origin подтверждается второй
+раз. Значения ниже должны находиться в переменных текущего shell и не должны
+попадать в Git или отчёт:
+
+```bash
+python scripts/pilot_load_test.py \
+  --apply \
+  --base-url "$LOAD_TEST_ORIGIN" \
+  --confirm-base-url "$LOAD_TEST_ORIGIN" \
+  --bot-token-file /run/secrets/staging_bot_token \
+  --health-token-file /run/secrets/staging_health_token \
+  --webhook-secret-file /run/secrets/staging_webhook_secret \
+  --webhook-path "$STAGING_WEBHOOK_PATH" \
+  --admin-user-id "$STAGING_ADMIN_ID" \
+  --report /secure-evidence/pilot-load-report.json
+```
+
+Отчёт не содержит токены и синтетические user ID. Он считается успешным,
+только если завершились все логические запросы, не было HTTP 500 или
+`database is locked`, webhook p95 не превысил 500 мс, RSS процесса остался
+ниже 600 МиБ, а inbox/outbox вернулись ниже soft-порогов за пять минут.
+Контролируемые `429/503` учитываются отдельно и повторяются тем же логическим
+запросом; их наличие само по себе не подменяет успешное завершение сценария.
+
 Перед несколькими экземплярами приложения необходим отдельный runtime на
 PostgreSQL, private object storage и разделение API/inbox/outbox workers.
 Существующий migration harness сам по себе этого не обеспечивает.
