@@ -1,3 +1,5 @@
+name: bibitasks-pilot
+
 services:
   bibitasks:
     image: "${BIBITASKS_IMAGE:?Set an immutable GHCR image with @sha256 digest}"
