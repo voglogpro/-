@@ -1,5 +1,10 @@
 services:
   monitor:
+    environment:
+      # The CI image is local and has no registry RepoDigest. Keep the real
+      # deployment guard in the process chain with an isolated immutable ID.
+      BIBITASKS_DEPLOYMENT_IMAGE: "bibitasks-ci.invalid/monitor@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      MONITOR_INTERVAL_SECONDS: "300"
     healthcheck:
       interval: 2s
       timeout: 2s

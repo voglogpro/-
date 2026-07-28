@@ -189,6 +189,18 @@ jobs:
           container=$("$compose" -p "$project" "${files[@]}" ps -q monitor)
           test -n "$container"
           for _ in $(seq 1 30); do
+            if docker exec --user 10001:10001 "$container" python -c \
+              "from pathlib import Path; raise SystemExit(not Path('/var/lib/bibitasks-monitor/state.json').is_file())"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec --user 10001:10001 "$container" python -c \
+            "from pathlib import Path; assert Path('/var/lib/bibitasks-monitor/state.json').is_file()"
+          "$compose" -p "$project" "${files[@]}" run --rm --no-deps --user 10001:10001 \
+            --entrypoint python monitor -c \
+            "from datetime import datetime,timezone; import json; from pathlib import Path; check={'failures':0,'alert_active':False,'last_healthy':True,'detail':'ci fixture','pending_incident':False,'pending_incident_detail':''}; state={'version':1,'last_check_at':datetime.now(timezone.utc).isoformat(),'checks':{name:dict(check) for name in ('application','dead_queues','backup')},'delivery':{'consecutive_failures':0,'error_since':None,'last_error_at':None}}; path=Path('/var/lib/bibitasks-monitor/state.json'); path.write_text(json.dumps(state,sort_keys=True)+'\n',encoding='utf-8'); path.chmod(0o600)"
+          for _ in $(seq 1 30); do
             status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")
             test "$status" = healthy && break
             sleep 1
