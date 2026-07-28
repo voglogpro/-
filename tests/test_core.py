@@ -107,6 +107,31 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main.PRIVACY_URL_RAW, main.PRIVACY_URL = original
 
+    async def test_same_origin_privacy_page_is_versioned_escaped_and_no_store(self):
+        original = (
+            main.PRIVACY_CONTROLLER_NAME, main.PRIVACY_CONTACT,
+            main.EVIDENCE_RETENTION_DAYS,
+        )
+        try:
+            main.PRIVACY_CONTROLLER_NAME = "ООО <Бибибайк>"
+            main.PRIVACY_CONTACT = "privacy@example.test <script>"
+            main.EVIDENCE_RETENTION_DAYS = 91
+            response = await main.serve_privacy(None)
+        finally:
+            (
+                main.PRIVACY_CONTROLLER_NAME, main.PRIVACY_CONTACT,
+                main.EVIDENCE_RETENTION_DAYS,
+            ) = original
+        body = response.text
+        self.assertEqual(response.status, 200)
+        self.assertIn('data-bibitasks-privacy-version="1"', body)
+        self.assertIn("ООО &lt;Бибибайк&gt;", body)
+        self.assertIn("privacy@example.test &lt;script&gt;", body)
+        self.assertNotIn("<script>", body)
+        self.assertIn("91 дней", body)
+        self.assertEqual(response.headers["Cache-Control"].split(",")[0], "no-store")
+        self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
+
     async def test_webhook_configuration_is_fail_closed(self):
         names = (
             "TELEGRAM_UPDATE_MODE", "PUBLIC_BASE_URL", "WEBHOOK_ROUTE_ID",
@@ -534,6 +559,421 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(state, "deleted")
         self.assertFalse((Path(main.TASK_PHOTO_DIR) / first["photo_file"]).exists())
+
+    async def test_terminal_proof_photo_expires_but_audit_and_hash_remain(self):
+        media_id = str(uuid.uuid4())
+        filename = "retention-proof.jpg"
+        content = b"retention-proof-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 1
+            )
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO members (user_id,full_name,role,status,bonus,created_at) "
+                "VALUES (701,'Исполнитель','helper','approved',50,?)", (old,),
+            )
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at,done_at) "
+                "VALUES ('fix_zone','Retention',50,'closed',?,?)", (old, old),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,terminal_at) "
+                "VALUES (?,701,'done',?,?,?)", (task_id, old, old, old),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_proof','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "retention-proof", digest, old, old),
+            )
+            evidence_id = db.execute(
+                "INSERT INTO task_evidence "
+                "(assignment_id,task_id,user_id,kind,photo_file,media_id,sha256,"
+                "attempt,is_current,created_at) VALUES (?,?,701,'after',?,?,?,1,1,?)",
+                (assignment_id, task_id, filename, media_id, digest, old),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,task_id,assignment_id,created_at,operation_id) "
+                "VALUES (701,50,'Retention audit',?,?,?,'retention-ledger')",
+                (task_id, assignment_id, old),
+            )
+            db.commit()
+
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            evidence = db.execute(
+                "SELECT media_id,photo_file,sha256 FROM task_evidence WHERE id=?",
+                (evidence_id,),
+            ).fetchone()
+            media_state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+            ledger_count = db.execute(
+                "SELECT COUNT(*) FROM bonus_ledger WHERE operation_id='retention-ledger'"
+            ).fetchone()[0]
+        self.assertEqual(evidence, (None, "", digest))
+        self.assertEqual(media_state, "deleted")
+        self.assertEqual(ledger_count, 1)
+        self.assertFalse((Path(main.TASK_PHOTO_DIR) / filename).exists())
+
+    async def test_pending_or_recent_dispute_holds_proof_photo(self):
+        media_id = str(uuid.uuid4())
+        filename = "retention-dispute.jpg"
+        content = b"retention-dispute-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 2
+            )
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at,done_at) "
+                "VALUES ('fix_zone','Dispute hold',50,'closed',?,?)", (old, old),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,terminal_at) "
+                "VALUES (?,702,'done',?,?)", (task_id, old, old),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_proof','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "retention-dispute", digest, old, old),
+            )
+            db.execute(
+                "INSERT INTO task_evidence "
+                "(assignment_id,task_id,user_id,kind,photo_file,media_id,sha256,"
+                "attempt,is_current,created_at) VALUES (?,?,702,'after',?,?,?,1,1,?)",
+                (assignment_id, task_id, filename, media_id, digest, old),
+            )
+            dispute_id = db.execute(
+                "INSERT INTO task_disputes "
+                "(assignment_id,task_id,user_id,reward,reason,status,opened_by,opened_at,"
+                "open_operation_id,open_request_hash) "
+                "VALUES (?,?,702,50,'Проверка','pending',703,?,'retention-open','hash')",
+                (assignment_id, task_id, old),
+            ).lastrowid
+            db.commit()
+
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT media_id FROM task_evidence WHERE assignment_id=?", (assignment_id,)).fetchone()[0],
+                media_id,
+            )
+            db.execute(
+                "UPDATE task_disputes SET status='rejected',decided_at=? WHERE id=?",
+                (main.now_iso(), dispute_id),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT media_id FROM task_evidence WHERE assignment_id=?", (assignment_id,)).fetchone()[0],
+                media_id,
+            )
+            db.execute(
+                "UPDATE task_disputes SET decided_at=? WHERE id=?", (old, dispute_id),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertIsNone(
+                db.execute("SELECT media_id FROM task_evidence WHERE assignment_id=?", (assignment_id,)).fetchone()[0]
+            )
+            self.assertEqual(
+                db.execute("SELECT state FROM media_objects WHERE id=?", (media_id,)).fetchone()[0],
+                "deleted",
+            )
+
+    async def test_closed_task_brief_photo_expires_after_all_work_and_disputes(self):
+        media_id = str(uuid.uuid4())
+        filename = "retention-brief.jpg"
+        content = b"retention-brief-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 1
+            )
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_brief','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "retention-brief", digest, old, old),
+            )
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,details,address,lat,lng,reward,status,created_at,"
+                "cancelled_at,photo_file,photo_media_id) "
+                "VALUES ('fix_zone','Brief retention','Секрет','Точный адрес',"
+                "45.0,39.0,0,'cancelled',?,?,?,?)",
+                (old, old, filename, media_id),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO task_evidence "
+                "(task_id,user_id,kind,photo_file,media_id,sha256,attempt,is_current,created_at) "
+                "VALUES (?,704,'brief',?,?,?,1,1,?)",
+                (task_id, filename, media_id, digest, old),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task = db.execute(
+                "SELECT photo_media_id,photo_file,details,address,lat,lng "
+                "FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            evidence = db.execute(
+                "SELECT media_id,photo_file,sha256 FROM task_evidence WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+        self.assertEqual(task, (None, None, None, None, None, None))
+        self.assertEqual(evidence, (None, "", digest))
+        self.assertEqual(state, "deleted")
+
+    async def test_unresolved_dead_outbox_holds_media_then_sent_payload_is_redacted(self):
+        media_id = str(uuid.uuid4())
+        filename = "retention-outbox.jpg"
+        content = b"retention-outbox-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        terminal_old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 2
+            )
+        ).isoformat()
+        payload_old = (
+            main.datetime.now(main.timezone.utc) - main.timedelta(days=31)
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at,done_at) "
+                "VALUES ('fix_zone','Outbox hold',0,'closed',?,?)",
+                (terminal_old, terminal_old),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,terminal_at) "
+                "VALUES (?,705,'done',?,?)",
+                (task_id, terminal_old, terminal_old),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_proof','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "retention-outbox", digest, terminal_old, terminal_old),
+            )
+            db.execute(
+                "INSERT INTO task_evidence "
+                "(assignment_id,task_id,user_id,kind,photo_file,media_id,sha256,"
+                "attempt,is_current,created_at) VALUES (?,?,705,'after',?,?,?,1,1,?)",
+                (assignment_id, task_id, filename, media_id, digest, terminal_old),
+            )
+            outbox_id = db.execute(
+                "INSERT INTO task_outbox "
+                "(event_key,event_type,media_id,payload_json,status,available_at,created_at) "
+                "VALUES ('retention:dead','direct',?,?,'dead',?,?)",
+                (
+                    media_id, json.dumps({"address": "Точный адрес"}),
+                    terminal_old, terminal_old,
+                ),
+            ).lastrowid
+            db.commit()
+
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT media_id FROM task_evidence WHERE assignment_id=?", (assignment_id,)).fetchone()[0],
+                media_id,
+            )
+            db.execute(
+                "UPDATE task_outbox SET status='sent',sent_at=? WHERE id=?",
+                (payload_old, outbox_id),
+            )
+            db.commit()
+        await main.cleanup_expired_analytics()
+        with sqlite3.connect(main.DB_PATH) as db:
+            outbox = db.execute(
+                "SELECT payload_json,media_id FROM task_outbox WHERE id=?", (outbox_id,),
+            ).fetchone()
+            state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+        self.assertEqual(outbox, ('{"redacted":"retention"}', None))
+        self.assertEqual(state, "deleted")
+
+    async def test_malformed_terminal_timestamp_holds_evidence_fail_closed(self):
+        media_id = str(uuid.uuid4())
+        filename = "retention-malformed.jpg"
+        content = b"retention-malformed-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at) "
+                "VALUES ('fix_zone','Malformed hold',0,'closed','1')"
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,terminal_at) "
+                "VALUES (?,706,'done','1','1')", (task_id,),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_proof','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "retention-malformed", digest, main.now_iso(), main.now_iso()),
+            )
+            db.execute(
+                "INSERT INTO task_evidence "
+                "(assignment_id,task_id,user_id,kind,photo_file,media_id,sha256,"
+                "attempt,is_current,created_at) VALUES (?,?,706,'after',?,?,?,1,1,?)",
+                (assignment_id, task_id, filename, media_id, digest, main.now_iso()),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT media_id FROM task_evidence WHERE assignment_id=?", (assignment_id,)).fetchone()[0],
+                media_id,
+            )
+            self.assertEqual(
+                db.execute("SELECT state FROM media_objects WHERE id=?", (media_id,)).fetchone()[0],
+                "ready",
+            )
+
+    async def test_expired_task_with_review_assignment_holds_brief_and_address(self):
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 2
+            )
+        ).isoformat()
+        media_id = str(uuid.uuid4())
+        filename = "retention-active-review.jpg"
+        content = b"retention-active-review-bytes"
+        digest = main.hashlib.sha256(content).hexdigest()
+        (Path(main.TASK_PHOTO_DIR) / filename).write_bytes(content)
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,details,address,reward,status,created_at,expired_at,"
+                "photo_file,photo_media_id) VALUES "
+                "('fix_zone','Review hold','Sensitive brief','Exact address',0,"
+                "'expired',?,?,?,?)",
+                (old, old, filename, media_id),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,proof_note) "
+                "VALUES (?,707,'review',?,?,'Still awaiting review')",
+                (task_id, old, old),
+            )
+            db.execute(
+                "INSERT INTO media_objects "
+                "(id,backend,object_key,purpose,state,content_type,size_bytes,sha256,"
+                "upload_operation_id,request_hash,created_at,ready_at) "
+                "VALUES (?,'local',?,'task_brief','ready','image/jpeg',?,?,?,?,?,?)",
+                (media_id, filename, len(content), digest, "review-hold", digest, old, old),
+            )
+            db.execute(
+                "INSERT INTO task_evidence "
+                "(task_id,user_id,kind,photo_file,media_id,sha256,attempt,is_current,created_at) "
+                "VALUES (?,0,'brief',?,?,?,1,1,?)",
+                (task_id, filename, media_id, digest, old),
+            )
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task = db.execute(
+                "SELECT details,address,photo_media_id FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            state = db.execute(
+                "SELECT state FROM media_objects WHERE id=?", (media_id,),
+            ).fetchone()[0]
+        self.assertEqual(task, ("Sensitive brief", "Exact address", media_id))
+        self.assertEqual(state, "ready")
+
+    async def test_comment_only_evidence_and_resolved_dispute_text_expire(self):
+        old = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(
+                days=main.EVIDENCE_RETENTION_DAYS + main.DISPUTE_OPEN_DAYS + 2
+            )
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at,done_at) "
+                "VALUES ('fix_zone','Comment retention',0,'closed',?,?)",
+                (old, old),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,terminal_at,proof_note,"
+                "review_note,release_reason) VALUES "
+                "(?,708,'done',?,?,?,'Sensitive proof','Sensitive review','Sensitive release')",
+                (task_id, old, old, old),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO task_disputes "
+                "(assignment_id,task_id,user_id,reward,reason,reconciliation_reason,"
+                "reconciliation_reference,status,opened_by,opened_at,open_operation_id,"
+                "open_request_hash,decided_by,decided_at,decision_note) VALUES "
+                "(?,?,708,0,'Sensitive dispute','Sensitive reconciliation','Sensitive ref',"
+                "'dismissed',1,?,'retention-dispute','hash',2,?,'Sensitive decision')",
+                (assignment_id, task_id, old, old),
+            )
+            outbox_id = db.execute(
+                "INSERT INTO task_outbox "
+                "(event_key,event_type,payload_json,status,available_at,created_at,sent_at) "
+                "VALUES (?, 'direct', ?, 'sent', ?, ?, ?)",
+                (
+                    f"assignment:{assignment_id}:proof:late-redrive",
+                    json.dumps({"text": "Sensitive proof"}),
+                    main.now_iso(), main.now_iso(), main.now_iso(),
+                ),
+            ).lastrowid
+            db.commit()
+        await main._cleanup_media_objects()
+        with sqlite3.connect(main.DB_PATH) as db:
+            assignment = db.execute(
+                "SELECT proof_note,review_note,release_reason FROM task_assignments "
+                "WHERE id=?", (assignment_id,),
+            ).fetchone()
+            dispute = db.execute(
+                "SELECT reason,reconciliation_reason,reconciliation_reference,decision_note "
+                "FROM task_disputes WHERE assignment_id=?", (assignment_id,),
+            ).fetchone()
+            outbox_payload = db.execute(
+                "SELECT payload_json FROM task_outbox WHERE id=?", (outbox_id,),
+            ).fetchone()[0]
+        self.assertEqual(assignment, (None, None, None))
+        self.assertEqual(dispute, ("", None, None, None))
+        self.assertEqual(outbox_payload, '{"redacted":"retention"}')
 
     async def test_s3_storage_adapter_is_private_and_checksum_verified(self):
         class FakeS3:
@@ -2937,6 +3377,57 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertEqual(after, ("Орёл", None))
 
+    async def test_task_dispute_cannot_open_after_evidence_window_started(self):
+        worker_id, opener_id = 911_900_001, 911_900_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper",
+        )
+        await self._seed_admin(opener_id)
+        terminal_at = (
+            main.datetime.now(main.timezone.utc)
+            - main.timedelta(days=main.DISPUTE_OPEN_DAYS + 1)
+        ).isoformat()
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks (type,title,reward,status,created_at) "
+                "VALUES ('fix_zone','Старое решение',50,'closed',?)",
+                (terminal_at,),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,"
+                "terminal_at,terminal_by) VALUES (?,?,'done',?,?,50,?,?)",
+                (
+                    task_id, worker_id, terminal_at, terminal_at,
+                    terminal_at, opener_id,
+                ),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        try:
+            response = await main.api_admin_task_dispute(DummyRequest({
+                "action": "open", "assignment_id": assignment_id,
+                "reason": "Слишком поздний спор",
+                "operation_id": str(uuid.uuid4()),
+            }, opener_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response_json(response)["error"], "dispute_window_closed")
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM task_disputes WHERE assignment_id=?",
+                    (assignment_id,),
+                ).fetchone()[0],
+                0,
+            )
+
     async def test_task_dispute_requires_second_admin_and_reverses_exactly_once(self):
         worker_id, opener_id, reviewer_id = (
             912_000_001, 912_000_002, 912_000_003,
@@ -2977,9 +3468,12 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             ).lastrowid
             assignment_id = db.execute(
                 "INSERT INTO task_assignments "
-                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,terminal_by) "
-                "VALUES (?,?,'done',?,?,100,?)",
-                (task_id, worker_id, main.now_iso(), main.now_iso(), reviewer_id),
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,"
+                "terminal_by,terminal_at) VALUES (?,?,'done',?,?,100,?,?)",
+                (
+                    task_id, worker_id, main.now_iso(), main.now_iso(),
+                    reviewer_id, main.now_iso(),
+                ),
             ).lastrowid
             db.execute(
                 "INSERT INTO bonus_ledger "
@@ -3082,9 +3576,12 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             ).lastrowid
             assignment_id = db.execute(
                 "INSERT INTO task_assignments "
-                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,terminal_by) "
-                "VALUES (?,?,'done',?,?,100,?)",
-                (task_id, worker_id, main.now_iso(), main.now_iso(), reviewer_id),
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,"
+                "terminal_by,terminal_at) VALUES (?,?,'done',?,?,100,?,?)",
+                (
+                    task_id, worker_id, main.now_iso(), main.now_iso(),
+                    reviewer_id, main.now_iso(),
+                ),
             ).lastrowid
             db.execute(
                 "INSERT INTO bonus_ledger "

@@ -44,6 +44,8 @@ class BootstrapConfig:
     topic_franchise: int
     ops_topic_tasks: int
     privacy_url: str
+    privacy_controller_name: str
+    privacy_contact: str
     bot_username: str = "BbGalterbot"
     group_username: str = "bbbikefan"
     expected_bot_name: str = "БибиЗадачи · Бибибайк"
@@ -116,6 +118,18 @@ def validate_config(config: BootstrapConfig, bot_token: str):
         errors.append("expected Telegram brand names must not be empty")
     if not _safe_privacy_url(config.privacy_url):
         errors.append("PRIVACY_URL must be a public HTTPS URL without credentials")
+    expected_privacy_url = config.public_base_url.strip().rstrip("/") + "/privacy"
+    if _safe_privacy_url(config.privacy_url) != expected_privacy_url:
+        errors.append("PRIVACY_URL must equal PUBLIC_BASE_URL + /privacy")
+    for name, value in (
+        ("PRIVACY_CONTROLLER_NAME", config.privacy_controller_name),
+        ("PRIVACY_CONTACT", config.privacy_contact),
+    ):
+        if "\n" in str(value) or "\r" in str(value):
+            errors.append(f"{name} must not contain line breaks")
+        normalized = " ".join(str(value or "").split())
+        if not 3 <= len(normalized) <= 160:
+            errors.append(f"{name} must contain 3-160 characters")
     if not TOKEN_RE.fullmatch(bot_token.strip()):
         errors.append("BOT_TOKEN is missing or malformed")
     topics = (
@@ -129,6 +143,7 @@ def validate_config(config: BootstrapConfig, bot_token: str):
     if any("\n" in value or "\r" in value for value in (
         config.expected_bot_name, config.expected_group_title,
         config.withdraw_contact, config.privacy_url,
+        config.privacy_controller_name, config.privacy_contact,
     )):
         errors.append("text values must not contain line breaks")
     if errors:
@@ -164,6 +179,12 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "BOT_PROFILE_SHORT_DESCRIPTION": DEFAULT_BOT_SHORT_DESCRIPTION,
         "BOT_MENU_TEXT": DEFAULT_BOT_MENU_TEXT,
         "PRIVACY_URL": _safe_privacy_url(config.privacy_url),
+        "PRIVACY_CONTROLLER_NAME": " ".join(
+            config.privacy_controller_name.split()
+        ),
+        "PRIVACY_CONTACT": " ".join(config.privacy_contact.split()),
+        "EVIDENCE_RETENTION_DAYS": "90",
+        "DISPUTE_OPEN_DAYS": "30",
         "REQUIRED_CHAT": f"@{group_username}",
         "REQUIRED_CHAT_URL": f"https://t.me/{group_username}",
         "GROUP_USERNAME": group_username,
@@ -315,6 +336,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--public-base-url", required=True)
     parser.add_argument("--privacy-url", required=True)
+    parser.add_argument("--privacy-controller-name", required=True)
+    parser.add_argument("--privacy-contact", required=True)
     parser.add_argument("--group-id", type=_supergroup_id, required=True)
     parser.add_argument("--ops-group-id", type=_supergroup_id, required=True)
     parser.add_argument("--admin-id", type=_positive_id, action="append", required=True)
@@ -343,6 +366,8 @@ def main():
         topic_franchise=args.topic_franchise,
         ops_topic_tasks=args.ops_topic_tasks,
         privacy_url=args.privacy_url,
+        privacy_controller_name=args.privacy_controller_name,
+        privacy_contact=args.privacy_contact,
         bot_username=args.bot_username,
         group_username=args.group_username,
     )

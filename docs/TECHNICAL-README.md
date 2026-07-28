@@ -5,6 +5,8 @@ Telegram-бот и Mini App для команды Бибибайка: участ
 Для первого production-пилота используйте единый пошаговый маршрут
 [`OWNER-LAUNCH.md`](OWNER-LAUNCH.md). Он связывает VPS, автоматический HTTPS,
 backup, реальные Telegram group/topic ID, профиль бота и live-приёмку.
+Исполняемые сроки данных и ограничения Telegram/backup описаны в
+[`PRIVACY-AND-RETENTION.md`](PRIVACY-AND-RETENTION.md).
 
 ## Что входит
 
@@ -40,6 +42,8 @@ python scripts/bootstrap_production_env.py \
   --output /etc/bibitasks/bibitasks.env \
   --public-base-url https://tasks.example.com \
   --privacy-url https://tasks.example.com/privacy \
+  --privacy-controller-name 'Юридическое имя оператора' \
+  --privacy-contact '@ответственный_за_данные' \
   --group-id -1000000000001 \
   --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \

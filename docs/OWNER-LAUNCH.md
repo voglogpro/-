@@ -45,6 +45,8 @@ backup-процесс используют общий Docker volume; запус�
 |---|---|---|
 | `BIBITASKS_DOMAIN` | подготовленный поддомен без `https://` | ☐ |
 | `PRIVACY_URL` | публичная HTTPS-политика со сроками хранения и порядком удаления | ☐ |
+| `PRIVACY_CONTROLLER_NAME` | точное юридическое/публичное имя оператора пилота | ☐ |
+| `PRIVACY_CONTACT` | рабочий контакт запросов на исправление и удаление | ☐ |
 | `GROUP_ID` | `chat_id` публичной `@bbbikefan` | ☐ |
 | `TOPIC_NEWS` | `message_thread_id` темы «Новости» | ☐ |
 | `TOPIC_CHAT` | `message_thread_id` темы «Болталка» | ☐ |
@@ -183,6 +185,8 @@ docker run --rm --user 0:0 -e BOT_TOKEN \
   --monitor-secrets-dir /secure \
   --public-base-url https://tasks.example.com \
   --privacy-url https://tasks.example.com/privacy \
+  --privacy-controller-name 'Юридическое имя оператора' \
+  --privacy-contact '@ответственный_за_данные' \
   --group-id -1000000000001 --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
   --webapp-shortname bibibike \

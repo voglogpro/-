@@ -14,6 +14,7 @@ import binascii
 import contextvars
 import hashlib
 import hmac
+import html
 import ipaddress
 import io
 import json
@@ -171,6 +172,10 @@ BIBITASKS_ENVIRONMENT = (
     os.getenv("BIBITASKS_ENVIRONMENT", "production") or "production"
 ).strip().lower()
 PRIVACY_URL_RAW = (os.getenv("PRIVACY_URL", "") or "").strip()
+PRIVACY_CONTROLLER_NAME_RAW = os.getenv("PRIVACY_CONTROLLER_NAME", "") or ""
+PRIVACY_CONTACT_RAW = os.getenv("PRIVACY_CONTACT", "") or ""
+PRIVACY_CONTROLLER_NAME = " ".join(PRIVACY_CONTROLLER_NAME_RAW.split())[:160]
+PRIVACY_CONTACT = " ".join(PRIVACY_CONTACT_RAW.split())[:160]
 
 
 def _safe_https_url(raw):
@@ -202,6 +207,12 @@ def _safe_https_url(raw):
 
 
 PRIVACY_URL = _safe_https_url(PRIVACY_URL_RAW)
+EVIDENCE_RETENTION_DAYS = _bounded_int_env(
+    "EVIDENCE_RETENTION_DAYS", 90, 30, 365,
+)
+DISPUTE_OPEN_DAYS = _bounded_int_env(
+    "DISPUTE_OPEN_DAYS", 30, 7, 90,
+)
 TELEGRAM_RETRY_BASE_SECONDS = max(
     1, min(60, _as_int_env("TELEGRAM_RETRY_BASE_SECONDS", 2) or 2)
 )
@@ -381,6 +392,28 @@ def _validate_update_receiver_config():
         )
     if BIBITASKS_ENVIRONMENT == "production" and PRIVACY_URL is None:
         raise RuntimeError("PRIVACY_URL is required in production and must be a public HTTPS URL")
+    if BIBITASKS_ENVIRONMENT == "production":
+        if any(
+            character in value
+            for value in (PRIVACY_CONTROLLER_NAME_RAW, PRIVACY_CONTACT_RAW)
+            for character in "\r\n\t"
+        ):
+            raise RuntimeError("privacy operator values must be single-line text")
+        expected_privacy_url = (
+            f"{PUBLIC_BASE_URL}/privacy" if PUBLIC_BASE_URL else ""
+        )
+        if PRIVACY_URL != expected_privacy_url:
+            raise RuntimeError(
+                "PRIVACY_URL must equal PUBLIC_BASE_URL + /privacy in production"
+            )
+        if not (3 <= len(PRIVACY_CONTROLLER_NAME) <= 160):
+            raise RuntimeError(
+                "PRIVACY_CONTROLLER_NAME must contain 3-160 characters in production"
+            )
+        if not (3 <= len(PRIVACY_CONTACT) <= 160):
+            raise RuntimeError(
+                "PRIVACY_CONTACT must contain 3-160 characters in production"
+            )
     if TELEGRAM_INBOX_FERNET is None:
         raise RuntimeError("TELEGRAM_INBOX_KEY must be a valid Fernet key")
     if WITHDRAW_FERNET is None:
@@ -607,6 +640,7 @@ DATA_DIR = os.getenv("DATA_DIR") or os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bibitasks.db")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+PRIVACY_TEMPLATE_PATH = os.path.join(BASE_DIR, "privacy.html")
 LOGO_PATH = os.path.join(BASE_DIR, "logo.jpg")
 TASK_PHOTO_DIR = os.path.join(DATA_DIR, "task_photos")
 os.makedirs(TASK_PHOTO_DIR, exist_ok=True)
@@ -2095,7 +2129,7 @@ async def _reconcile_referenced_media():
             "EXISTS (SELECT 1 FROM tasks t WHERE t.photo_media_id=m.id) OR "
             "EXISTS (SELECT 1 FROM task_evidence e WHERE e.media_id=m.id) OR "
             "EXISTS (SELECT 1 FROM task_outbox o WHERE o.media_id=m.id "
-            "AND o.status IN ('pending','sending'))) "
+            "AND o.status IN ('pending','sending','dead'))) "
             "ORDER BY m.checked_at IS NOT NULL,m.checked_at LIMIT 100"
         )).fetchall()
     for row in rows:
@@ -2123,8 +2157,178 @@ async def _reconcile_referenced_media():
             await db.commit()
 
 
+async def _schedule_expired_evidence_media():
+    """Detach expired photos while preserving hashes and financial/audit rows."""
+    evidence_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=EVIDENCE_RETENTION_DAYS)
+    ).isoformat()
+    terminal_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(days=EVIDENCE_RETENTION_DAYS + DISPUTE_OPEN_DAYS)
+    ).isoformat()
+    delete_at = now_iso()
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        eligible_assignment_rows = await (await db.execute(
+            "SELECT a.id FROM task_assignments a "
+            "WHERE a.status IN ('done','rejected','released','cancelled','expired','reversed') "
+            "AND a.terminal_at GLOB '????-??-??T??:??:??*' "
+            "AND datetime(a.terminal_at) IS NOT NULL "
+            "AND datetime(a.terminal_at)<datetime(?) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.assignment_id=a.id "
+            "AND d.status IN ('pending','manual_required')) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.assignment_id=a.id AND (d.decided_at IS NULL "
+            "OR d.decided_at NOT GLOB '????-??-??T??:??:??*' "
+            "OR datetime(d.decided_at) IS NULL "
+            "OR datetime(d.decided_at)>=datetime(?))) "
+            "AND NOT EXISTS (SELECT 1 FROM task_outbox o "
+            "WHERE o.event_key LIKE ('assignment:' || a.id || ':%') "
+            "AND o.status IN ('pending','sending','dead'))",
+            (terminal_cutoff, evidence_cutoff),
+        )).fetchall()
+        assignment_ids = [int(row["id"]) for row in eligible_assignment_rows]
+        proof_rows = await (await db.execute(
+            "SELECT e.id,e.media_id FROM task_evidence e "
+            "JOIN task_assignments a ON a.id=e.assignment_id "
+            "WHERE e.media_id IS NOT NULL "
+            "AND a.status IN ('done','rejected','released','cancelled','expired','reversed') "
+            "AND a.terminal_at GLOB '????-??-??T??:??:??*' "
+            "AND datetime(a.terminal_at) IS NOT NULL "
+            "AND datetime(a.terminal_at)<datetime(?) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.assignment_id=a.id "
+            "AND d.status IN ('pending','manual_required')) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.assignment_id=a.id AND (d.decided_at IS NULL "
+            "OR d.decided_at NOT GLOB '????-??-??T??:??:??*' "
+            "OR datetime(d.decided_at) IS NULL "
+            "OR datetime(d.decided_at)>=datetime(?))) "
+            "AND NOT EXISTS (SELECT 1 FROM task_outbox o "
+            "WHERE o.media_id=e.media_id "
+            "AND o.status IN ('pending','sending','dead')) "
+            "AND NOT EXISTS (SELECT 1 FROM task_outbox o "
+            "WHERE o.event_key LIKE ('assignment:' || a.id || ':%') "
+            "AND o.status IN ('pending','sending','dead'))",
+            (terminal_cutoff, evidence_cutoff),
+        )).fetchall()
+        proof_ids = [int(row["id"]) for row in proof_rows]
+        proof_media = {str(row["media_id"]) for row in proof_rows}
+        for evidence_id in proof_ids:
+            await db.execute(
+                "UPDATE task_evidence SET media_id=NULL,photo_file='' "
+                "WHERE id=? AND media_id IS NOT NULL",
+                (evidence_id,),
+            )
+        for assignment_id in assignment_ids:
+            await db.execute(
+                "UPDATE task_assignments SET proof_note=NULL,review_note=NULL,"
+                "release_reason=NULL WHERE id=?",
+                (assignment_id,),
+            )
+            await db.execute(
+                "UPDATE task_disputes SET reason='',reconciliation_reason=NULL,"
+                "reconciliation_reference=NULL,decision_note=NULL "
+                "WHERE assignment_id=? AND status NOT IN "
+                "('pending','manual_required')",
+                (assignment_id,),
+            )
+            await db.execute(
+                "UPDATE task_outbox SET payload_json='{\"redacted\":\"retention\"}',"
+                "media_id=NULL WHERE status='sent' "
+                "AND event_key LIKE ('assignment:' || ? || ':%')",
+                (assignment_id,),
+            )
+
+        brief_rows = await (await db.execute(
+            "SELECT t.id,t.photo_media_id FROM tasks t "
+            "WHERE ((t.status='cancelled' "
+            "AND t.cancelled_at GLOB '????-??-??T??:??:??*' "
+            "AND datetime(t.cancelled_at) IS NOT NULL "
+            "AND datetime(t.cancelled_at)<datetime(?)) "
+            "OR (t.status='expired' "
+            "AND t.expired_at GLOB '????-??-??T??:??:??*' "
+            "AND datetime(t.expired_at) IS NOT NULL "
+            "AND datetime(t.expired_at)<datetime(?)) "
+            "OR (t.status='closed' AND ((EXISTS (SELECT 1 FROM task_assignments a "
+            "WHERE a.task_id=t.id) AND NOT EXISTS (SELECT 1 FROM task_assignments a "
+            "WHERE a.task_id=t.id AND (a.status NOT IN "
+            "('done','rejected','released','cancelled','expired','reversed') "
+            "OR a.terminal_at NOT GLOB '????-??-??T??:??:??*' "
+            "OR datetime(a.terminal_at) IS NULL "
+            "OR datetime(a.terminal_at)>=datetime(?)))) "
+            "OR (NOT EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id=t.id) "
+            "AND t.done_at GLOB '????-??-??T??:??:??*' "
+            "AND datetime(t.done_at) IS NOT NULL "
+            "AND datetime(t.done_at)<datetime(?))))) "
+            "AND NOT EXISTS (SELECT 1 FROM task_assignments a "
+            "WHERE a.task_id=t.id AND (a.status NOT IN "
+            "('done','rejected','released','cancelled','expired','reversed') "
+            "OR a.terminal_at NOT GLOB '????-??-??T??:??:??*' "
+            "OR datetime(a.terminal_at) IS NULL "
+            "OR datetime(a.terminal_at)>=datetime(?))) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.task_id=t.id "
+            "AND d.status IN ('pending','manual_required')) "
+            "AND NOT EXISTS (SELECT 1 FROM task_disputes d "
+            "WHERE d.task_id=t.id AND (d.decided_at IS NULL "
+            "OR d.decided_at NOT GLOB '????-??-??T??:??:??*' "
+            "OR datetime(d.decided_at) IS NULL "
+            "OR datetime(d.decided_at)>=datetime(?))) "
+            "AND NOT EXISTS (SELECT 1 FROM task_outbox o "
+            "WHERE (o.media_id=t.photo_media_id "
+            "OR o.event_key=('task:' || t.id || ':announcement')) "
+            "AND o.status IN ('pending','sending','dead'))",
+            (
+                terminal_cutoff, terminal_cutoff, terminal_cutoff,
+                terminal_cutoff, terminal_cutoff, evidence_cutoff,
+            ),
+        )).fetchall()
+        brief_media = {
+            str(row["photo_media_id"]) for row in brief_rows
+            if row["photo_media_id"]
+        }
+        for row in brief_rows:
+            await db.execute(
+                "UPDATE tasks SET details=NULL,address=NULL,lat=NULL,lng=NULL,"
+                "proof_note=NULL,review_note=NULL,cancel_reason=NULL,"
+                "photo_media_id=NULL,photo_file=NULL "
+                "WHERE id=? AND photo_media_id IS ?",
+                (row["id"], row["photo_media_id"]),
+            )
+            if row["photo_media_id"]:
+                await db.execute(
+                    "UPDATE task_evidence SET media_id=NULL,photo_file='' "
+                    "WHERE task_id=? AND kind='brief' AND media_id=?",
+                    (row["id"], row["photo_media_id"]),
+                )
+            await db.execute(
+                "UPDATE task_outbox SET payload_json='{\"redacted\":\"retention\"}',"
+                "media_id=NULL WHERE status='sent' "
+                "AND event_key=('task:' || ? || ':announcement')",
+                (row["id"],),
+            )
+
+        media_ids = sorted(proof_media | brief_media)
+        for media_id in media_ids:
+            await db.execute(
+                "UPDATE media_objects SET delete_after=COALESCE(delete_after,?) "
+                "WHERE id=? AND state IN ('ready','quarantined')",
+                (delete_at, media_id),
+            )
+        await db.commit()
+    return {
+        "proof_records_detached": len(proof_ids),
+        "task_briefs_detached": len(brief_rows),
+        "media_scheduled": len(media_ids),
+    }
+
+
 async def _cleanup_media_objects():
     """Delete only old, unreferenced objects; never perform I/O in a DB transaction."""
+    await _schedule_expired_evidence_media()
     await _reconcile_stale_media_uploads()
     await _reconcile_referenced_media()
     now = datetime.now(timezone.utc)
@@ -2138,7 +2342,7 @@ async def _cleanup_media_objects():
             "AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.photo_media_id=m.id) "
             "AND NOT EXISTS (SELECT 1 FROM task_evidence e WHERE e.media_id=m.id) "
             "AND NOT EXISTS (SELECT 1 FROM task_outbox o WHERE o.media_id=m.id "
-            "AND o.status IN ('pending','sending')) LIMIT 100",
+            "AND o.status IN ('pending','sending','dead')) LIMIT 100",
             (now.isoformat(), orphan_before),
         )).fetchall()
     for row in rows:
@@ -2149,7 +2353,7 @@ async def _cleanup_media_objects():
                 "AND NOT EXISTS (SELECT 1 FROM tasks WHERE photo_media_id=?) "
                 "AND NOT EXISTS (SELECT 1 FROM task_evidence WHERE media_id=?) "
                 "AND NOT EXISTS (SELECT 1 FROM task_outbox WHERE media_id=? "
-                "AND status IN ('pending','sending'))",
+                "AND status IN ('pending','sending','dead'))",
                 (row["id"], row["id"], row["id"], row["id"]),
             )
             await db.commit()
@@ -2298,6 +2502,15 @@ async def cleanup_expired_analytics():
             "DELETE FROM telegram_update_effects WHERE created_at<? "
             "OR update_id NOT IN (SELECT update_id FROM telegram_update_inbox)",
             (inbox_before,),
+        )
+        outbox_payload_before = (
+            current - timedelta(days=30)
+        ).isoformat()
+        await db.execute(
+            "UPDATE task_outbox SET payload_json='{\"redacted\":\"retention\"}',"
+            "media_id=NULL WHERE status='sent' AND sent_at IS NOT NULL AND sent_at<? "
+            "AND payload_json<>'{\"redacted\":\"retention\"}'",
+            (outbox_payload_before,),
         )
         purge_before = (
             datetime.now(timezone.utc)
@@ -7272,6 +7485,30 @@ async def api_admin_task_dispute(request):
                     "error": "not_disputable",
                     "message": "Исправить можно только уже подтверждённое выполнение.",
                 }, status=409)
+            try:
+                terminal_at = datetime.fromisoformat(
+                    str(assignment["terminal_at"] or "")
+                )
+                if terminal_at.tzinfo is None:
+                    terminal_at = terminal_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                await db.rollback()
+                return _json({
+                    "error": "dispute_timestamp",
+                    "message": "Не удалось проверить срок спора; нужна ручная сверка.",
+                }, status=409)
+            dispute_deadline = terminal_at.astimezone(timezone.utc) + timedelta(
+                days=DISPUTE_OPEN_DAYS,
+            )
+            if datetime.now(timezone.utc) > dispute_deadline:
+                await db.rollback()
+                return _json({
+                    "error": "dispute_window_closed",
+                    "message": (
+                        f"Срок открытия спора — {DISPUTE_OPEN_DAYS} дней после "
+                        "подтверждения задания — уже закончился."
+                    ),
+                }, status=409)
             if int(assignment["user_id"]) == int(admin_id):
                 await db.rollback()
                 return _json({
@@ -9616,6 +9853,41 @@ async def serve_index(request):
     return web.Response(text="index.html не найден", status=404)
 
 
+async def serve_privacy(request):
+    """Render the versioned same-origin privacy notice without active content."""
+    if not os.path.isfile(PRIVACY_TEMPLATE_PATH):
+        return web.Response(text="Политика обработки данных не найдена", status=404)
+    with open(PRIVACY_TEMPLATE_PATH, encoding="utf-8") as source:
+        document = source.read()
+    replacements = {
+        "{{CONTROLLER_NAME}}": html.escape(
+            PRIVACY_CONTROLLER_NAME or "Оператор пилота БибиЗадачи"
+        ),
+        "{{PRIVACY_CONTACT}}": html.escape(
+            PRIVACY_CONTACT or f"@{BOT_USERNAME}"
+        ),
+        "{{EVIDENCE_RETENTION_DAYS}}": str(EVIDENCE_RETENTION_DAYS),
+        "{{DISPUTE_OPEN_DAYS}}": str(DISPUTE_OPEN_DAYS),
+        "{{WITHDRAW_RETENTION_DAYS}}": str(WITHDRAW_ACCOUNT_RETENTION_DAYS),
+    }
+    for marker, value in replacements.items():
+        document = document.replace(marker, value)
+    return web.Response(
+        text=document,
+        content_type="text/html",
+        charset="utf-8",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 async def serve_logo(request):
     if os.path.exists(LOGO_PATH):
         return web.FileResponse(LOGO_PATH, headers={
@@ -9826,6 +10098,7 @@ async def api_health(request):
     inbox_crypto_ok = TELEGRAM_INBOX_FERNET is not None or inbox_pending == 0
     healthy = bool(
         database_ok and storage_ok and os.path.exists(INDEX_PATH)
+        and os.path.exists(PRIVACY_TEMPLATE_PATH)
         and os.path.exists(LOGO_PATH) and BOT_TOKEN and WITHDRAW_FERNET is not None
         and outbox_dead == 0 and not inbox_backlogged and not outbox_backlogged
         and inbox_crypto_ok
@@ -9838,6 +10111,7 @@ async def api_health(request):
         "report_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "index_html": os.path.exists(INDEX_PATH),
+        "privacy_html": os.path.exists(PRIVACY_TEMPLATE_PATH),
         "logo": os.path.exists(LOGO_PATH),
         "token_present": bool(BOT_TOKEN), "port": WEBAPP_PORT,
         "database": database_ok,
@@ -10081,6 +10355,7 @@ async def start_api_server():
         app.router.add_get("/live", api_live)
         app.router.add_get("/health/live", api_live)
         app.router.add_get("/logo.jpg", serve_logo)
+        app.router.add_get("/privacy", serve_privacy)
         app.router.add_get("/task-photo/{filename}", serve_task_photo)
         app.router.add_get("/media/{media_id}", serve_media)
         app.router.add_get("/index.html", serve_index)

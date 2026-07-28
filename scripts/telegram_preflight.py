@@ -8,6 +8,7 @@ check passes; warnings are allowed.
 from __future__ import annotations
 
 import json
+import html
 import ipaddress
 import os
 import sys
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - production lock includes python-dotenv
 
 
 ApiCall = Callable[[str, dict[str, object] | None], dict[str, object]]
+PrivacyProbe = Callable[[str], dict[str, object]]
 BOT_COMMANDS = [
     {"command": "start", "description": "Начать работу"},
     {"command": "tasks", "description": "Открыть задания"},
@@ -34,6 +36,11 @@ BOT_COMMANDS = [
     {"command": "balance", "description": "Баланс и минуты поездки"},
     {"command": "help", "description": "Инструкция и команды"},
 ]
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
 
 
 @dataclass(frozen=True)
@@ -139,7 +146,37 @@ def _safe_https_url(value):
     return parsed.geturl()
 
 
-def run_preflight(env=None, api_call: ApiCall | None = None):
+def probe_privacy_policy(url, timeout=10):
+    """Fetch a bounded same-origin policy page without forwarding secrets."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "BibiTasks-privacy-preflight/1.0"},
+    )
+    try:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
+            final_url = str(response.geturl())
+            content_type = str(response.headers.get("Content-Type") or "")
+            body = response.read(131_073)
+            status = int(response.status)
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(
+            f"privacy policy transport error: {type(exc).__name__}"
+        ) from None
+    if len(body) > 131_072:
+        raise RuntimeError("privacy policy response exceeds 128 KiB")
+    return {
+        "status": status,
+        "final_url": final_url,
+        "content_type": content_type,
+        "body": body.decode("utf-8", errors="strict"),
+    }
+
+
+def run_preflight(
+    env=None, api_call: ApiCall | None = None,
+    privacy_probe: PrivacyProbe | None = None,
+):
     env = os.environ if env is None else env
     checks: list[Check] = []
 
@@ -175,6 +212,10 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     expected_description = str(env.get("BOT_PROFILE_DESCRIPTION", "")).strip()
     expected_short_description = str(env.get("BOT_PROFILE_SHORT_DESCRIPTION", "")).strip()
     expected_menu_text = str(env.get("BOT_MENU_TEXT", "")).strip()
+    privacy_controller = " ".join(
+        str(env.get("PRIVACY_CONTROLLER_NAME", "")).split()
+    )
+    privacy_contact = " ".join(str(env.get("PRIVACY_CONTACT", "")).split())
 
     add("BOT_TOKEN", bool(token and ":" in token), "configured", "missing or malformed")
     add("BOT_USERNAME", bool(bot_username), "configured", "missing")
@@ -187,6 +228,18 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
         "PRIVACY_URL", bool(privacy_url),
         "public HTTPS policy configured",
         "must be a public HTTPS URL without credentials",
+    )
+    add(
+        "same-origin privacy policy",
+        bool(public_origin and privacy_url == public_origin + "/privacy"),
+        "matches the deployed /privacy route",
+        "must equal PUBLIC_BASE_URL + /privacy",
+    )
+    add(
+        "privacy operator copy",
+        3 <= len(privacy_controller) <= 160 and 3 <= len(privacy_contact) <= 160,
+        "controller and request contact configured",
+        "PRIVACY_CONTROLLER_NAME or PRIVACY_CONTACT is missing",
     )
     add("WEBAPP_SHORTNAME", bool(webapp_shortname), "configured", "missing")
     add("bot profile copy", bool(expected_description and expected_short_description and expected_menu_text), "configured", "description, short description or menu text is missing")
@@ -210,6 +263,40 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     )
     if any(item.status == "fail" for item in checks):
         return _report(checks)
+
+    probe = privacy_probe
+    if probe is None and api_call is None:
+        probe = probe_privacy_policy
+    if probe is None:
+        checks.append(Check(
+            "privacy policy HTTP",
+            "warn",
+            "not probed by injected test transport",
+        ))
+    else:
+        try:
+            policy = probe(privacy_url)
+            policy_body = str(policy.get("body") or "")
+            final_url = _safe_https_url(policy.get("final_url"))
+            content_type = str(policy.get("content_type") or "").casefold()
+            ok = bool(
+                int(policy.get("status") or 0) == 200
+                and final_url == privacy_url
+                and "text/html" in content_type
+                and 'data-bibitasks-privacy-version="1"' in policy_body
+                and html.escape(privacy_controller) in policy_body
+                and html.escape(privacy_contact) in policy_body
+            )
+            add(
+                "privacy policy HTTP", ok,
+                "200 HTML, canonical URL, version and operator copy verified",
+                "unreachable, redirected, stale or missing required operator copy",
+            )
+        except Exception as exc:
+            checks.append(Check(
+                "privacy policy HTTP", "fail",
+                f"probe failed: {type(exc).__name__}: {str(exc)[:140]}",
+            ))
 
     call = api_call or (lambda method, params=None: telegram_call(token, method, params))
 

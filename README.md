@@ -270,10 +270,10 @@ Telegram-бот @BbGalterbot
 
 ### Тесты
 
-**271 автоматическая проверка** в локальном прогоне: 261 PASS и 10 ожидаемых
+**282 автоматические проверки** в локальном прогоне: 272 PASS и 10 ожидаемых
 environment-specific SKIP (POSIX/Docker/PostgreSQL интеграции выполняет CI):
 
-- **224** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
+- **235** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
 - **7** — точность PostgreSQL migration harness
 - **40** — интерфейс Mini App в Playwright
 

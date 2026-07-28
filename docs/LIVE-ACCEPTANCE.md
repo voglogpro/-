@@ -58,6 +58,8 @@ PASS:
   название/описание группы и имя бота; предупреждение о named Mini App ожидаемо,
   потому что его регистрацию доказывают только BotFather и реальные клиенты;
 - preflight возвращает exit code `0`, а JSON содержит `"ok": true`;
+- `/privacy` отвечает 200 без redirect, содержит точные имя оператора, контакт и
+  version marker; контакт проверен реальным запросом с ответом ответственного;
 - readiness отвечает `200`, critical workers живы, dead-очереди пусты;
 - `GROUP_ID` и `OPS_GROUP_ID` различаются;
 - OPS — private forum supergroup без публичного username;

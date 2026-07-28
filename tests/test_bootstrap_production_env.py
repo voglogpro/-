@@ -28,6 +28,8 @@ class BootstrapProductionEnvTests(unittest.TestCase):
             topic_franchise=14,
             ops_topic_tasks=21,
             privacy_url="https://tasks.example.test/privacy",
+            privacy_controller_name="ООО Бибибайк",
+            privacy_contact="@privacy_bibibike",
         )
 
     def test_generated_production_secrets_are_independent_and_complete(self):
@@ -44,6 +46,10 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(values["DATA_DIR"], "/app/data")
         self.assertEqual(values["MINI_APP_URL"], "https://tasks.example.test/")
         self.assertEqual(values["PRIVACY_URL"], "https://tasks.example.test/privacy")
+        self.assertEqual(values["PRIVACY_CONTROLLER_NAME"], "ООО Бибибайк")
+        self.assertEqual(values["PRIVACY_CONTACT"], "@privacy_bibibike")
+        self.assertEqual(values["EVIDENCE_RETENTION_DAYS"], "90")
+        self.assertEqual(values["DISPUTE_OPEN_DAYS"], "30")
         self.assertEqual(values["TOPIC_WORK"], "13")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
         self.assertEqual(values["MANUAL_GRANT_DAILY_LIMIT"], "300")
@@ -100,6 +106,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
             "https://tasks.example.test:9443/privacy",
             "https://localhost/privacy",
             "https://127.0.0.1/privacy",
+            "https://policy.example.test/privacy",
             "https://tasks.example.test/privacy\nX-Injected: yes",
         ):
             with self.subTest(value=value):
@@ -108,6 +115,17 @@ class BootstrapProductionEnvTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "PRIVACY_URL"):
                     build_environment(config, token)
+
+    def test_privacy_operator_and_contact_are_required_single_line_values(self):
+        token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"
+        for field in ("privacy_controller_name", "privacy_contact"):
+            for value in ("", "x", "valid\nInjected"):
+                with self.subTest(field=field, value=value):
+                    config = BootstrapConfig(
+                        **{**self.config().__dict__, field: value}
+                    )
+                    with self.assertRaisesRegex(ValueError, field.upper()):
+                        build_environment(config, token)
 
     def test_monitor_secrets_are_separate_restricted_and_never_overwritten(self):
         token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"

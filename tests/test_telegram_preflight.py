@@ -15,6 +15,8 @@ def base_env():
         "PUBLIC_BASE_URL": "https://tasks.example.test",
         "MINI_APP_URL": "https://tasks.example.test/",
         "PRIVACY_URL": "https://tasks.example.test/privacy",
+        "PRIVACY_CONTROLLER_NAME": "ООО Бибибайк",
+        "PRIVACY_CONTACT": "@privacy_bibibike",
         "WEBAPP_SHORTNAME": "bibibike",
         "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "TELEGRAM_UPDATE_MODE": "webhook",
@@ -73,10 +75,22 @@ def good_api(method, params=None):
     raise AssertionError(method)
 
 
+def good_privacy(url):
+    return {
+        "status": 200,
+        "final_url": url,
+        "content_type": "text/html; charset=utf-8",
+        "body": (
+            '<html data-bibitasks-privacy-version="1">'
+            "ООО Бибибайк @privacy_bibibike</html>"
+        ),
+    }
+
+
 class TelegramPreflightTests(unittest.TestCase):
     def test_happy_path_is_green_and_report_never_contains_token(self):
         env = base_env()
-        report = run_preflight(env, good_api)
+        report = run_preflight(env, good_api, good_privacy)
         self.assertTrue(report["ok"])
         self.assertEqual(report["report_version"], 1)
         self.assertIsNotNone(datetime.fromisoformat(report["generated_at"]).tzinfo)
@@ -90,6 +104,33 @@ class TelegramPreflightTests(unittest.TestCase):
         serialized = json.dumps(failed_report, ensure_ascii=False)
         self.assertNotIn(env["BOT_TOKEN"], serialized)
         self.assertIn("[redacted]", serialized)
+
+    def test_privacy_page_must_be_reachable_versioned_and_same_origin(self):
+        for probe in (
+            lambda url: {**good_privacy(url), "status": 404},
+            lambda url: {**good_privacy(url), "final_url": "https://other.example.test/privacy"},
+            lambda url: {**good_privacy(url), "body": "<html>old policy</html>"},
+        ):
+            with self.subTest(probe=probe):
+                report = run_preflight(base_env(), good_api, probe)
+                self.assertFalse(report["ok"])
+                self.assertIn(
+                    "privacy policy HTTP",
+                    {
+                        item["name"] for item in report["checks"]
+                        if item["status"] == "fail"
+                    },
+                )
+
+        external = {
+            **base_env(), "PRIVACY_URL": "https://policy.example.test/privacy",
+        }
+        report = run_preflight(external, good_api, good_privacy)
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "same-origin privacy policy",
+            {item["name"] for item in report["checks"] if item["status"] == "fail"},
+        )
 
     def test_public_ops_or_brand_mismatch_fails(self):
         def mismatched(method, params=None):
