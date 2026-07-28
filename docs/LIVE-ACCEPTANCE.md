@@ -3,6 +3,12 @@
 Этот gate выполняется после зелёного CI и HTTPS-деплоя. Он проверяет не макеты,
 а реальную связку Telegram-бота, публичной группы, приватной OPS-группы и Mini App.
 
+Перед началом скопируйте
+[`LIVE-ACCEPTANCE-REPORT.template.md`](LIVE-ACCEPTANCE-REPORT.template.md) в
+закрытое хранилище приёмки. Заполненный отчёт и скриншоты не коммитятся в
+публичный Git. Порядок первого production-запуска описан в
+[`OWNER-LAUNCH.md`](OWNER-LAUNCH.md).
+
 ## Участники и доказательства
 
 Нужны четыре тестовых аккаунта:
@@ -19,21 +25,29 @@ Telegram, `task_id`, `assignment_id`, OPS message link, `withdrawal_id`, вне�
 
 ## 1. Read-only production preflight
 
-Сначала выполните dry-run публичной поверхности. Если он показывает изменения,
-сверьте username и примените их с двумя явными флагами:
+До начала задайте защищённый `$EVIDENCE_DIR` вне `/opt/bibitasks`, как описано в
+`OWNER-LAUNCH.md`. Сначала выполните dry-run публичной поверхности. Если он
+показывает изменения, сверьте username и примените их с двумя явными флагами:
 
 ```bash
-python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env
-python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env \
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py \
   --apply --confirm-bot @BbGalterbot
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_preflight.py \
+  > "$EVIDENCE_DIR/telegram-preflight.json"
 ```
+
+Публичный `/health/ready` намеренно закрыт reverse proxy. Сохраните его ответ из
+контейнера, не передавая token по сети или в командной строке:
 
 ```bash
-python scripts/telegram_preflight.py --env-file /etc/bibitasks/bibitasks.env \
-  > telegram-preflight.json
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  exec -T bibitasks python -c "import os,urllib.request; q=urllib.request.Request('http://127.0.0.1:3000/health/ready',headers={'X-Health-Token':os.environ['HEALTH_TOKEN']}); print(urllib.request.urlopen(q,timeout=5).read().decode())" \
+  > "$EVIDENCE_DIR/readiness.json"
 ```
-
-Дополнительно откройте `/health/ready` с `X-Health-Token`.
 
 PASS:
 
@@ -72,7 +86,9 @@ PASS: одна заявка, одно решение, доступ появля�
 ## 4. Задание, фото и private OPS
 
 1. `S1` создаёт из шаблона тестовое задание парковки.
-2. Добавляет безопасное фото, тестовый адрес, срок, награду и правило «до/после».
+2. Добавляет безопасное фото, тестовый адрес, срок, награду
+   `2 × WITHDRAW_MIN` (по умолчанию 2000) и правило «до/после». Это обеспечивает
+   две последующие заявки без ручного изменения БД.
 3. Включает публикацию в OPS и сохраняет.
 
 PASS: статус меняется `в очереди` → `доставлено`, появляется ссылка на ровно это
@@ -100,7 +116,8 @@ PASS: доработка остаётся за исполнителем и до�
 
 Используйте только контролируемый тестовый аккаунт Бибибайка и минимальную сумму.
 
-1. `U1` создаёт заявку; сумма сразу резервируется.
+1. Победитель задания из блока 5 создаёт заявку на `WITHDRAW_MIN`; сумма сразу
+   резервируется.
 2. `S1` начинает обработку, `S2` видит кассира и disabled takeover с countdown.
 3. `S1` передаёт смене с причиной; `S2` продолжает, сверяет ID и завершает одну
    тестовую операцию с уникальным внешним номером.
@@ -116,6 +133,9 @@ PASS: резерв возвращён один раз, причина видна
 проводка, заявка не остаётся `processing`.
 
 ## 9. Отказоустойчивость на staging
+
+Этот блок выполняет разработчик вместе с S1/S2 на отдельном staging, а не
+владелец самостоятельно и не на production.
 
 Не ускоряйте retry в production. На staging временно уберите у бота отправку в
 OPS, создайте задание, дождитесь dead-статуса, верните право и нажмите retry.

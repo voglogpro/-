@@ -2,6 +2,10 @@
 
 Этот runbook относится к **одному пилотному экземпляру SQLite**. Он не заменяет
 PostgreSQL cutover из ADR-001 и не разрешает горизонтальное масштабирование.
+Первый запуск выполняется единым stack из
+[`OWNER-LAUNCH.md`](OWNER-LAUNCH.md) и `compose.pilot.yaml`. Старые раздельные
+`compose.production.yaml`/`compose.backup.yaml` оставлены для опытного оператора,
+но не являются маршрутом владельца.
 
 ## Воспроизводимый образ
 
@@ -31,6 +35,34 @@ Git/repository. После запуска `/health/ready` проверяется
 полуживой контейнер.
 
 ## RPO backup
+
+В owner stack backup уже работает отдельным изолированным сервисом. Для
+обязательной pre-release копии разработчик временно останавливает scheduler,
+создаёт одну ручную копию тем же immutable image и сразу возвращает scheduler:
+
+```text
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml stop backup
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml run \
+  --rm --no-deps backup python scripts/backup.py \
+  --data-dir /app/data --output-dir /app/backups
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml start backup
+```
+
+Команда печатает `/app/backups/<snapshot>`; тот же `<snapshot>` находится на
+host в `$BACKUP_DIR/<snapshot>`. Даже при ошибке ручной копии scheduler нужно
+сразу вернуть и убедиться, что он healthy. Затем выбранный snapshot
+восстанавливается в отсутствующий ранее `$EVIDENCE_DIR/restore-rehearsal`:
+
+```text
+docker run --rm --user 0:0 --read-only --tmpfs /tmp \
+  -v "$BACKUP_SNAPSHOT:/backup:ro" -v "$EVIDENCE_DIR:/evidence" \
+  "$BIBITASKS_IMAGE" python scripts/restore.py \
+  --backup-dir /backup --restore-dir /evidence/restore-rehearsal
+```
+
+`BACKUP_SNAPSHOT` задаётся полным проверенным host-путём, без glob. В результате
+появляются `manifest.json` и `restore-rehearsal/restore-report.json` для release
+record.
 
 `BACKUP_DIR` обязан указывать на зашифрованное off-host/NFS-хранилище, а не на
 диск того же сервера. Backup service запускается тем же immutable digest:

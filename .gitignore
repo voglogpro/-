@@ -18,5 +18,9 @@ backups/
 *.log
 playwright-report/
 test-results/
+readiness*.json
+telegram-preflight*.json
+release-record*.json
+pilot-stack.json
 .DS_Store
 Thumbs.db

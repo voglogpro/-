@@ -8,6 +8,9 @@ Telegram-бота, Mini App и группу с подтемами.
 Технический запуск, переменные окружения и release-процесс описаны в
 [`docs/TECHNICAL-README.md`](docs/TECHNICAL-README.md).
 
+Пошаговый production-запуск для владельца: от VPS и домена до Telegram и
+решения GO/NO-GO — в [`docs/OWNER-LAUNCH.md`](docs/OWNER-LAUNCH.md).
+
 ---
 
 ## 🚲 О компании

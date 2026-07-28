@@ -16,7 +16,9 @@ COPY requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes --requirement requirements.lock
 
 COPY main.py index.html logo.jpg ./
-COPY scripts/backup.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/restore.py ./scripts/
+COPY scripts/backup.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/restore.py \
+    scripts/bootstrap_production_env.py scripts/telegram_inventory.py scripts/telegram_preflight.py \
+    scripts/telegram_surface_setup.py ./scripts/
 
 USER bibitasks
 EXPOSE 3000

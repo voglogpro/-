@@ -1,0 +1,40 @@
+{
+    admin off
+}
+
+{$BIBITASKS_DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(self), geolocation=(), microphone=()"
+        -Server
+    }
+
+    # Readiness contains operational detail and requires a secret token. It is
+    # deliberately available only from inside the app container.
+    @private_readiness path /health/ready
+    respond @private_readiness 404
+
+    # These paths contain route or query credentials. Application logging also
+    # redacts them, and the edge must never persist them in access logs.
+    @sensitive_routes path /telegram/webhook/* /task-photo/* /media/*
+    log_skip @sensitive_routes
+
+    reverse_proxy bibitasks:3000
+
+    log {
+        output stdout
+        format json
+    }
+}
+
+# Container-local data-plane probe: it reaches the real upstream without
+# exposing readiness detail or depending on public DNS/TLS from inside Caddy.
+http://127.0.0.1:2015 {
+    @not_live not path /health/live
+    respond @not_live 404
+    reverse_proxy bibitasks:3000
+}

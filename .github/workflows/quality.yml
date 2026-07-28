@@ -49,7 +49,7 @@ jobs:
           pip install pip-audit==2.10.1
           pip-audit --requirement requirements.lock --progress-spinner off
       - name: Compile backend
-        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/release_record.py scripts/restore.py scripts/telegram_preflight.py scripts/telegram_surface_setup.py
+        run: python -m py_compile main.py scripts/backup.py scripts/backup_scheduler.py scripts/bootstrap_production_env.py scripts/deployment_guard.py scripts/release_record.py scripts/restore.py scripts/telegram_inventory.py scripts/telegram_preflight.py scripts/telegram_surface_setup.py
       - name: Core safety tests
         shell: bash
         run: |
@@ -95,6 +95,43 @@ jobs:
           PY
       - name: Build production image
         run: docker build --tag bibitasks:ci .
+      - name: Validate owner pilot stack
+        env:
+          BIBITASKS_IMAGE: ghcr.io/voglogpro/bibitasks@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          BIBITASKS_ENV_FILE: .env.example
+          BACKUP_DIR: /tmp/bibitasks-backups
+          BACKUP_SENTINEL: /tmp/bibitasks-backups/.bibitasks-offhost
+          BIBITASKS_DOMAIN: tasks.example.com
+        shell: bash
+        run: |
+          mkdir -p "$BACKUP_DIR"
+          touch "$BACKUP_SENTINEL"
+          docker compose -f compose.pilot.yaml config --format json > pilot-stack.json
+          python - <<'PY'
+          import json
+          stack = json.load(open("pilot-stack.json", encoding="utf-8"))
+          services = stack["services"]
+          assert services["backup"]["network_mode"] == "none"
+          assert "env_file" not in services["backup"]
+          assert services["bibitasks"]["networks"]["outbound"]["gw_priority"] == 1
+          assert services["caddy"]["networks"]["edge"]["gw_priority"] == 1
+          backup_mounts = services["backup"]["volumes"]
+          assert all(
+              item.get("bind", {}).get("create_host_path") is False
+              for item in backup_mounts if item["type"] == "bind"
+          )
+          caddyfile = open("deploy/Caddyfile", encoding="utf-8").read()
+          assert "@sensitive_routes path /telegram/webhook/* /task-photo/* /media/*" in caddyfile
+          assert "log_skip @sensitive_routes" in caddyfile
+          assert "http://127.0.0.1:2015" in caddyfile
+          PY
+      - name: Validate Caddy edge configuration
+        run: >-
+          docker run --rm --entrypoint caddy
+          -e BIBITASKS_DOMAIN=tasks.example.com
+          -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+          validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Smoke-test image identity and locked imports
         run: >-
           docker run --rm --entrypoint python bibitasks:ci -c
