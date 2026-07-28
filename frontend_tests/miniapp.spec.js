@@ -1147,7 +1147,9 @@ test('создание задания повторяет неоднозначн�
   ).length).toBe(2);
   const requests = harness.requests.filter(item => item.path === '/api/admin/task/create');
   expect(requests[1].body.operation_id).toBe(requests[0].body.operation_id);
-  expect(await page.evaluate(() => sessionStorage.getItem('bibitasks_task_create_draft'))).toBeNull();
+  await expect.poll(() => page.evaluate(
+    () => sessionStorage.getItem('bibitasks_task_create_draft')
+  )).toBeNull();
 });
 
 test('статус публикации OPS обновляется лёгким запросом и даёт ссылку', async ({ page }) => {
