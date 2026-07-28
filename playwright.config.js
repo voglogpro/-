@@ -6,6 +6,9 @@ module.exports = defineConfig({
   expect: { timeout: 5_000 },
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
+  // Shared GitHub runners have variable CPU capacity. A single CI browser
+  // makes the release signal deterministic; local development stays parallel.
+  workers: process.env.CI ? 1 : undefined,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI
     ? [['line'], ['html', { open: 'never' }]]
