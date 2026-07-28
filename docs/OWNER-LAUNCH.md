@@ -83,6 +83,18 @@ sudo chmod 0400 /mnt/bibitasks-backups/.bibitasks-offhost
 
 ## 3. Release image и production environment
 
+Проверенный релиз для пилота:
+
+```text
+tag: v2.9.0
+commit: ef6eda5d539ba6d00deecaed83127e5b70275189
+image: ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d
+platform: linux/amd64
+```
+
+28 июля 2026 года образ проверен через anonymous pull. В OCI index опубликованы
+SPDX SBOM и SLSA provenance, привязанные к amd64-манифесту этого релиза.
+
 Разработчик создаёт подписанный release tag только из зелёного commit. GitHub
 Actions публикует неизменяемую ссылку вида
 `ghcr.io/voglogpro/bibitasks@sha256:<64 hex>`. Значения `latest`, простой тег и
@@ -94,7 +106,7 @@ token на сервере не хранится. `unauthorized` — STOP; не �
 с широкими правами как временный обход.
 
 ```bash
-export BIBITASKS_IMAGE='ghcr.io/voglogpro/bibitasks@sha256:<64 hex>'
+export BIBITASKS_IMAGE='ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d'
 docker pull "$BIBITASKS_IMAGE"
 BIBITASKS_UID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -u)"
 BIBITASKS_GID="$(docker run --rm --entrypoint id "$BIBITASKS_IMAGE" -g)"
@@ -161,7 +173,7 @@ sudo chmod 0600 /etc/bibitasks/bibitasks.env
 Создайте `/etc/bibitasks/deploy.env` без token:
 
 ```dotenv
-BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:<64 hex>
+BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d
 BIBITASKS_ENV_FILE=/etc/bibitasks/bibitasks.env
 BIBITASKS_DOMAIN=tasks.example.com
 BACKUP_DIR=/mnt/bibitasks-backups
