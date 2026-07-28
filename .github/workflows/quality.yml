@@ -73,6 +73,18 @@ jobs:
       - name: Linux Docker CAP_CHOWN and ownership integration
         if: runner.os == 'Linux'
         run: python -m tests.docker_sqlite_volume_rollback_integration
+      - name: Publish core test failure summary
+        if: failure() && hashFiles('core-tests.log') != ''
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          lines = Path("core-tests.log").read_text("utf-8", errors="replace").splitlines()
+          details = "\n".join(lines[-80:])
+          details = details.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=Core safety test details::{details}")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
