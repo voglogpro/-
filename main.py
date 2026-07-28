@@ -3953,10 +3953,11 @@ async def telegram_inbox_worker():
                             item = None
                     await db.commit()
                 if not item:
-                    try:
-                        await asyncio.wait_for(_shutdown_event.wait(), timeout=0.25)
-                    except asyncio.TimeoutError:
-                        pass
+                    # Polling keeps the module-level shutdown flag loop-neutral.
+                    # asyncio.Event.wait() permanently binds the event to the
+                    # first loop that blocks on it, which breaks supervised
+                    # restarts and IsolatedAsyncioTestCase on Python 3.12.
+                    await asyncio.sleep(0.25)
                     continue
                 payload = _decrypt_telegram_payload(item["payload_json"])
                 lease_lost = asyncio.Event()
@@ -4008,10 +4009,7 @@ async def telegram_inbox_worker():
                     await _mark_telegram_update_failed(
                         item, worker_id, type(exc).__name__,
                     )
-                try:
-                    await asyncio.wait_for(_shutdown_event.wait(), timeout=0.25)
-                except asyncio.TimeoutError:
-                    pass
+                await asyncio.sleep(0.25)
     finally:
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
             active_timeouts = tuple(_telegram_timed_out_jobs)
