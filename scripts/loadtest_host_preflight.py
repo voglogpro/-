@@ -38,6 +38,8 @@ USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$", re.IGNORECASE)
 STAGING_CHAT_RE = re.compile(r"^bibitasks_lt_([0-9a-f]{8})_(public|ops)$")
 SYNTHETIC_MIN = 3_800_000_000_000_000
 SYNTHETIC_MAX = 4_503_599_627_370_000
+DEPLOY_ENV_MAX_BYTES = 16_384
+STAGING_ENV_MAX_BYTES = 65_536
 
 DEPLOY_KEYS = (
     "BIBITASKS_IMAGE",
@@ -343,7 +345,9 @@ def run_preflight(
         return _report(checks, operation)
 
     try:
-        deploy_path, deploy = _plain_env(deploy_env, DEPLOY_KEYS, max_bytes=16 * 1024)
+        deploy_path, deploy = _plain_env(
+            deploy_env, DEPLOY_KEYS, max_bytes=DEPLOY_ENV_MAX_BYTES,
+        )
         add("deploy env", True, "exact non-secret deploy env parsed", "")
     except (OSError, ValueError):
         add("deploy env", False, "", "exact non-secret deploy env is invalid")
@@ -406,7 +410,7 @@ def run_preflight(
     else:
         try:
             resolved_staging, staging = _plain_env(
-                staging_path, STAGING_KEYS, max_bytes=64 * 1024,
+                staging_path, STAGING_KEYS, max_bytes=STAGING_ENV_MAX_BYTES,
             )
             paths_ok = (
                 resolved_staging.parent == bundle
