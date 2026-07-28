@@ -49,7 +49,7 @@ from aiogram.types import (
 
 APP_VERSION = "v2.10.0"
 BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
-SQLITE_SCHEMA_VERSION = 299
+SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -682,7 +682,8 @@ CAPABILITY_PRESETS = {
         "task.review.queue", "task.review", "task.dispute.request",
         "task.dispute.decide", "bonus.grant.small",
         "bonus.reversal.request", "bonus.reversal.decide", "award.view",
-        "award.grant", "award.revoke", "member.task_summary.view",
+        "award.grant", "award.revoke", "award.reversal.request",
+        "award.reversal.decide", "member.task_summary.view",
     }),
     "cashier": frozenset({
         "withdrawal.queue.view", "withdrawal.account.reveal",
@@ -1755,6 +1756,219 @@ async def init_db():
                 UNIQUE(user_id, award_id, slot)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS award_reversals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                member_award_id INTEGER NOT NULL,
+                original_ledger_id INTEGER,
+                user_id INTEGER NOT NULL,
+                award_id INTEGER NOT NULL,
+                award_title TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(
+                    amount>=0 AND (origin<>'maker_checker' OR amount<=200)
+                ),
+                original_granted_by INTEGER,
+                original_grant_operation_id TEXT,
+                origin TEXT NOT NULL CHECK(origin IN (
+                    'maker_checker','legacy_single_actor','legacy_unlinked'
+                )),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                    'pending','manual_required','applied','rejected'
+                )),
+                manual_reason TEXT,
+                reason TEXT NOT NULL,
+                requested_by INTEGER,
+                requested_at TEXT,
+                request_operation_id TEXT UNIQUE,
+                request_hash TEXT,
+                decided_by INTEGER,
+                decided_at TEXT,
+                decision_note TEXT,
+                decision_operation_id TEXT UNIQUE,
+                decision_hash TEXT,
+                reversal_ledger_id INTEGER UNIQUE,
+                result_balance INTEGER,
+                version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
+                CHECK(origin<>'maker_checker' OR (
+                    requested_by IS NOT NULL AND requested_at IS NOT NULL
+                    AND request_operation_id IS NOT NULL AND request_hash IS NOT NULL
+                    AND requested_by<>user_id
+                    AND ((amount=0 AND original_ledger_id IS NULL)
+                         OR (amount>0 AND original_ledger_id IS NOT NULL
+                             AND original_grant_operation_id IS NOT NULL))
+                )),
+                CHECK(origin<>'maker_checker' OR decided_by IS NULL OR (
+                    decided_by<>requested_by AND decided_by<>user_id
+                    AND (original_granted_by IS NULL OR decided_by<>original_granted_by)
+                )),
+                CHECK(origin<>'maker_checker' OR (
+                    (status IN ('pending','manual_required')
+                     AND decided_by IS NULL AND decided_at IS NULL
+                     AND decision_operation_id IS NULL AND decision_hash IS NULL
+                     AND reversal_ledger_id IS NULL AND result_balance IS NULL)
+                    OR
+                    (status='applied' AND decided_by IS NOT NULL
+                     AND decided_at IS NOT NULL AND decision_operation_id IS NOT NULL
+                     AND decision_hash IS NOT NULL AND result_balance IS NOT NULL
+                     AND ((amount=0 AND reversal_ledger_id IS NULL)
+                          OR (amount>0 AND reversal_ledger_id IS NOT NULL)))
+                    OR
+                    (status='rejected' AND decided_by IS NOT NULL
+                     AND decided_at IS NOT NULL AND decision_operation_id IS NOT NULL
+                     AND decision_hash IS NOT NULL AND reversal_ledger_id IS NULL
+                     AND result_balance IS NULL)
+                )),
+                FOREIGN KEY(member_award_id) REFERENCES member_awards(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(original_ledger_id) REFERENCES bonus_ledger(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(user_id) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(award_id) REFERENCES awards(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(original_granted_by) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(requested_by) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(decided_by) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(reversal_ledger_id) REFERENCES bonus_ledger(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS award_reversal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reversal_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL CHECK(event_type IN (
+                    'requested','manual_required','applied','rejected','legacy_imported'
+                )),
+                from_status TEXT,
+                to_status TEXT NOT NULL,
+                actor_id INTEGER,
+                operation_id TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                CHECK(from_status IS NULL OR from_status IN (
+                    'pending','manual_required','applied','rejected'
+                )),
+                CHECK(to_status IN (
+                    'pending','manual_required','applied','rejected'
+                )),
+                FOREIGN KEY(reversal_id) REFERENCES award_reversals(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(actor_id) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS award_reversal_events_immutable_update
+            BEFORE UPDATE ON award_reversal_events BEGIN
+                SELECT RAISE(ABORT,'award reversal events are immutable');
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS award_reversal_events_immutable_delete
+            BEFORE DELETE ON award_reversal_events BEGIN
+                SELECT RAISE(ABORT,'award reversal events are immutable');
+            END
+        """)
+        if schema_version < 300:
+            legacy_awards = await (await db.execute(
+                "SELECT ma.id,ma.user_id,ma.award_id,a.title,ma.bonus,ma.granted_by,"
+                "ma.operation_id,ma.revoked_by,ma.revoked_at,ma.revoke_note,"
+                "ma.revoke_operation_id FROM member_awards ma "
+                "JOIN awards a ON a.id=ma.award_id "
+                "WHERE ma.revoked_at IS NOT NULL AND NOT EXISTS ("
+                "SELECT 1 FROM award_reversals r WHERE r.member_award_id=ma.id)"
+            )).fetchall()
+            for legacy in legacy_awards:
+                (
+                    entry_id, user_id, award_id, title, amount, granted_by,
+                    grant_operation, revoked_by, revoked_at, revoke_note,
+                    revoke_operation,
+                ) = legacy
+                amount = max(0, int(amount or 0))
+                original_ledger = None
+                reversal_ledger = None
+                debit_reversal_origin = None
+                result_balance = None
+                if amount and grant_operation:
+                    candidate = await (await db.execute(
+                        "SELECT id,user_id,amount,operation_id FROM bonus_ledger "
+                        "WHERE operation_id=?",
+                        (f"award:{grant_operation}",),
+                    )).fetchone()
+                    if candidate and (
+                        int(candidate[1]) == int(user_id)
+                        and int(candidate[2]) == amount
+                        and candidate[3] == f"award:{grant_operation}"
+                    ):
+                        original_ledger = int(candidate[0])
+                if amount and revoke_operation:
+                    candidate = await (await db.execute(
+                        "SELECT id,user_id,amount,operation_id,balance_after,"
+                        "reversal_of_ledger_id "
+                        "FROM bonus_ledger WHERE operation_id=?",
+                        (f"award_revoke:{revoke_operation}",),
+                    )).fetchone()
+                    if candidate and (
+                        int(candidate[1]) == int(user_id)
+                        and int(candidate[2]) == -amount
+                        and candidate[3] == f"award_revoke:{revoke_operation}"
+                    ):
+                        reversal_ledger = int(candidate[0])
+                        result_balance = candidate[4]
+                        debit_reversal_origin = candidate[5]
+                linked = amount == 0
+                if amount and original_ledger is not None and reversal_ledger is not None:
+                    conflicting = await (await db.execute(
+                        "SELECT 1 FROM bonus_ledger WHERE reversal_of_ledger_id=? "
+                        "AND id<>? LIMIT 1", (original_ledger, reversal_ledger),
+                    )).fetchone()
+                    linked = (
+                        not conflicting
+                        and (
+                            debit_reversal_origin is None
+                            or int(debit_reversal_origin) == int(original_ledger)
+                        )
+                    )
+                    if linked:
+                        updated_ledger = await db.execute(
+                            "UPDATE bonus_ledger SET reversal_of_ledger_id=? "
+                            "WHERE id=? AND (reversal_of_ledger_id IS NULL "
+                            "OR reversal_of_ledger_id=?)",
+                            (original_ledger, reversal_ledger, original_ledger),
+                        )
+                        linked = updated_ledger.rowcount == 1
+                safe_grantor = None
+                if granted_by is not None and await (await db.execute(
+                    "SELECT 1 FROM members WHERE user_id=?", (granted_by,),
+                )).fetchone():
+                    safe_grantor = int(granted_by)
+                safe_revoker = None
+                if revoked_by is not None and await (await db.execute(
+                    "SELECT 1 FROM members WHERE user_id=?", (revoked_by,),
+                )).fetchone():
+                    safe_revoker = int(revoked_by)
+                cursor = await db.execute(
+                    "INSERT INTO award_reversals "
+                    "(member_award_id,original_ledger_id,user_id,award_id,award_title,"
+                    "amount,original_granted_by,original_grant_operation_id,origin,status,"
+                    "reason,decided_by,decided_at,decision_note,reversal_ledger_id,"
+                    "result_balance) VALUES (?,?,?,?,?,?,?,?,?,'applied',?,?,?,?,?,?)",
+                    (
+                        entry_id, original_ledger, user_id, award_id, title, amount,
+                        safe_grantor, grant_operation,
+                        "legacy_single_actor" if linked else "legacy_unlinked",
+                        revoke_note or "Legacy award revocation", safe_revoker,
+                        revoked_at, revoke_note, reversal_ledger, result_balance,
+                    ),
+                )
+                await _award_reversal_event_in_tx(
+                    db, cursor.lastrowid, "legacy_imported", None, "applied",
+                    safe_revoker, metadata={"linked": linked},
+                )
         member_columns = {
             row[1] for row in await (
                 await db.execute("PRAGMA table_info(members)")
@@ -2300,6 +2514,19 @@ async def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_member_awards_revoke_operation "
             "ON member_awards(revoke_operation_id) "
             "WHERE revoke_operation_id IS NOT NULL")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_award_reversals_status "
+            "ON award_reversals(status,requested_at,id)")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_award_reversal_one_pending "
+            "ON award_reversals(member_award_id) "
+            "WHERE status IN ('pending','manual_required')")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_award_reversal_one_applied "
+            "ON award_reversals(member_award_id) WHERE status='applied'")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_award_reversal_events_reversal "
+            "ON award_reversal_events(reversal_id,id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_outbox_delivery "
             "ON task_outbox(status, available_at, id)")
@@ -2956,6 +3183,7 @@ ANALYTICS_EVENTS = {
     "manual_grant_credited", "manual_grant_reversal_requested",
     "manual_grant_reversal_resolved", "admin_role_change_requested",
     "admin_role_change_resolved", "award_granted", "award_revoked",
+    "award_reversal_requested", "award_reversal_resolved",
     "withdrawal_requested",
     "withdrawal_decided", "referral_confirmed",
 }
@@ -3247,10 +3475,16 @@ async def _effective_staff_access_in_tx(db, user_id):
         "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
         (int(user_id),),
     )).fetchall()
+    capabilities = {str(row[1]) for row in rows}
+    # Policy-v1 snapshots only knew the coarse award.revoke capability.  Keep
+    # them effective while all newly issued reviewer grants contain the split
+    # request/decision capabilities explicitly.
+    if "award.revoke" in capabilities:
+        capabilities.update({"award.reversal.request", "award.reversal.decide"})
     return {
         "policy_version": RBAC_POLICY_VERSION,
         "presets": sorted({str(row[0]) for row in rows}),
-        "capabilities": sorted({str(row[1]) for row in rows}),
+        "capabilities": sorted(capabilities),
     }
 
 
@@ -3262,15 +3496,19 @@ async def _effective_staff_access(user_id):
 async def _has_capability_in_tx(db, user_id, capability):
     if capability not in ALL_STAFF_CAPABILITIES:
         return False
+    accepted = [capability]
+    if capability in {"award.reversal.request", "award.reversal.decide"}:
+        accepted.append("award.revoke")
+    placeholders = ",".join("?" for _ in accepted)
     row = await (await db.execute(
         "SELECT 1 FROM staff_access_grants g "
         "JOIN staff_grant_capabilities c ON c.grant_id=g.id "
         "JOIN members m ON m.user_id=g.user_id "
         "WHERE g.user_id=? AND g.status='active' AND m.status='approved' "
-        "AND c.capability=? AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS "
+        f"AND c.capability IN ({placeholders}) AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS "
         "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=g.user_id "
         "AND aa.origin=g.origin))) LIMIT 1",
-        (int(user_id), capability),
+        (int(user_id), *accepted),
     )).fetchone()
     return bool(row)
 
@@ -3283,14 +3521,18 @@ async def _has_capability(user_id, capability):
 async def _active_capability_holder_ids_in_tx(db, capability):
     if capability not in ALL_STAFF_CAPABILITIES:
         return set()
+    accepted = [capability]
+    if capability in {"award.reversal.request", "award.reversal.decide"}:
+        accepted.append("award.revoke")
+    placeholders = ",".join("?" for _ in accepted)
     rows = await (await db.execute(
         "SELECT DISTINCT g.user_id FROM staff_access_grants g "
         "JOIN staff_grant_capabilities c ON c.grant_id=g.id "
         "JOIN members m ON m.user_id=g.user_id "
-        "WHERE g.status='active' AND m.status='approved' AND c.capability=? "
+        f"WHERE g.status='active' AND m.status='approved' AND c.capability IN ({placeholders}) "
         "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
         "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
-        (capability,),
+        accepted,
     )).fetchall()
     return {int(row[0]) for row in rows}
 
@@ -3365,6 +3607,12 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
             "task_template_status_change": ("task_template_events", "operation_id"),
             "award_grant": ("member_awards", "operation_id"),
             "award_revoke": ("member_awards", "revoke_operation_id"),
+            "award_reversal_request": (
+                "award_reversals", "request_operation_id",
+            ),
+            "award_reversal_decision": (
+                "award_reversals", "decision_operation_id",
+            ),
             "withdrawal_request": ("withdrawal_requests", "operation_id"),
             "withdrawal_decision": ("withdrawal_requests", "decision_operation_id"),
         }
@@ -3397,6 +3645,14 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
         ("staff_access_changes", "decision_operation_id", "staff_access_decision"),
         ("member_awards", "operation_id", "award_grant"),
         ("member_awards", "revoke_operation_id", "award_revoke"),
+        (
+            "award_reversals", "request_operation_id",
+            "award_reversal_request",
+        ),
+        (
+            "award_reversals", "decision_operation_id",
+            "award_reversal_decision",
+        ),
         ("withdrawal_requests", "operation_id", "withdrawal_request"),
         ("withdrawal_requests", "decision_operation_id", "withdrawal_decision"),
     )
@@ -3437,7 +3693,9 @@ async def _discretionary_totals_in_tx(db, maker_id, user_id, cutoff):
     return maker_total, recipient_total
 
 
-async def _reserved_bonus_in_tx(db, user_id, *, exclude_reversal_id=None):
+async def _reserved_bonus_in_tx(
+    db, user_id, *, exclude_reversal_id=None, exclude_award_reversal_id=None,
+):
     """Return liabilities that must survive every balance-decreasing command."""
     task_reserved = int((await (await db.execute(
         "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
@@ -3455,7 +3713,18 @@ async def _reserved_bonus_in_tx(db, user_id, *, exclude_reversal_id=None):
         "WHERE user_id=? AND status IN ('pending','manual_required')" + exclusion,
         values,
     )).fetchone())[0] or 0)
-    return task_reserved + manual_reserved
+    award_values = [int(user_id)]
+    award_exclusion = ""
+    if exclude_award_reversal_id is not None:
+        award_exclusion = " AND id<>?"
+        award_values.append(int(exclude_award_reversal_id))
+    award_reserved = int((await (await db.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM award_reversals "
+        "WHERE user_id=? AND status IN ('pending','manual_required')"
+        + award_exclusion,
+        award_values,
+    )).fetchone())[0] or 0)
+    return task_reserved + manual_reserved + award_reserved
 
 
 EVIDENCE_POLICY_ALIASES = {
@@ -6966,6 +7235,20 @@ async def api_withdraw_request(request):
                     "исправление ручного начисления."
                 ),
             }, status=409)
+        award_correction = await (await db.execute(
+            "SELECT id FROM award_reversals WHERE user_id=? "
+            "AND status IN ('pending','manual_required') LIMIT 1",
+            (uid,),
+        )).fetchone()
+        if award_correction:
+            await db.rollback()
+            return _json({
+                "error": "award_reversal_pending",
+                "message": (
+                    "Перевод временно недоступен: два ответственных проверяют "
+                    "исправление награды."
+                ),
+            }, status=409)
         pending = await (await db.execute(
             "SELECT id FROM withdrawal_requests "
             "WHERE user_id=? AND status IN ('pending','processing')",
@@ -7141,6 +7424,135 @@ async def _manual_grants_for_overview_in_tx(db):
     )).fetchall()
 
 
+async def _award_reversals_for_overview_in_tx(db, viewer_id, capabilities):
+    history_limit = 100
+    history_total = int((await (await db.execute(
+        "SELECT COUNT(*) FROM award_reversals "
+        "WHERE status IN ('applied','rejected')"
+    )).fetchone())[0] or 0)
+    rows = await (await db.execute(
+        "SELECT r.id,r.member_award_id,r.user_id,r.award_id,r.award_title,"
+        "r.amount,r.original_granted_by,r.origin,r.status,r.manual_reason,r.reason,"
+        "r.requested_by,r.requested_at,r.decided_by,r.decided_at,r.decision_note,"
+        "r.result_balance,ma.note AS original_note,ma.granted_at,a.emoji,"
+        "recipient.full_name,granter.full_name AS granter_name,"
+        "requester.full_name AS requester_name,checker.full_name AS checker_name,"
+        "recipient.bonus AS current_balance "
+        "FROM award_reversals r "
+        "JOIN member_awards ma ON ma.id=r.member_award_id "
+        "JOIN awards a ON a.id=r.award_id "
+        "JOIN members recipient ON recipient.user_id=r.user_id "
+        "LEFT JOIN members granter ON granter.user_id=r.original_granted_by "
+        "LEFT JOIN members requester ON requester.user_id=r.requested_by "
+        "LEFT JOIN members checker ON checker.user_id=r.decided_by "
+        "WHERE r.status IN ('pending','manual_required') OR r.id IN ("
+        "SELECT recent.id FROM award_reversals recent "
+        "WHERE recent.status IN ('applied','rejected') "
+        "ORDER BY recent.decided_at DESC,recent.id DESC LIMIT ?) "
+        "ORDER BY CASE WHEN r.status IN ('pending','manual_required') THEN 0 ELSE 1 END,"
+        "CASE WHEN r.status IN ('pending','manual_required') THEN r.requested_at END ASC,"
+        "r.decided_at DESC,r.id DESC",
+        (history_limit,),
+    )).fetchall()
+    checker_ids = await _active_capability_holder_ids_in_tx(
+        db, "award.reversal.decide",
+    )
+    requester_ids = await _active_capability_holder_ids_in_tx(
+        db, "award.reversal.request",
+    )
+    show_financial = "member.financial_summary.view" in capabilities
+    open_items, history = [], []
+    for source in rows:
+        item = dict(source)
+        reserved = await _reserved_bonus_in_tx(
+            db, item["user_id"], exclude_award_reversal_id=item["id"],
+        )
+        current = int(item["current_balance"] or 0)
+        available = max(0, current - reserved)
+        excluded = {int(item["user_id"])}
+        if item["requested_by"] is not None:
+            excluded.add(int(item["requested_by"]))
+        if item["original_granted_by"] is not None:
+            excluded.add(int(item["original_granted_by"]))
+        is_open = item["status"] in {"pending", "manual_required"}
+        independent = (
+            int(viewer_id) in checker_ids and int(viewer_id) not in excluded
+        )
+        requester_active = (
+            item["requested_by"] is not None
+            and int(item["requested_by"]) in requester_ids
+        )
+        deficit = max(0, int(item["amount"]) - available)
+        can_reject = is_open and independent
+        can_approve = can_reject and requester_active and deficit == 0
+        if not is_open:
+            reject_block_reason = "Запрос уже закрыт."
+        elif int(viewer_id) not in checker_ids:
+            reject_block_reason = "Нет права проверять исправления наград."
+        elif int(viewer_id) in excluded:
+            reject_block_reason = "Решение должен принять независимый ответственный."
+        else:
+            reject_block_reason = ""
+        if reject_block_reason:
+            approve_block_reason = reject_block_reason
+        elif not requester_active:
+            approve_block_reason = "Полномочие автора запроса отозвано."
+        elif deficit:
+            approve_block_reason = "Недостаточно свободного баланса для полного сторно."
+        else:
+            approve_block_reason = ""
+        public = {
+            "id": item["id"],
+            "member_award_id": item["member_award_id"],
+            "entry_id": item["member_award_id"],
+            "status": item["status"],
+            "user_id": item["user_id"],
+            "full_name": item["full_name"],
+            "award_id": item["award_id"],
+            "award_title": item["award_title"],
+            "emoji": item["emoji"],
+            "amount": int(item["amount"]),
+            "original_note": item["original_note"],
+            "granted_at": item["granted_at"],
+            "original_granted_by": item["original_granted_by"],
+            "granter_name": item["granter_name"],
+            "reason": item["reason"],
+            "requested_by": item["requested_by"],
+            "requester_name": item["requester_name"],
+            "requested_at": item["requested_at"],
+            "decided_by": item["decided_by"],
+            "checker_name": item["checker_name"],
+            "decided_at": item["decided_at"],
+            "decision_note": item["decision_note"],
+            "manual_reason": item["manual_reason"],
+            "deficit": deficit,
+            "can_approve": can_approve,
+            "can_reject": can_reject,
+            "can_decide": can_approve or can_reject,
+            "approve_block_reason": approve_block_reason,
+            "reject_block_reason": reject_block_reason,
+            "wait_reason": approve_block_reason,
+        }
+        if show_financial:
+            public.update({
+                "current_balance": current,
+                "reserved_amount": reserved,
+                "available_balance": available,
+                "result_balance": item["result_balance"],
+            })
+        if is_open:
+            open_items.append(public)
+        else:
+            history.append(public)
+    return {
+        "open": open_items,
+        "history": history,
+        "history_limit": history_limit,
+        "history_total": history_total,
+        "history_truncated": history_total > len(history),
+    }
+
+
 async def api_admin_overview(request):
     """Сводка для админа: заявки, задания на проверке, открытые задания."""
     uid, err = await _require_admin(request)
@@ -7277,15 +7689,24 @@ async def api_admin_overview(request):
             "SELECT * FROM awards ORDER BY active DESC, bonus DESC, id"
         )).fetchall()
         granted = await (await db.execute(
-            "SELECT ma.id, ma.user_id, ma.bonus, ma.note, ma.granted_at, "
-            "a.emoji, a.title, m.full_name "
+            "SELECT ma.id,ma.user_id,ma.award_id,ma.bonus,ma.note,ma.granted_at,"
+            "ma.granted_by,ma.operation_id,a.emoji,a.title,m.full_name,"
+            "r.id AS reversal_id,r.status AS reversal_status "
             "FROM member_awards ma "
             "JOIN awards a ON a.id=ma.award_id "
             "LEFT JOIN members m ON m.user_id=ma.user_id "
+            "LEFT JOIN award_reversals r ON r.id=(SELECT rr.id FROM award_reversals rr "
+            "WHERE rr.member_award_id=ma.id ORDER BY rr.id DESC LIMIT 1) "
             "WHERE ma.revoked_at IS NULL "
             "ORDER BY ma.id DESC"
         )).fetchall()
         manual_grants = await _manual_grants_for_overview_in_tx(db)
+        award_reversal_context = await _award_reversals_for_overview_in_tx(
+            db, uid, capabilities,
+        )
+        award_reversal_checkers = await _active_capability_holder_ids_in_tx(
+            db, "award.reversal.decide",
+        )
         active_admin_ids = await _active_admin_ids_in_tx(db)
         role_changes = await (await db.execute(
             "SELECT rc.*,target.full_name AS user_name,"
@@ -7355,8 +7776,24 @@ async def api_admin_overview(request):
             "trust_emoji": trust_for(trust_score(r["done_count"], r["chat_xp"]))[2],
         } for r in team] if "member.search" in capabilities else [],
         "withdrawals": [_withdrawal_public(dict(r), viewer_id=uid) for r in withdrawals] if "withdrawal.queue.view" in capabilities else [],
-        "awards": [_award_public(dict(r)) for r in awards] if capabilities & {"award.view", "award.catalog.manage", "award.grant", "award.revoke"} else [],
-        "granted": [dict(r) for r in granted] if capabilities & {"award.grant", "award.revoke"} else [],
+        "awards": [_award_public(dict(r)) for r in awards] if capabilities & {"award.view", "award.catalog.manage", "award.grant", "award.revoke", "award.reversal.request", "award.reversal.decide"} else [],
+        "granted": [{
+            **dict(r),
+            "can_request_reversal": (
+                "award.reversal.request" in capabilities
+                and (r["reversal_status"] or "") in {"", "rejected"}
+                and int(r["user_id"]) != int(uid)
+                and bool(award_reversal_checkers - {
+                    int(uid), int(r["user_id"]), int(r["granted_by"] or 0),
+                })
+            ),
+        } for r in granted] if capabilities & {"award.grant", "award.revoke", "award.reversal.request", "award.reversal.decide"} else [],
+        "award_reversals": award_reversal_context if capabilities & {
+            "award.reversal.request", "award.reversal.decide", "award.revoke",
+        } else {
+            "open": [], "history": [], "history_limit": 100,
+            "history_total": 0, "history_truncated": False,
+        },
         "manual_grants": [{
             **dict(r),
             "can_request_reversal": (
@@ -9720,7 +10157,14 @@ async def api_admin_task_dispute(request):
                 "WHERE user_id=? AND status IN ('pending','manual_required')",
                 (dispute["user_id"],),
             )).fetchone())[0] or 0)
-            remaining_reserved = task_other_reserved + manual_reserved
+            award_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM award_reversals "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (dispute["user_id"],),
+            )).fetchone())[0] or 0)
+            remaining_reserved = (
+                task_other_reserved + manual_reserved + award_reserved
+            )
             balance = int(member["bonus"] or 0)
             available = max(0, balance - remaining_reserved)
             taken = min(max(0, int(dispute["reward"] or 0)), available)
@@ -9802,7 +10246,14 @@ async def api_admin_task_dispute(request):
                 "WHERE user_id=? AND status IN ('pending','manual_required')",
                 (dispute["user_id"],),
             )).fetchone())[0] or 0)
-            remaining_reserved = task_other_reserved + manual_reserved
+            award_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM award_reversals "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (dispute["user_id"],),
+            )).fetchone())[0] or 0)
+            remaining_reserved = (
+                task_other_reserved + manual_reserved + award_reserved
+            )
             if new_balance < remaining_reserved:
                 await db.rollback()
                 return _json({
@@ -11944,122 +12395,460 @@ async def api_admin_award_grant(request):
     })
 
 
-async def api_admin_award_revoke(request):
-    """Снимает выданную награду и забирает её бонус обратно."""
-    admin_id, err = await _require_capability(request, "award.revoke")
-    if err is not None:
-        return err
-    body = await _body(request)
+async def _award_reversal_event_in_tx(
+    db, reversal_id, event_type, from_status, to_status, actor_id,
+    operation_id=None, metadata=None,
+):
+    await db.execute(
+        "INSERT INTO award_reversal_events "
+        "(reversal_id,event_type,from_status,to_status,actor_id,operation_id,"
+        "created_at,metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            reversal_id, event_type, from_status, to_status, actor_id,
+            operation_id, now_iso(),
+            json.dumps(
+                metadata or {}, ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+async def _api_admin_award_reversal_request(admin_id, body, operation_id):
     entry_id = _as_int(body.get("entry_id"))
-    operation_id = _operation_uuid(body.get("operation_id"))
-    note = " ".join(str(body.get("note") or "").split())[:200]
-    if entry_id is None or not operation_id:
-        return _json({"error": "bad_request"}, status=400)
-    if len(note) < 3:
-        return _json({"error": "note", "message": "Укажи причину снятия награды."}, status=400)
+    reason = " ".join(str(body.get("reason") or body.get("note") or "").split())[:300]
+    if entry_id is None or len(reason) < 3:
+        return _json({
+            "error": "reason", "message": "Укажи проверенную причину снятия награды.",
+        }, status=400)
     request_hash = _request_fingerprint({
-        "entry_id": entry_id, "note": note, "admin_id": int(admin_id),
+        "action": "request", "entry_id": entry_id, "reason": reason,
+        "requester_id": int(admin_id),
     })
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
-        if not await _has_capability_in_tx(db, admin_id, "award.revoke"):
+        if not await _has_capability_in_tx(db, admin_id, "award.reversal.request"):
             await db.rollback()
-            return _json({"error": "admin_revoked"}, status=403)
+            return _json({"error": "capability_revoked"}, status=403)
         registered = await (await db.execute(
-            "SELECT 1 FROM operation_registry WHERE operation_id=?",
-            (operation_id,),
+            "SELECT 1 FROM operation_registry WHERE operation_id=?", (operation_id,),
         )).fetchone()
         if not await _claim_operation_in_tx(
-            db, operation_id, "award_revoke", request_hash, admin_id,
+            db, operation_id, "award_reversal_request", request_hash, admin_id,
         ):
             await db.rollback()
             return _json({"error": "operation_conflict"}, status=409)
         replay = await (await db.execute(
-            "SELECT id,bonus,revoke_request_hash FROM member_awards "
-            "WHERE revoke_operation_id=?", (operation_id,),
+            "SELECT id,status,amount,request_hash FROM award_reversals "
+            "WHERE request_operation_id=?", (operation_id,),
         )).fetchone()
         if replay:
-            if replay["revoke_request_hash"] != request_hash:
+            if replay["request_hash"] != request_hash:
                 await db.rollback()
                 return _json({"error": "operation_conflict"}, status=409)
             await db.rollback()
             return _json({
-                "ok": True, "taken": int(replay["bonus"] or 0),
+                "ok": True, "reversal_id": replay["id"],
+                "status": replay["status"], "amount": int(replay["amount"]),
                 "operation_id": operation_id, "idempotent": True,
             })
         if registered:
             await db.rollback()
             return _json({"error": "operation_integrity"}, status=409)
-        row = await (await db.execute(
-            "SELECT ma.*, a.title FROM member_awards ma "
-            "JOIN awards a ON a.id=ma.award_id WHERE ma.id=?",
-            (entry_id,),
+        award = await (await db.execute(
+            "SELECT ma.*,a.title,a.emoji,m.full_name,m.bonus AS current_balance,"
+            "l.id AS ledger_id,l.user_id AS ledger_user_id,l.amount AS ledger_amount,"
+            "l.operation_id AS ledger_operation_id,l.created_by AS ledger_created_by "
+            "FROM member_awards ma JOIN awards a ON a.id=ma.award_id "
+            "JOIN members m ON m.user_id=ma.user_id "
+            "LEFT JOIN bonus_ledger l ON l.operation_id=('award:' || ma.operation_id) "
+            "WHERE ma.id=?", (entry_id,),
         )).fetchone()
-        if not row:
+        if not award:
             await db.rollback()
             return _json({"error": "not_found"}, status=404)
-        if row["revoked_at"] is not None:
+        if award["revoked_at"] is not None:
             await db.rollback()
             return _json({"error": "already_revoked"}, status=409)
-        take = int(row["bonus"] or 0)
-        if take:
-            balance_row = await (await db.execute(
-                "SELECT bonus FROM members WHERE user_id=?",
-                (row["user_id"],))).fetchone()
-            reserved = await _reserved_bonus_in_tx(db, row["user_id"])
-            # Частичный отзыв исказил бы аудит: награда была бы помечена снятой,
-            # хотя часть её бонуса осталась бы у участника.
-            available = max(0, (int(balance_row[0]) if balance_row else 0) - reserved)
-            if available < take:
-                await db.rollback()
-                return _json({
-                    "error": "insufficient_unreserved_balance",
-                    "message": (
-                        "Награду нельзя снять частично: доступных незарезервированных "
-                        "бонусов недостаточно. Сначала завершите спор или сверку баланса."
-                    ),
-                }, status=409)
-        stamp = now_iso()
-        cur = await db.execute(
-            "UPDATE member_awards SET revoked_at=?,revoked_by=?,revoke_note=?,"
-            "revoke_operation_id=?,revoke_request_hash=? "
-            "WHERE id=? AND revoked_at IS NULL",
-            (stamp, admin_id, note, operation_id, request_hash, entry_id),
-        )
-        if cur.rowcount != 1:
+        if int(award["user_id"]) == int(admin_id):
             await db.rollback()
-            return _json({"error": "transition_conflict"}, status=409)
-        if take:
-            new_balance = int(balance_row[0]) - take
-            await db.execute(
-                "UPDATE members SET bonus=? WHERE user_id=?",
-                (new_balance, row["user_id"]))
-            await db.execute(
-                "INSERT INTO bonus_ledger "
-                "(user_id,amount,reason,task_id,created_by,created_at,operation_id,"
-                "balance_after) VALUES (?,?,?,NULL,?,?,?,?)",
-                (row["user_id"], -take,
-                 f"Снята награда: {row['title']}. {note}", admin_id, stamp,
-                 f"award_revoke:{operation_id}", new_balance),
+            return _json({"error": "self_correction"}, status=403)
+        amount = int(award["bonus"] or 0)
+        if amount and (
+            not award["operation_id"] or award["ledger_id"] is None
+            or int(award["ledger_user_id"]) != int(award["user_id"])
+            or int(award["ledger_amount"]) != amount
+            or award["ledger_operation_id"] != f"award:{award['operation_id']}"
+            or (
+                award["granted_by"] is not None
+                and award["ledger_created_by"] is not None
+                and int(award["ledger_created_by"]) != int(award["granted_by"])
+            )
+        ):
+            await db.rollback()
+            return _json({"error": "grant_integrity"}, status=409)
+        prior = await (await db.execute(
+            "SELECT id,status FROM award_reversals WHERE member_award_id=? "
+            "AND status IN ('pending','manual_required','applied') "
+            "ORDER BY id DESC LIMIT 1", (entry_id,),
+        )).fetchone()
+        if prior:
+            await db.rollback()
+            return _json({
+                "error": "already_reversed" if prior["status"] == "applied"
+                else "correction_pending",
+                "reversal_id": prior["id"], "status": prior["status"],
+            }, status=409)
+        excluded = {int(admin_id), int(award["user_id"])}
+        if award["granted_by"] is not None:
+            excluded.add(int(award["granted_by"]))
+        checkers = await _active_capability_holder_ids_in_tx(
+            db, "award.reversal.decide",
+        )
+        checkers.difference_update(excluded)
+        if not checkers:
+            await db.rollback()
+            return _json({"error": "no_independent_checker"}, status=409)
+        reserved = await _reserved_bonus_in_tx(db, award["user_id"])
+        available = max(0, int(award["current_balance"] or 0) - reserved)
+        status_value = "pending" if available >= amount else "manual_required"
+        manual_reason = None if status_value == "pending" else (
+            "Незарезервированного баланса недостаточно для полного сторно."
+        )
+        requested_at = now_iso()
+        cursor = await db.execute(
+            "INSERT INTO award_reversals "
+            "(member_award_id,original_ledger_id,user_id,award_id,award_title,amount,"
+            "original_granted_by,original_grant_operation_id,origin,status,manual_reason,"
+            "reason,requested_by,requested_at,request_operation_id,request_hash) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                entry_id, award["ledger_id"], award["user_id"], award["award_id"],
+                award["title"], amount, award["granted_by"], award["operation_id"],
+                "maker_checker", status_value, manual_reason, reason, admin_id,
+                requested_at, operation_id, request_hash,
+            ),
+        )
+        reversal_id = cursor.lastrowid
+        await _award_reversal_event_in_tx(
+            db, reversal_id, "requested", None, "pending", admin_id,
+            operation_id, {"amount": amount},
+        )
+        if status_value == "manual_required":
+            await _award_reversal_event_in_tx(
+                db, reversal_id, "manual_required", "pending", status_value,
+                admin_id, metadata={"reason": "insufficient_unreserved_balance"},
             )
         await _track_event_in_tx(
-            db, "award_revoked", "backend", user_id=row["user_id"],
-            outcome="revoked", dedupe_key=f"award_revoked:{operation_id}",
+            db, "award_reversal_requested", "backend", user_id=award["user_id"],
+            outcome=status_value,
+            dedupe_key=f"award_reversal_request:{operation_id}",
         )
-        revoke_text = f"Награда «{row['title']}» снята ответственным."
-        if take:
-            revoke_text += f"\nСписано {take} бибибонусов."
-        revoke_text += f"\nПричина: {note}"
+        await _enqueue_capability_holders_in_tx(
+            db, f"award_reversal:{reversal_id}:requested",
+            f"⚠️ Нужна проверка снятия награды #{reversal_id}\n"
+            f"Участник: {award['full_name'] or '—'}\n"
+            f"Награда: {award['title']}\nСумма: {amount} бибибонусов\nПричина: {reason}",
+            "award.reversal.decide",
+        )
         await _enqueue_outbox_in_tx(
-            db, f"award_revoke:{operation_id}:participant", "direct",
-            {"text": revoke_text, "start": None}, recipient_id=row["user_id"],
+            db, f"award_reversal:{reversal_id}:participant", "direct",
+            {"text": (
+                f"Проверяется исправление награды «{award['title']}». "
+                "До решения второго ответственного её бонусы зарезервированы."
+            )}, recipient_id=award["user_id"],
         )
         await db.commit()
     return _json({
-        "ok": True, "taken": take, "operation_id": operation_id,
+        "ok": True, "reversal_id": reversal_id, "status": status_value,
+        "amount": amount, "operation_id": operation_id, "idempotent": False,
+    })
+
+
+async def _api_admin_award_reversal_decide(admin_id, body, operation_id):
+    reversal_id = _as_int(body.get("reversal_id"))
+    decision = str(body.get("decision") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    if reversal_id is None or decision not in {"approve", "reject"}:
+        return _json({"error": "decision"}, status=400)
+    if len(note) < 3:
+        return _json({"error": "note", "message": "Укажи, что проверил."}, status=400)
+    decision_hash = _request_fingerprint({
+        "action": "decide", "reversal_id": reversal_id, "decision": decision,
+        "note": note, "checker_id": int(admin_id),
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _has_capability_in_tx(db, admin_id, "award.reversal.decide"):
+            await db.rollback()
+            return _json({"error": "capability_revoked"}, status=403)
+        registered = await (await db.execute(
+            "SELECT 1 FROM operation_registry WHERE operation_id=?", (operation_id,),
+        )).fetchone()
+        if registered:
+            if not await _claim_operation_in_tx(
+                db, operation_id, "award_reversal_decision", decision_hash, admin_id,
+            ):
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
+            replay = await (await db.execute(
+                "SELECT id,status,result_balance,decision_hash FROM award_reversals "
+                "WHERE decision_operation_id=?", (operation_id,),
+            )).fetchone()
+            if not replay or replay["decision_hash"] != decision_hash:
+                await db.rollback()
+                return _json({"error": "operation_integrity"}, status=409)
+            await db.rollback()
+            return _json({
+                "ok": True, "reversal_id": replay["id"],
+                "status": replay["status"], "balance": replay["result_balance"],
+                "operation_id": operation_id, "idempotent": True,
+            })
+        reversal = await (await db.execute(
+            "SELECT r.*,ma.user_id AS ma_user_id,ma.award_id AS ma_award_id,"
+            "ma.bonus AS ma_bonus,ma.granted_by AS ma_granted_by,"
+            "ma.operation_id AS ma_operation_id,ma.revoked_at,m.bonus AS current_balance,"
+            "l.user_id AS ledger_user_id,l.amount AS ledger_amount,"
+            "l.operation_id AS ledger_operation_id "
+            "FROM award_reversals r JOIN member_awards ma ON ma.id=r.member_award_id "
+            "JOIN members m ON m.user_id=r.user_id "
+            "LEFT JOIN bonus_ledger l ON l.id=r.original_ledger_id WHERE r.id=?",
+            (reversal_id,),
+        )).fetchone()
+        if not reversal:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if reversal["status"] not in {"pending", "manual_required"}:
+            await db.rollback()
+            return _json({"error": "already_decided", "status": reversal["status"]}, status=409)
+        excluded = {
+            int(reversal["requested_by"]), int(reversal["user_id"]),
+        }
+        if reversal["original_granted_by"] is not None:
+            excluded.add(int(reversal["original_granted_by"]))
+        if int(admin_id) in excluded:
+            await db.rollback()
+            return _json({"error": "two_person_rule"}, status=403)
+        if decision == "approve" and not await _has_capability_in_tx(
+            db, reversal["requested_by"], "award.reversal.request",
+        ):
+            await db.rollback()
+            return _json({"error": "maker_revoked"}, status=409)
+        amount = int(reversal["amount"])
+        integrity_ok = (
+            int(reversal["ma_user_id"]) == int(reversal["user_id"])
+            and int(reversal["ma_award_id"]) == int(reversal["award_id"])
+            and int(reversal["ma_bonus"] or 0) == amount
+            and reversal["ma_granted_by"] == reversal["original_granted_by"]
+            and reversal["ma_operation_id"] == reversal["original_grant_operation_id"]
+            and reversal["revoked_at"] is None
+        )
+        if amount:
+            integrity_ok = integrity_ok and (
+                reversal["original_ledger_id"] is not None
+                and int(reversal["ledger_user_id"]) == int(reversal["user_id"])
+                and int(reversal["ledger_amount"]) == amount
+                and reversal["ledger_operation_id"]
+                == f"award:{reversal['original_grant_operation_id']}"
+            )
+        if not integrity_ok:
+            await db.rollback()
+            return _json({"error": "grant_integrity"}, status=409)
+        if amount:
+            prior_debit = await (await db.execute(
+                "SELECT id FROM bonus_ledger WHERE reversal_of_ledger_id=? LIMIT 1",
+                (reversal["original_ledger_id"],),
+            )).fetchone()
+            if prior_debit:
+                await db.rollback()
+                return _json({"error": "ledger_already_reversed"}, status=409)
+        balance = int(reversal["current_balance"] or 0)
+        if decision == "approve":
+            reserved = await _reserved_bonus_in_tx(
+                db, reversal["user_id"],
+                exclude_award_reversal_id=reversal_id,
+            )
+            available = max(0, balance - reserved)
+            if available < amount:
+                if reversal["status"] != "manual_required":
+                    manual_reason = (
+                        "Незарезервированного баланса недостаточно для полного сторно."
+                    )
+                    await db.execute(
+                        "UPDATE award_reversals SET status='manual_required',"
+                        "manual_reason=?,version=version+1 WHERE id=? AND status='pending'",
+                        (manual_reason, reversal_id),
+                    )
+                    await _award_reversal_event_in_tx(
+                        db, reversal_id, "manual_required", "pending", "manual_required",
+                        admin_id, metadata={"reason": "insufficient_unreserved_balance"},
+                    )
+                    await db.commit()
+                else:
+                    await db.rollback()
+                return _json({
+                    "error": "manual_required", "status": "manual_required",
+                    "message": "Полное сторно пока невозможно; частичное списание запрещено.",
+                }, status=409)
+        if not await _claim_operation_in_tx(
+            db, operation_id, "award_reversal_decision", decision_hash, admin_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        decided_at = now_iso()
+        status_value = "applied" if decision == "approve" else "rejected"
+        result_balance = None
+        reversal_ledger_id = None
+        if decision == "approve":
+            result_balance = balance - amount
+            changed = await db.execute(
+                "UPDATE members SET bonus=? WHERE user_id=? AND bonus=?",
+                (result_balance, reversal["user_id"], balance),
+            )
+            if changed.rowcount != 1:
+                await db.rollback()
+                return _json({"error": "transition_conflict"}, status=409)
+            projected = await db.execute(
+                "UPDATE member_awards SET revoked_at=?,revoked_by=?,revoke_note=?,"
+                "revoke_operation_id=?,revoke_request_hash=? "
+                "WHERE id=? AND revoked_at IS NULL",
+                (
+                    decided_at, admin_id, reversal["reason"], operation_id,
+                    decision_hash, reversal["member_award_id"],
+                ),
+            )
+            if projected.rowcount != 1:
+                await db.rollback()
+                return _json({"error": "transition_conflict"}, status=409)
+            if amount:
+                cursor = await db.execute(
+                    "INSERT INTO bonus_ledger "
+                    "(user_id,amount,reason,created_by,created_at,operation_id,"
+                    "balance_after,reversal_of_ledger_id) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        reversal["user_id"], -amount,
+                        f"Снята награда: {reversal['award_title']}. {reversal['reason']}",
+                        admin_id, decided_at, f"award_reversal:{operation_id}",
+                        result_balance, reversal["original_ledger_id"],
+                    ),
+                )
+                reversal_ledger_id = cursor.lastrowid
+        updated = await db.execute(
+            "UPDATE award_reversals SET status=?,manual_reason=NULL,decided_by=?,"
+            "decided_at=?,decision_note=?,decision_operation_id=?,decision_hash=?,"
+            "reversal_ledger_id=?,result_balance=?,version=version+1 "
+            "WHERE id=? AND status IN ('pending','manual_required')",
+            (
+                status_value, admin_id, decided_at, note, operation_id,
+                decision_hash, reversal_ledger_id, result_balance, reversal_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            await db.rollback()
+            return _json({"error": "transition_conflict"}, status=409)
+        await _award_reversal_event_in_tx(
+            db, reversal_id, status_value, reversal["status"], status_value,
+            admin_id, operation_id, {"amount": amount},
+        )
+        await _track_event_in_tx(
+            db, "award_reversal_resolved", "backend", user_id=reversal["user_id"],
+            outcome=status_value,
+            dedupe_key=f"award_reversal_decision:{operation_id}",
+        )
+        if decision == "approve":
+            await _track_event_in_tx(
+                db, "award_revoked", "backend", user_id=reversal["user_id"],
+                outcome="revoked", dedupe_key=f"award_revoked:{operation_id}",
+            )
+        participant_text = (
+            f"Награда «{reversal['award_title']}» снята после проверки двумя ответственными."
+            + (f"\nСписано {amount} бибибонусов. Баланс: {result_balance}." if amount else "")
+            + f"\nПричина: {reversal['reason']}"
+            if decision == "approve" else
+            f"Проверка награды «{reversal['award_title']}» завершена без изменений.\nИтог: {note}"
+        )
+        await _enqueue_outbox_in_tx(
+            db, f"award_reversal:{reversal_id}:resolved:participant", "direct",
+            {"text": participant_text}, recipient_id=reversal["user_id"],
+        )
+        await _enqueue_capability_holders_in_tx(
+            db, f"award_reversal:{reversal_id}:resolved",
+            f"Исправление награды #{reversal_id}: {status_value}. Решение проверил второй ответственный.",
+            "award.reversal.request",
+        )
+        await db.commit()
+    return _json({
+        "ok": True, "reversal_id": reversal_id, "status": status_value,
+        "balance": result_balance, "operation_id": operation_id,
         "idempotent": False,
     })
+
+
+async def api_admin_award_reversal(request):
+    body = await _body(request)
+    action = str(body.get("action") or "").strip().lower()
+    capability = (
+        "award.reversal.request" if action == "request"
+        else "award.reversal.decide" if action == "decide" else None
+    )
+    if capability is None:
+        return _json({"error": "action"}, status=400)
+    admin_id, err = await _require_capability(request, capability)
+    if err is not None:
+        return err
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if not operation_id:
+        return _json({"error": "operation_id"}, status=400)
+    if action == "request":
+        return await _api_admin_award_reversal_request(
+            admin_id, body, operation_id,
+        )
+    return await _api_admin_award_reversal_decide(admin_id, body, operation_id)
+
+
+async def api_admin_award_revoke(request):
+    """Legacy facade: create a two-person request and never debit immediately."""
+    body = await _body(request)
+    body = {
+        **body, "action": "request",
+        "reason": body.get("reason") or body.get("note"),
+    }
+    # Internal dispatch avoids parsing the request stream twice.
+    admin_id, err = await _require_capability(request, "award.reversal.request")
+    if err is not None:
+        return err
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if not operation_id:
+        return _json({"error": "operation_id"}, status=400)
+    entry_id = _as_int(body.get("entry_id"))
+    legacy_note = " ".join(str(body.get("note") or "").split())[:200]
+    if entry_id is not None:
+        legacy_hash = _request_fingerprint({
+            "entry_id": entry_id, "note": legacy_note,
+            "admin_id": int(admin_id),
+        })
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            legacy = await (await db.execute(
+                "SELECT ma.id,ma.bonus,ma.revoke_request_hash,r.id AS reversal_id "
+                "FROM member_awards ma LEFT JOIN award_reversals r "
+                "ON r.member_award_id=ma.id AND r.status='applied' "
+                "WHERE ma.revoke_operation_id=?", (operation_id,),
+            )).fetchone()
+        if legacy:
+            if (
+                int(legacy["id"]) != int(entry_id)
+                or legacy["revoke_request_hash"] != legacy_hash
+            ):
+                return _json({"error": "operation_conflict"}, status=409)
+            return _json({
+                "ok": True, "reversal_id": legacy["reversal_id"],
+                "status": "applied", "amount": int(legacy["bonus"] or 0),
+                "operation_id": operation_id, "idempotent": True,
+            })
+    return await _api_admin_award_reversal_request(admin_id, body, operation_id)
 
 
 async def api_admin_telegram_inbox_redrive(request):
@@ -12715,6 +13504,9 @@ async def start_api_server():
         app.router.add_get("/api/awards", api_awards)
         app.router.add_post("/api/admin/award/save", api_admin_award_save)
         app.router.add_post("/api/admin/award/grant", api_admin_award_grant)
+        app.router.add_post(
+            "/api/admin/award/reversal", api_admin_award_reversal,
+        )
         app.router.add_post("/api/admin/award/revoke", api_admin_award_revoke)
         app.router.add_get("/health", api_health)
         app.router.add_get("/health/ready", api_health)

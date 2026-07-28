@@ -324,6 +324,197 @@ def reconcile(
                       SELECT COUNT(*) FROM task_templates WHERE origin='system'
                     )<>4 THEN 1 ELSE 0 END
                 """,
+                "award_reversal_domain": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN member_awards ma ON ma.id=r.member_award_id
+                    LEFT JOIN members m ON m.user_id=r.user_id
+                    LEFT JOIN awards a ON a.id=r.award_id
+                    WHERE ma.id IS NULL OR m.user_id IS NULL OR a.id IS NULL
+                       OR ma.user_id<>r.user_id OR ma.award_id<>r.award_id
+                       OR ma.bonus<>r.amount
+                """,
+                "award_reversal_snapshot_provenance": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    JOIN member_awards ma ON ma.id=r.member_award_id
+                    JOIN awards a ON a.id=r.award_id
+                    WHERE r.award_title<>a.title
+                       OR r.original_grant_operation_id IS DISTINCT FROM ma.operation_id
+                       OR (r.origin='maker_checker'
+                           AND r.original_granted_by IS DISTINCT FROM ma.granted_by)
+                       OR (r.origin<>'maker_checker'
+                           AND r.original_granted_by IS DISTINCT FROM ma.granted_by
+                           AND NOT (
+                             r.original_granted_by IS NULL
+                             AND ma.granted_by IS NOT NULL
+                             AND NOT EXISTS (
+                               SELECT 1 FROM members historical_granter
+                               WHERE historical_granter.user_id=ma.granted_by
+                             )
+                           ))
+                """,
+                "award_reversal_grant_lineage": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN bonus_ledger original ON original.id=r.original_ledger_id
+                    WHERE r.origin='maker_checker' AND (
+                      (r.amount=0 AND r.original_ledger_id IS NOT NULL)
+                      OR (r.amount>0 AND (
+                        r.original_grant_operation_id IS NULL
+                        OR original.id IS NULL OR original.user_id<>r.user_id
+                        OR original.amount<>r.amount
+                        OR original.operation_id<>'award:' || r.original_grant_operation_id
+                      ))
+                    )
+                """,
+                "award_reversal_applied_ledger": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN bonus_ledger reversal ON reversal.id=r.reversal_ledger_id
+                    WHERE r.origin='maker_checker' AND r.status='applied' AND (
+                      (r.amount=0 AND r.reversal_ledger_id IS NOT NULL)
+                      OR (r.amount>0 AND (
+                        reversal.id IS NULL OR reversal.user_id<>r.user_id
+                        OR reversal.amount<>-r.amount
+                        OR reversal.reversal_of_ledger_id IS DISTINCT FROM r.original_ledger_id
+                        OR reversal.balance_after IS DISTINCT FROM r.result_balance
+                      ))
+                    )
+                """,
+                "award_reversal_legacy_lineage": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN bonus_ledger original ON original.id=r.original_ledger_id
+                    LEFT JOIN bonus_ledger reversal ON reversal.id=r.reversal_ledger_id
+                    WHERE (r.origin='legacy_single_actor' AND r.amount>0 AND (
+                             original.id IS NULL OR reversal.id IS NULL
+                             OR original.user_id<>r.user_id OR original.amount<>r.amount
+                             OR reversal.user_id<>r.user_id OR reversal.amount<>-r.amount
+                             OR reversal.reversal_of_ledger_id IS DISTINCT FROM original.id
+                           ))
+                       OR (r.origin='legacy_unlinked' AND r.amount>0
+                           AND original.id IS NOT NULL AND reversal.id IS NOT NULL
+                           AND original.user_id=r.user_id AND original.amount=r.amount
+                           AND reversal.user_id=r.user_id AND reversal.amount=-r.amount
+                           AND reversal.reversal_of_ledger_id=original.id)
+                """,
+                "award_reversal_terminal_projection": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    JOIN member_awards ma ON ma.id=r.member_award_id
+                    WHERE (r.status='applied' AND (
+                             ma.revoked_at IS NULL
+                             OR (r.origin='maker_checker' AND (
+                               ma.revoked_by IS DISTINCT FROM r.decided_by
+                               OR ma.revoke_operation_id IS DISTINCT FROM r.decision_operation_id
+                               OR ma.revoke_request_hash IS DISTINCT FROM r.decision_hash
+                             ))
+                           ))
+                       OR (r.status<>'applied' AND ma.revoked_at IS NOT NULL
+                           AND NOT EXISTS (
+                             SELECT 1 FROM award_reversals applied
+                             WHERE applied.member_award_id=r.member_award_id
+                               AND applied.status='applied'
+                           ))
+                """,
+                "award_reversal_event_projection": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM award_reversal_events e WHERE e.reversal_id=r.id
+                    ) OR COALESCE((
+                      SELECT e.to_status FROM award_reversal_events e
+                      WHERE e.reversal_id=r.id ORDER BY e.id DESC LIMIT 1
+                    ),'')<>r.status
+                """,
+                "award_reversal_event_chain": """
+                    WITH ordered AS (
+                      SELECT e.*,
+                             ROW_NUMBER() OVER (
+                               PARTITION BY reversal_id ORDER BY id
+                             ) AS ordinal,
+                             LAG(to_status) OVER (
+                               PARTITION BY reversal_id ORDER BY id
+                             ) AS prior_status
+                      FROM award_reversal_events e
+                    )
+                    SELECT COUNT(*) FROM ordered
+                    WHERE (ordinal=1 AND from_status IS NOT NULL)
+                       OR (ordinal>1 AND from_status IS DISTINCT FROM prior_status)
+                """,
+                "award_reversal_event_cardinality": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN (
+                      SELECT reversal_id,
+                             COUNT(*) FILTER (WHERE event_type='requested') requested,
+                             COUNT(*) FILTER (
+                               WHERE event_type IN ('applied','rejected')
+                             ) terminal
+                      FROM award_reversal_events GROUP BY reversal_id
+                    ) counts ON counts.reversal_id=r.id
+                    WHERE r.origin='maker_checker' AND (
+                      COALESCE(counts.requested,0)<>1
+                      OR (r.status IN ('pending','manual_required')
+                          AND COALESCE(counts.terminal,0)<>0)
+                      OR (r.status IN ('applied','rejected')
+                          AND COALESCE(counts.terminal,0)<>1)
+                    )
+                """,
+                "award_reversal_event_actors": """
+                    WITH ordered AS (
+                      SELECT e.*,
+                             LAG(event_type) OVER (
+                               PARTITION BY reversal_id ORDER BY id
+                             ) AS prior_event_type
+                      FROM award_reversal_events e
+                    )
+                    SELECT COUNT(*) FROM ordered e
+                    JOIN award_reversals r ON r.id=e.reversal_id
+                    WHERE r.origin='maker_checker' AND (
+                      (e.event_type='requested'
+                       AND e.actor_id IS DISTINCT FROM r.requested_by)
+                      OR (e.event_type='manual_required' AND (
+                        e.operation_id IS NOT NULL
+                        OR (e.actor_id IS NOT DISTINCT FROM r.requested_by
+                            AND e.prior_event_type<>'requested')
+                        OR (e.actor_id IS DISTINCT FROM r.requested_by AND (
+                          e.actor_id IS NULL OR e.actor_id=r.user_id
+                          OR (r.original_granted_by IS NOT NULL
+                              AND e.actor_id=r.original_granted_by)
+                        ))
+                      ))
+                      OR (e.event_type IN ('applied','rejected')
+                          AND e.actor_id IS DISTINCT FROM r.decided_by)
+                    )
+                """,
+                "award_reversal_event_operations": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    WHERE (r.origin='maker_checker' AND NOT EXISTS (
+                             SELECT 1 FROM award_reversal_events e
+                             WHERE e.reversal_id=r.id AND e.event_type='requested'
+                               AND e.operation_id=r.request_operation_id
+                           ))
+                       OR (r.origin='maker_checker' AND r.status IN ('applied','rejected')
+                           AND NOT EXISTS (
+                             SELECT 1 FROM award_reversal_events e
+                             WHERE e.reversal_id=r.id AND e.event_type=r.status
+                               AND e.operation_id=r.decision_operation_id
+                           ))
+                       OR (r.origin<>'maker_checker' AND NOT EXISTS (
+                             SELECT 1 FROM award_reversal_events e
+                             WHERE e.reversal_id=r.id AND e.event_type='legacy_imported'
+                           ))
+                """,
+                "award_reversal_request_registry": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN operation_registry o ON o.operation_id=r.request_operation_id
+                    WHERE r.origin='maker_checker' AND (
+                      o.operation_id IS NULL OR o.command_type<>'award_reversal_request'
+                      OR o.request_hash<>r.request_hash OR o.actor_id<>r.requested_by
+                    )
+                """,
+                "award_reversal_decision_registry": """
+                    SELECT COUNT(*) FROM award_reversals r
+                    LEFT JOIN operation_registry o ON o.operation_id=r.decision_operation_id
+                    WHERE r.origin='maker_checker' AND r.status IN ('applied','rejected') AND (
+                      o.operation_id IS NULL OR o.command_type<>'award_reversal_decision'
+                      OR o.request_hash<>r.decision_hash OR o.actor_id<>r.decided_by
+                    )
+                """,
                 "inbox_processing_lease": """
                     SELECT COUNT(*) FROM telegram_update_inbox
                     WHERE status='processing' AND (locked_by IS NULL OR locked_at IS NULL)
@@ -421,6 +612,7 @@ def reconcile(
                 "withdrawal_requests", "withdrawal_events", "bonus_ledger",
                 "member_awards", "task_outbox", "product_events",
                 "admin_role_changes",
+                "award_reversals", "award_reversal_events",
                 "staff_access_grants", "staff_access_changes",
                 "staff_access_events",
                 "task_template_events",

@@ -1,6 +1,6 @@
 """Offline PostgreSQL migration package with a dependency-light contract surface."""
 
-ALEMBIC_HEAD = "0008_task_template_versioning"
+ALEMBIC_HEAD = "0009_award_reversals"
 
 __all__ = ["ALEMBIC_HEAD", "metadata"]
 

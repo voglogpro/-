@@ -379,8 +379,38 @@ def main():
         db.execute(
             "INSERT INTO member_awards "
             "(id,user_id,award_id,slot,bonus,note,granted_by,granted_at,operation_id,"
-            "balance_after) VALUES (8001,101,?,'fixture',0,'Тест',101,?,"
-            "'award-fixture',0)", (award_id, stamp),
+            "balance_after) VALUES (8001,102,?,'fixture',0,'Тест',101,?,"
+            "'award-fixture',60)", (award_id, stamp),
+        )
+        award_title = db.execute(
+            "SELECT title FROM awards WHERE id=?", (award_id,),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO award_reversals "
+            "(id,member_award_id,original_ledger_id,user_id,award_id,award_title,"
+            "amount,original_granted_by,original_grant_operation_id,origin,status,"
+            "reason,requested_by,requested_at,request_operation_id,request_hash,"
+            "decided_by,decided_at,decision_note,decision_operation_id,decision_hash,"
+            "version) VALUES (8101,8001,NULL,102,?,?,0,101,'award-fixture',"
+            "'maker_checker','rejected','Проверка fixture',101,?,"
+            "'award-reversal-request-fixture',?,103,?,'Награда выдана верно',"
+            "'award-reversal-decision-fixture',?,2)",
+            (award_id, award_title, stamp, "6" * 64, stamp, "7" * 64),
+        )
+        db.executemany(
+            "INSERT INTO award_reversal_events "
+            "(id,reversal_id,event_type,from_status,to_status,actor_id,operation_id,"
+            "created_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    8201, 8101, "requested", None, "pending", 101,
+                    "award-reversal-request-fixture", stamp, "{}",
+                ),
+                (
+                    8202, 8101, "rejected", "pending", "rejected", 103,
+                    "award-reversal-decision-fixture", stamp, "{}",
+                ),
+            ],
         )
         db.executemany(
             "INSERT INTO operation_registry "
@@ -404,6 +434,14 @@ def main():
                 (
                     "task-template-create-fixture", "task_template_create",
                     template_content_hash, 101, stamp,
+                ),
+                (
+                    "award-reversal-request-fixture", "award_reversal_request",
+                    "6" * 64, 101, stamp,
+                ),
+                (
+                    "award-reversal-decision-fixture", "award_reversal_decision",
+                    "7" * 64, 103, stamp,
                 ),
             ],
         )

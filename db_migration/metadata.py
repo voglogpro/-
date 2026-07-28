@@ -888,7 +888,7 @@ member_awards = Table(
 )
 
 
-# The 32 semantic indexes created by the current SQLite initializer.
+# The semantic indexes created by the current SQLite initializer.
 Index("idx_tasks_status", tasks.c.status)
 Index("idx_tasks_assigned", tasks.c.assigned_to, tasks.c.status)
 Index("idx_task_assignments_user", task_assignments.c.user_id, task_assignments.c.status)
@@ -905,6 +905,122 @@ Index(
 Index(
     "idx_assignment_decision_operation", task_assignments.c.decision_operation_id,
     unique=True, postgresql_where=task_assignments.c.decision_operation_id.is_not(None),
+)
+
+award_reversals = Table(
+    "award_reversals", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("member_award_id", BigInteger, fk("member_awards.id"), nullable=False),
+    Column("original_ledger_id", BigInteger, fk("bonus_ledger.id")),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("award_id", BigInteger, fk("awards.id"), nullable=False),
+    Column("award_title", Text, nullable=False),
+    Column("amount", BigInteger, nullable=False),
+    Column("original_granted_by", BigInteger, fk("members.user_id")),
+    Column("original_grant_operation_id", Text),
+    Column("origin", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("manual_reason", Text),
+    Column("reason", Text, nullable=False),
+    Column("requested_by", BigInteger, fk("members.user_id")),
+    Column("requested_at", DateTime(timezone=True)),
+    Column("request_operation_id", Text),
+    Column("request_hash", Text),
+    Column("decided_by", BigInteger, fk("members.user_id")),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decision_note", Text),
+    Column("decision_operation_id", Text),
+    Column("decision_hash", Text),
+    Column("reversal_ledger_id", BigInteger, fk("bonus_ledger.id")),
+    Column("result_balance", BigInteger),
+    Column("version", Integer, nullable=False, server_default=text("1")),
+    UniqueConstraint(
+        "request_operation_id", name="uq_award_reversal_request_operation",
+    ),
+    UniqueConstraint(
+        "decision_operation_id", name="uq_award_reversal_decision_operation",
+    ),
+    UniqueConstraint("reversal_ledger_id", name="uq_award_reversal_ledger"),
+    CheckConstraint(
+        "amount >= 0 AND (origin <> 'maker_checker' OR amount <= 200)",
+        name="award_reversal_amount",
+    ),
+    CheckConstraint(
+        "origin IN ('maker_checker','legacy_single_actor','legacy_unlinked')",
+        name="award_reversal_origin",
+    ),
+    CheckConstraint(
+        "status IN ('pending','manual_required','applied','rejected')",
+        name="award_reversal_status",
+    ),
+    CheckConstraint("version > 0", name="award_reversal_version"),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR (requested_by IS NOT NULL "
+        "AND requested_at IS NOT NULL AND request_operation_id IS NOT NULL "
+        "AND request_hash IS NOT NULL AND requested_by <> user_id)",
+        name="award_reversal_request_shape",
+    ),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR decided_by IS NULL OR (decided_by <> user_id "
+        "AND (requested_by IS NULL OR decided_by <> requested_by) "
+        "AND (original_granted_by IS NULL OR decided_by <> original_granted_by))",
+        name="award_reversal_checker_distinct",
+    ),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR ((status IN ('pending','manual_required') "
+        "AND decided_by IS NULL AND decided_at IS NULL "
+        "AND decision_operation_id IS NULL AND decision_hash IS NULL "
+        "AND reversal_ledger_id IS NULL AND result_balance IS NULL) OR "
+        "(status IN ('applied','rejected') AND decided_by IS NOT NULL "
+        "AND decided_at IS NOT NULL AND decision_operation_id IS NOT NULL "
+        "AND decision_hash IS NOT NULL))",
+        name="award_reversal_decision_shape",
+    ),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR ((amount=0 AND original_ledger_id IS NULL) "
+        "OR (amount>0 AND original_ledger_id IS NOT NULL "
+        "AND original_grant_operation_id IS NOT NULL))",
+        name="award_reversal_grant_lineage",
+    ),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR status <> 'applied' OR "
+        "((amount=0 AND reversal_ledger_id IS NULL AND result_balance IS NOT NULL) "
+        "OR (amount>0 AND reversal_ledger_id IS NOT NULL "
+        "AND result_balance IS NOT NULL))",
+        name="award_reversal_result_shape",
+    ),
+    CheckConstraint(
+        "origin <> 'maker_checker' OR status <> 'rejected' OR (reversal_ledger_id IS NULL "
+        "AND result_balance IS NULL)",
+        name="award_reversal_rejected_result",
+    ),
+)
+
+award_reversal_events = Table(
+    "award_reversal_events", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("reversal_id", BigInteger, fk("award_reversals.id"), nullable=False),
+    Column("event_type", Text, nullable=False),
+    Column("from_status", Text),
+    Column("to_status", Text, nullable=False),
+    Column("actor_id", BigInteger, fk("members.user_id")),
+    Column("operation_id", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("metadata_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    UniqueConstraint("operation_id", name="uq_award_reversal_event_operation"),
+    CheckConstraint(
+        "event_type IN ('requested','manual_required','applied','rejected','legacy_imported')",
+        name="award_reversal_event_type",
+    ),
+    CheckConstraint(
+        "from_status IS NULL OR from_status IN "
+        "('pending','manual_required','applied','rejected')",
+        name="award_reversal_event_from_status",
+    ),
+    CheckConstraint(
+        "to_status IN ('pending','manual_required','applied','rejected')",
+        name="award_reversal_event_to_status",
+    ),
 )
 
 telegram_join_requests = Table(
@@ -1028,6 +1144,23 @@ Index(
     "idx_member_awards_revoke_operation", member_awards.c.revoke_operation_id,
     unique=True, postgresql_where=member_awards.c.revoke_operation_id.is_not(None),
 )
+Index(
+    "idx_award_reversals_status", award_reversals.c.status,
+    award_reversals.c.requested_at, award_reversals.c.id,
+)
+Index(
+    "idx_award_reversal_one_pending", award_reversals.c.member_award_id,
+    unique=True,
+    postgresql_where=award_reversals.c.status.in_(("pending", "manual_required")),
+)
+Index(
+    "idx_award_reversal_one_applied", award_reversals.c.member_award_id,
+    unique=True, postgresql_where=award_reversals.c.status == "applied",
+)
+Index(
+    "idx_award_reversal_events_reversal", award_reversal_events.c.reversal_id,
+    award_reversal_events.c.id,
+)
 Index("idx_task_outbox_delivery", task_outbox.c.status, task_outbox.c.available_at, task_outbox.c.id)
 Index(
     "idx_telegram_inbox_delivery", telegram_update_inbox.c.status,
@@ -1093,11 +1226,12 @@ IDENTITY_TABLES = (
     "admin_role_changes", "manual_grant_reversals",
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
+    "award_reversals", "award_reversal_events",
     "staff_access_grants", "staff_access_changes", "staff_access_events",
     "task_template_events",
 )
 
-if len(metadata.tables) != 41:
-    raise RuntimeError(f"Expected 41 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 51:
-    raise RuntimeError("Expected exactly 51 semantic indexes")
+if len(metadata.tables) != 43:
+    raise RuntimeError(f"Expected 43 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 55:
+    raise RuntimeError("Expected exactly 55 semantic indexes")

@@ -17,7 +17,8 @@ from db_migration.access_contract import CAPABILITIES_V1
 from db_migration.template_contract import SYSTEM_TEMPLATE_SEEDS
 from db_migration.types import ConversionError, parse_bigint, parse_json
 from scripts.migrate_sqlite_to_postgres import (
-    iter_transformed_rows, validate_database_endpoint,
+    _validate_award_reversal_relations, iter_transformed_rows,
+    validate_database_endpoint,
 )
 from scripts.pg_harness_common import (
     DataError, EXPECTED_SOURCE_SCHEMA_SHA256, EXPECTED_SOURCE_USER_VERSION,
@@ -29,12 +30,12 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
-        self.assertEqual(ALEMBIC_HEAD, "0008_task_template_versioning")
+        self.assertEqual(ALEMBIC_HEAD, "0009_award_reversals")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
-        self.assertEqual(len(metadata.tables), 41)
-        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 51)
+        self.assertEqual(len(metadata.tables), 43)
+        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 55)
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
-        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 299)
+        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 300)
 
     def test_incremental_foreign_keys_match_canonical_deferrability(self):
         versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
@@ -45,6 +46,7 @@ class MigrationHarnessTests(unittest.TestCase):
             "0006_join_request_admission.py",
             "0007_capability_rbac.py",
             "0008_task_template_versioning.py",
+            "0009_award_reversals.py",
         ):
             ddl = (versions / filename).read_text(encoding="utf-8")
             self.assertGreater(ddl.count("FOREIGN KEY"), 0, filename)
@@ -145,6 +147,132 @@ class MigrationHarnessTests(unittest.TestCase):
         self.assertIn(canonical, importer)
         self.assertIn(canonical, migration)
         self.assertIn(canonical, metadata_source)
+
+    def test_award_reversal_migration_is_audited_and_forward_only(self):
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations" / "versions" / "0009_award_reversals.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("award_reversals", migration)
+        self.assertIn("award_reversal_events", migration)
+        self.assertIn("legacy_single_actor", migration)
+        self.assertIn("legacy_unlinked", migration)
+        self.assertIn("reversal_of_ledger_id", migration)
+        self.assertIn("reject_award_reversal_event_mutation", migration)
+        self.assertIn("Destructive award-reversal downgrade is disabled", migration)
+
+    def test_award_reversal_event_projection_and_immutability(self):
+        source = os.getenv("MIGRATION_SOURCE")
+        if not source:
+            self.skipTest("MIGRATION_SOURCE is provided by the PostgreSQL CI job")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "candidate.db"
+            shutil.copy2(source, candidate)
+            with closing(sqlite3.connect(candidate)) as db:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(
+                        "UPDATE award_reversal_events SET to_status='applied' "
+                        "WHERE id=(SELECT MIN(id) FROM award_reversal_events)"
+                    )
+                db.rollback()
+                reversal_id = db.execute(
+                    "SELECT id FROM award_reversals ORDER BY id LIMIT 1"
+                ).fetchone()[0]
+                db.execute(
+                    "INSERT INTO award_reversal_events "
+                    "(reversal_id,event_type,from_status,to_status,actor_id,"
+                    "operation_id,created_at,metadata_json) "
+                    "VALUES (?,'manual_required','rejected','manual_required',"
+                    "NULL,NULL,'2026-07-28T10:00:00+00:00','{}')",
+                    (reversal_id,),
+                )
+                db.commit()
+                with self.assertRaisesRegex(DataError, "event projection"):
+                    _validate_award_reversal_relations(db)
+
+    def test_award_reversal_snapshot_provenance_rejects_drift(self):
+        source = os.getenv("MIGRATION_SOURCE")
+        if not source:
+            self.skipTest("MIGRATION_SOURCE is provided by the PostgreSQL CI job")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "snapshot-drift.db"
+            shutil.copy2(source, candidate)
+            with closing(sqlite3.connect(candidate)) as db:
+                db.execute(
+                    "UPDATE award_reversals SET award_title=award_title || ' drift' "
+                    "WHERE id=(SELECT MIN(id) FROM award_reversals)"
+                )
+                db.commit()
+                with self.assertRaisesRegex(DataError, "snapshot provenance"):
+                    _validate_award_reversal_relations(db)
+
+    def test_award_reversal_event_chain_actor_and_terminal_cardinality(self):
+        source = os.getenv("MIGRATION_SOURCE")
+        if not source:
+            self.skipTest("MIGRATION_SOURCE is provided by the PostgreSQL CI job")
+
+        def corrupted(name, mutate, expected):
+            candidate = Path(temporary) / name
+            shutil.copy2(source, candidate)
+            with closing(sqlite3.connect(candidate)) as db:
+                db.execute("DROP TRIGGER award_reversal_events_immutable_update")
+                db.execute("DROP TRIGGER award_reversal_events_immutable_delete")
+                mutate(db)
+                db.commit()
+                with self.assertRaisesRegex(DataError, expected):
+                    _validate_award_reversal_relations(db)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            corrupted(
+                "broken-chain.db",
+                lambda db: db.execute(
+                    "UPDATE award_reversal_events SET from_status='manual_required' "
+                    "WHERE id=(SELECT MAX(id) FROM award_reversal_events)"
+                ),
+                "event chain continuity",
+            )
+            corrupted(
+                "wrong-actor.db",
+                lambda db: db.execute(
+                    "UPDATE award_reversal_events SET actor_id=103 "
+                    "WHERE event_type='requested'"
+                ),
+                "event actors",
+            )
+
+            def add_terminal(db):
+                reversal_id = db.execute(
+                    "SELECT id FROM award_reversals ORDER BY id LIMIT 1"
+                ).fetchone()[0]
+                db.execute(
+                    "INSERT INTO award_reversal_events "
+                    "(reversal_id,event_type,from_status,to_status,actor_id,"
+                    "operation_id,created_at,metadata_json) "
+                    "VALUES (?,'rejected','rejected','rejected',103,NULL,"
+                    "'2026-07-28T10:01:00+00:00','{}')",
+                    (reversal_id,),
+                )
+
+            corrupted(
+                "extra-terminal.db", add_terminal, "event cardinality",
+            )
+
+    def test_reconciliation_declares_snapshot_and_event_chain_invariants(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "reconcile_sqlite_postgres.py"
+        ).read_text(encoding="utf-8")
+        for invariant in (
+            "award_reversal_snapshot_provenance",
+            "award_reversal_event_chain",
+            "award_reversal_event_cardinality",
+            "award_reversal_event_actors",
+            "award_reversal_event_operations",
+        ):
+            self.assertIn(f'"{invariant}"', source)
+        self.assertIn("IS DISTINCT FROM ma.operation_id", source)
+        self.assertIn("LAG(to_status)", source)
+        self.assertIn("COUNT(*) FILTER", source)
 
     def test_template_event_json_must_be_canonical(self):
         table = metadata.tables["task_template_events"]

@@ -65,6 +65,36 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             status="approved", role="admin",
         )
 
+    def _seed_linked_member_award(self, user_id, granted_by, amount=10, title="Проверка"):
+        operation_id = str(uuid.uuid4())
+        stamp = main.now_iso()
+        with sqlite3.connect(main.DB_PATH) as db:
+            award_id = db.execute(
+                "INSERT INTO awards "
+                "(code,emoji,title,description,bonus,repeatable,active,created_by,created_at) "
+                "VALUES (?,?,?,?,?,0,1,?,?)",
+                (f"audit_{uuid.uuid4().hex}", "🏅", title, "Тест", amount, granted_by, stamp),
+            ).lastrowid
+            entry_id = db.execute(
+                "INSERT INTO member_awards "
+                "(user_id,award_id,slot,bonus,note,granted_by,granted_at,operation_id,"
+                "balance_after) VALUES (?,?,?,?,'Проверено',?,?,?,?)",
+                (user_id, award_id, "", amount, granted_by, stamp, operation_id, amount),
+            ).lastrowid
+            ledger_id = None
+            if amount:
+                ledger_id = db.execute(
+                    "INSERT INTO bonus_ledger "
+                    "(user_id,amount,reason,created_by,created_at,operation_id,balance_after) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        user_id, amount, f"Награда: {title}", granted_by, stamp,
+                        f"award:{operation_id}", amount,
+                    ),
+                ).lastrowid
+            db.commit()
+        return entry_id, ledger_id, operation_id
+
     async def test_staff_access_presets_use_immutable_granular_snapshots(self):
         user_id = 991_900_001
         await main.upsert_member(user_id, status="approved", role="employee")
@@ -4883,67 +4913,506 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dispute[3], "BB-142")
         self.assertEqual((state, balance), ("reversed", 0))
 
-    async def test_award_revoke_is_all_or_nothing_when_bonus_was_spent(self):
-        worker_id, admin_id = 912_200_001, 912_200_002
-        await self._seed_admin(admin_id)
+    async def test_award_reversal_legacy_facade_is_two_person_idempotent_and_linked(self):
+        worker_id, maker_id, checker_id = 912_200_001, 912_200_002, 912_200_003
         await main.upsert_member(
             worker_id, full_name="Исполнитель", status="approved",
-            role="helper", bonus=5,
+            role="helper", bonus=10,
+        )
+        await self._seed_admin(maker_id)
+        await self._seed_admin(checker_id)
+        entry_id, original_ledger_id, _ = self._seed_linked_member_award(
+            worker_id, maker_id, amount=10,
+        )
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        request_operation = str(uuid.uuid4())
+        decision_operation = str(uuid.uuid4())
+        request_body = {
+            "entry_id": entry_id, "note": "Выдано ошибочно",
+            "operation_id": request_operation,
+        }
+        try:
+            requested = await main.api_admin_award_revoke(
+                DummyRequest(request_body, maker_id)
+            )
+            request_replay = await main.api_admin_award_revoke(
+                DummyRequest(request_body, maker_id)
+            )
+            reversal_id = response_json(requested)["reversal_id"]
+            self_decision = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено автором",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_id))
+            decided = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено независимо",
+                "operation_id": decision_operation,
+            }, checker_id))
+            decision_replay = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено независимо",
+                "operation_id": decision_operation,
+            }, checker_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(
+            (requested.status, request_replay.status, self_decision.status,
+             decided.status, decision_replay.status),
+            (200, 200, 403, 200, 200),
+        )
+        self.assertTrue(response_json(request_replay)["idempotent"])
+        self.assertTrue(response_json(decision_replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            reversal = db.execute(
+                "SELECT status,requested_by,decided_by,reversal_ledger_id,result_balance "
+                "FROM award_reversals WHERE id=?", (reversal_id,),
+            ).fetchone()
+            projection = db.execute(
+                "SELECT revoked_at,revoked_by,revoke_operation_id FROM member_awards "
+                "WHERE id=?", (entry_id,),
+            ).fetchone()
+            debit = db.execute(
+                "SELECT amount,reversal_of_ledger_id,balance_after FROM bonus_ledger "
+                "WHERE id=?", (reversal[3],),
+            ).fetchone()
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+            events = db.execute(
+                "SELECT event_type FROM award_reversal_events WHERE reversal_id=? "
+                "ORDER BY id", (reversal_id,),
+            ).fetchall()
+            command_types = {
+                row[0] for row in db.execute(
+                    "SELECT command_type FROM operation_registry WHERE operation_id IN (?,?)",
+                    (request_operation, decision_operation),
+                )
+            }
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(
+                    "UPDATE award_reversal_events SET metadata_json='{}' WHERE reversal_id=?",
+                    (reversal_id,),
+                )
+        self.assertEqual(reversal[:3], ("applied", maker_id, checker_id))
+        self.assertEqual(reversal[4], 0)
+        self.assertEqual(projection[1:], (checker_id, decision_operation))
+        self.assertIsNotNone(projection[0])
+        self.assertEqual(debit, (-10, original_ledger_id, 0))
+        self.assertEqual(balance, 0)
+        self.assertEqual([row[0] for row in events], ["requested", "applied"])
+        self.assertEqual(command_types, {
+            "award_reversal_request", "award_reversal_decision",
+        })
+
+    async def test_award_reversal_manual_required_reserves_and_never_partially_debits(self):
+        worker_id, maker_id, checker_id = 912_210_001, 912_210_002, 912_210_003
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved",
+            role="helper", bonus=3,
+        )
+        await self._seed_admin(maker_id)
+        await self._seed_admin(checker_id)
+        entry_id, _, _ = self._seed_linked_member_award(
+            worker_id, maker_id, amount=10,
+        )
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            requested = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": entry_id,
+                "reason": "Бонус уже частично потрачен",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_id))
+            reversal_id = response_json(requested)["reversal_id"]
+            blocked = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверка полного сторно",
+                "operation_id": str(uuid.uuid4()),
+            }, checker_id))
+            with self.assertRaises(ValueError):
+                await main.add_bonus(
+                    worker_id, -1, "Попытка списания", operation_id=str(uuid.uuid4()),
+                )
+            with sqlite3.connect(main.DB_PATH) as db:
+                before_topup = (
+                    db.execute("SELECT bonus FROM members WHERE user_id=?", (worker_id,)).fetchone()[0],
+                    db.execute("SELECT revoked_at FROM member_awards WHERE id=?", (entry_id,)).fetchone()[0],
+                    db.execute(
+                        "SELECT COUNT(*) FROM bonus_ledger WHERE reversal_of_ledger_id IS NOT NULL"
+                    ).fetchone()[0],
+                )
+                db.execute("UPDATE members SET bonus=10 WHERE user_id=?", (worker_id,))
+                db.commit()
+            decision_operation = str(uuid.uuid4())
+            applied = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Баланс восстановлен и проверен",
+                "operation_id": decision_operation,
+            }, checker_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response_json(requested)["status"], "manual_required")
+        self.assertEqual(blocked.status, 409)
+        self.assertEqual(before_topup, (3, None, 0))
+        self.assertEqual((applied.status, response_json(applied)["balance"]), (200, 0))
+        with sqlite3.connect(main.DB_PATH) as db:
+            status, balance = (
+                db.execute("SELECT status FROM award_reversals WHERE id=?", (reversal_id,)).fetchone()[0],
+                db.execute("SELECT bonus FROM members WHERE user_id=?", (worker_id,)).fetchone()[0],
+            )
+        self.assertEqual((status, balance), ("applied", 0))
+
+    async def test_award_reversal_rejects_unlinked_grant_and_zero_bonus_is_supported(self):
+        worker_id, maker_id, checker_id = 912_220_001, 912_220_002, 912_220_003
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper", bonus=0,
+        )
+        await self._seed_admin(maker_id)
+        await self._seed_admin(checker_id)
+        zero_entry, _, _ = self._seed_linked_member_award(
+            worker_id, maker_id, amount=0, title="Без бонуса",
         )
         with sqlite3.connect(main.DB_PATH) as db:
-            award_id = db.execute(
-                "INSERT INTO awards "
-                "(code,emoji,title,description,bonus,repeatable,active,created_by,created_at) "
-                "VALUES ('audit_award','🏅','Проверка','Тест',10,0,1,?,?)",
-                (admin_id, main.now_iso()),
+            broken_award = db.execute(
+                "INSERT INTO awards (code,emoji,title,bonus,repeatable,active,created_by,created_at) "
+                "VALUES (?,?,?,10,0,1,?,?)",
+                (f"broken_{uuid.uuid4().hex}", "🏅", "Старая", maker_id, main.now_iso()),
             ).lastrowid
-            entry_id = db.execute(
+            broken_entry = db.execute(
                 "INSERT INTO member_awards "
-                "(user_id,award_id,slot,bonus,note,granted_by,granted_at) "
-                "VALUES (?,?,0,10,'Тест',?,?)",
-                (worker_id, award_id, admin_id, main.now_iso()),
+                "(user_id,award_id,slot,bonus,granted_by,granted_at) VALUES (?,?,?,10,?,?)",
+                (worker_id, broken_award, "", maker_id, main.now_iso()),
+            ).lastrowid
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            broken = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": broken_entry,
+                "reason": "Проверка старой проводки", "operation_id": str(uuid.uuid4()),
+            }, maker_id))
+            requested = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": zero_entry,
+                "reason": "Награда выдана ошибочно", "operation_id": str(uuid.uuid4()),
+            }, maker_id))
+            reversal_id = response_json(requested)["reversal_id"]
+            decided = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено независимо",
+                "operation_id": str(uuid.uuid4()),
+            }, checker_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual((broken.status, requested.status, decided.status), (409, 200, 200))
+        with sqlite3.connect(main.DB_PATH) as db:
+            row = db.execute(
+                "SELECT status,reversal_ledger_id,result_balance FROM award_reversals "
+                "WHERE id=?", (reversal_id,),
+            ).fetchone()
+        self.assertEqual(row, ("applied", None, 0))
+
+    async def test_award_reversal_authority_and_outbox_fail_closed(self):
+        worker_id, grantor_id, requester_id, checker_id = (
+            912_230_001, 912_230_002, 912_230_003, 912_230_004,
+        )
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper", bonus=20,
+        )
+        for admin_id in (grantor_id, requester_id, checker_id):
+            await self._seed_admin(admin_id)
+        entry_id, _, _ = self._seed_linked_member_award(
+            worker_id, grantor_id, amount=20,
+        )
+        original_admin = main._require_admin
+        original_outbox = main._enqueue_outbox_in_tx
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            requested = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": entry_id,
+                "reason": "Награда выдана по ошибке",
+                "operation_id": str(uuid.uuid4()),
+            }, requester_id))
+            reversal_id = response_json(requested)["reversal_id"]
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE staff_access_grants SET status='revoked',revoked_at=? "
+                    "WHERE user_id=? AND status='active'",
+                    (main.now_iso(), requester_id),
+                )
+                db.commit()
+            maker_revoked = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено независимо",
+                "operation_id": str(uuid.uuid4()),
+            }, checker_id))
+            async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+                await main._insert_access_grant_snapshot_in_tx(
+                    db, requester_id, "reviewer", "manual",
+                    operation_id=f"restore-reviewer:{requester_id}",
+                )
+                await db.commit()
+
+            async def fail_outbox(*_args, **_kwargs):
+                raise RuntimeError("outbox unavailable")
+
+            main._enqueue_outbox_in_tx = fail_outbox
+            failed_operation = str(uuid.uuid4())
+            with self.assertRaises(RuntimeError):
+                await main.api_admin_award_reversal(DummyRequest({
+                    "action": "decide", "reversal_id": reversal_id,
+                    "decision": "approve", "note": "Проверено после восстановления",
+                    "operation_id": failed_operation,
+                }, checker_id))
+            with sqlite3.connect(main.DB_PATH) as db:
+                after_failure = (
+                    db.execute("SELECT bonus FROM members WHERE user_id=?", (worker_id,)).fetchone()[0],
+                    db.execute("SELECT status FROM award_reversals WHERE id=?", (reversal_id,)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM operation_registry WHERE operation_id=?", (failed_operation,)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM bonus_ledger WHERE reversal_of_ledger_id IS NOT NULL").fetchone()[0],
+                )
+            main._enqueue_outbox_in_tx = original_outbox
+            retry = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверено после восстановления",
+                "operation_id": failed_operation,
+            }, checker_id))
+        finally:
+            main._require_admin = original_admin
+            main._enqueue_outbox_in_tx = original_outbox
+        self.assertEqual(maker_revoked.status, 409)
+        self.assertEqual(after_failure, (20, "pending", 0, 0))
+        self.assertEqual((retry.status, response_json(retry)["balance"]), (200, 0))
+
+    async def test_award_reversal_requires_available_independent_checker(self):
+        worker_id, maker_id = 912_240_001, 912_240_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper", bonus=5,
+        )
+        await self._seed_admin(maker_id)
+        entry_id, _, _ = self._seed_linked_member_award(worker_id, maker_id, amount=5)
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            response = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": entry_id,
+                "reason": "Проверка без второго сотрудника",
+                "operation_id": str(uuid.uuid4()),
+            }, maker_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response_json(response)["error"], "no_independent_checker")
+        with sqlite3.connect(main.DB_PATH) as db:
+            count = db.execute("SELECT COUNT(*) FROM award_reversals").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    async def test_award_reversal_schema_300_backfills_legacy_ledger_lineage(self):
+        worker_id, admin_id = 912_250_001, 912_250_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved", role="helper", bonus=0,
+        )
+        await self._seed_admin(admin_id)
+        entry_id, original_ledger_id, grant_operation = self._seed_linked_member_award(
+            worker_id, admin_id, amount=10,
+        )
+        revoke_operation = str(uuid.uuid4())
+        legacy_request_hash = main._request_fingerprint({
+            "entry_id": entry_id, "note": "Старое исправление",
+            "admin_id": admin_id,
+        })
+        with sqlite3.connect(main.DB_PATH) as db:
+            reversal_ledger_id = db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,created_by,created_at,operation_id,balance_after) "
+                "VALUES (?,?,'Legacy revoke',?,?,?,0)",
+                (
+                    worker_id, -10, admin_id, main.now_iso(),
+                    f"award_revoke:{revoke_operation}",
+                ),
             ).lastrowid
             db.execute(
-                "INSERT INTO task_disputes "
-                "(assignment_id,task_id,user_id,reward,reason,status,opened_by,opened_at,"
-                "open_operation_id,open_request_hash) "
-                "VALUES (999991,999991,?,-100,'Повреждённый snapshot','manual_required',?,?,?,?)",
-                (worker_id, admin_id, main.now_iso(), str(uuid.uuid4()), "legacy-negative"),
+                "UPDATE member_awards SET revoked_at=?,revoked_by=?,revoke_note=?,"
+                "revoke_operation_id=?,revoke_request_hash=? WHERE id=?",
+                (
+                    main.now_iso(), admin_id, "Старое исправление", revoke_operation,
+                    legacy_request_hash, entry_id,
+                ),
             )
+            db.execute("DELETE FROM award_reversal_events")
+            db.execute("DELETE FROM award_reversals")
+            db.execute("PRAGMA user_version=299")
             db.commit()
-        original_admin, original_notify = main._require_admin, main._notify
+        await main.init_db()
+        with sqlite3.connect(main.DB_PATH) as db:
+            reversal = db.execute(
+                "SELECT origin,status,original_ledger_id,reversal_ledger_id,"
+                "original_grant_operation_id FROM award_reversals WHERE member_award_id=?",
+                (entry_id,),
+            ).fetchone()
+            lineage = db.execute(
+                "SELECT reversal_of_ledger_id FROM bonus_ledger WHERE id=?",
+                (reversal_ledger_id,),
+            ).fetchone()[0]
+            event = db.execute(
+                "SELECT event_type,to_status FROM award_reversal_events"
+            ).fetchone()
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        original_admin = main._require_admin
 
         async def allow_admin(_request):
             return admin_id, None
 
         main._require_admin = allow_admin
-        main._notify = lambda *_args, **_kwargs: None
-        operation_id = str(uuid.uuid4())
-        body = {
-            "entry_id": entry_id, "note": "Выдано ошибочно",
-            "operation_id": operation_id,
-        }
         try:
-            response = await main.api_admin_award_revoke(DummyRequest(body))
-            with sqlite3.connect(main.DB_PATH) as db:
-                db.execute("UPDATE members SET bonus=10 WHERE user_id=?", (worker_id,))
-                db.commit()
-            success = await main.api_admin_award_revoke(DummyRequest(body))
-            replay = await main.api_admin_award_revoke(DummyRequest(body))
+            replay = await main.api_admin_award_revoke(DummyRequest({
+                "entry_id": entry_id, "note": "Старое исправление",
+                "operation_id": revoke_operation,
+            }, admin_id))
+            overview = await main.api_admin_overview(DummyRequest({}, admin_id))
         finally:
             main._require_admin = original_admin
-            main._notify = original_notify
-        self.assertEqual((response.status, success.status, replay.status), (409, 200, 200))
+        self.assertEqual(
+            reversal,
+            ("legacy_single_actor", "applied", original_ledger_id,
+             reversal_ledger_id, grant_operation),
+        )
+        self.assertEqual(lineage, original_ledger_id)
+        self.assertEqual(event, ("legacy_imported", "applied"))
+        self.assertEqual(version, 300)
         self.assertTrue(response_json(replay)["idempotent"])
-        with sqlite3.connect(main.DB_PATH) as db:
-            revoked_at = db.execute(
-                "SELECT revoked_at FROM member_awards WHERE id=?", (entry_id,),
-            ).fetchone()[0]
-            balance = db.execute(
-                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
-            ).fetchone()[0]
-        self.assertIsNotNone(revoked_at)
-        self.assertEqual(balance, 0)
+        self.assertEqual(response_json(replay)["status"], "applied")
+        history = response_json(overview)["award_reversals"]["history"]
+        self.assertEqual((history[0]["entry_id"], history[0]["status"]), (entry_id, "applied"))
+
+    async def test_award_reversal_overview_separates_reject_from_approve_and_redacts(self):
+        worker_a, worker_b = 912_260_001, 912_260_002
+        grantor_id, requester_id, checker_id = 912_260_003, 912_260_004, 912_260_005
+        await main.upsert_member(
+            worker_a, full_name="Первый", status="approved", role="helper", bonus=10,
+        )
+        await main.upsert_member(
+            worker_b, full_name="Второй", status="approved", role="helper", bonus=3,
+        )
+        for admin_id in (grantor_id, requester_id, checker_id):
+            await self._seed_admin(admin_id)
+        entry_a, _, _ = self._seed_linked_member_award(worker_a, grantor_id, amount=10)
+        entry_b, _, _ = self._seed_linked_member_award(worker_b, requester_id, amount=10)
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            first = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": entry_a,
+                "reason": "Отдельная проверка полномочий",
+                "operation_id": str(uuid.uuid4()),
+            }, requester_id))
+            first_id = response_json(first)["reversal_id"]
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "UPDATE staff_access_grants SET status='revoked',revoked_at=? "
+                    "WHERE user_id=? AND status='active'",
+                    (main.now_iso(), requester_id),
+                )
+                db.commit()
+            async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+                db.row_factory = main.aiosqlite.Row
+                redacted = await main._award_reversals_for_overview_in_tx(
+                    db, checker_id, {"award.reversal.decide"},
+                )
+            revoked_maker_item = next(
+                item for item in redacted["open"] if item["id"] == first_id
+            )
+            rejected_first = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": first_id,
+                "decision": "reject", "note": "Оставить награду без изменений",
+                "operation_id": str(uuid.uuid4()),
+            }, checker_id))
+
+            # Restore requester only after demonstrating the revoked-maker rule.
+            async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+                await main._insert_access_grant_snapshot_in_tx(
+                    db, requester_id, "reviewer", "manual",
+                    operation_id=f"restore-overview-reviewer:{requester_id}",
+                )
+                await db.commit()
+            second = await main.api_admin_award_reversal(DummyRequest({
+                "action": "request", "entry_id": entry_b,
+                "reason": "Баланс ниже полной суммы награды",
+                "operation_id": str(uuid.uuid4()),
+            }, requester_id))
+            second_id = response_json(second)["reversal_id"]
+            async with main.aiosqlite.connect(main.DB_PATH, timeout=15) as db:
+                db.row_factory = main.aiosqlite.Row
+                redacted = await main._award_reversals_for_overview_in_tx(
+                    db, checker_id, {"award.reversal.decide"},
+                )
+                financial = await main._award_reversals_for_overview_in_tx(
+                    db, checker_id, {
+                        "award.reversal.decide", "member.financial_summary.view",
+                    },
+                )
+            deficit_item = next(
+                item for item in redacted["open"] if item["id"] == second_id
+            )
+            financial_item = next(
+                item for item in financial["open"] if item["id"] == second_id
+            )
+            rejected_second = await main.api_admin_award_reversal(DummyRequest({
+                "action": "decide", "reversal_id": second_id,
+                "decision": "reject", "note": "Недостаток баланса не мешает отклонить",
+                "operation_id": str(uuid.uuid4()),
+            }, checker_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertFalse(revoked_maker_item["can_approve"])
+        self.assertTrue(revoked_maker_item["can_reject"])
+        self.assertIn("отозвано", revoked_maker_item["approve_block_reason"].lower())
+        self.assertEqual(revoked_maker_item["reject_block_reason"], "")
+        self.assertEqual(rejected_first.status, 200)
+        self.assertGreater(deficit_item["deficit"], 0)
+        self.assertFalse(deficit_item["can_approve"])
+        self.assertTrue(deficit_item["can_reject"])
+        self.assertIn("баланса", deficit_item["approve_block_reason"].lower())
+        self.assertEqual(deficit_item["reject_block_reason"], "")
+        self.assertEqual(rejected_second.status, 200)
+        forbidden = {
+            "request_hash", "decision_hash", "request_operation_id",
+            "decision_operation_id", "original_ledger_id", "reversal_ledger_id",
+            "version", "original_grant_operation_id", "current_balance",
+            "reserved_amount", "available_balance", "result_balance",
+        }
+        self.assertFalse(forbidden & set(deficit_item))
+        self.assertTrue({
+            "current_balance", "reserved_amount", "available_balance", "result_balance",
+        } <= set(financial_item))
+        self.assertEqual(redacted["history_limit"], 100)
+        self.assertEqual(redacted["history_total"], 1)
+        self.assertFalse(redacted["history_truncated"])
 
     async def test_rate_limit_uses_independent_valid_telegram_user_buckets(self):
         class RateRequest(dict):

@@ -39,6 +39,8 @@ SOURCE_COLUMNS = {
     "staff_access_changes": "id target_user_id change_action preset expected_generation reason status requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash result_json".split(),
     "staff_access_events": "id target_user_id preset event_type actor_id operation_id policy_version before_json after_json created_at".split(),
     "member_awards": "id user_id award_id slot bonus note granted_by granted_at operation_id balance_after revoked_at revoked_by revoke_note revoke_operation_id revoke_request_hash".split(),
+    "award_reversals": "id member_award_id original_ledger_id user_id award_id award_title amount original_granted_by original_grant_operation_id origin status manual_reason reason requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash reversal_ledger_id result_balance version".split(),
+    "award_reversal_events": "id reversal_id event_type from_status to_status actor_id operation_id created_at metadata_json".split(),
     "task_review_commands": "operation_id assignment_id request_hash result_status created_at".split(),
     "task_disputes": "id assignment_id task_id user_id reward reason reconciliation_reason reconciliation_reference status opened_by opened_at open_operation_id open_request_hash decided_by decided_at decision_note decision_operation_id decision_request_hash".split(),
     "task_completion_commands": "operation_id assignment_id request_hash result_status created_at".split(),
@@ -60,6 +62,7 @@ IDENTITY_TABLES = {
     "withdrawal_requests", "withdrawal_events", "bonus_ledger",
     "member_awards", "task_outbox", "product_events", "task_disputes",
     "admin_role_changes", "manual_grant_reversals",
+    "award_reversals", "award_reversal_events",
     "staff_access_grants", "staff_access_changes", "staff_access_events",
     "task_template_events",
 }
@@ -82,6 +85,8 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_assignments_release_operation", "idx_member_awards_user",
     "idx_member_awards_operation", "idx_member_awards_revoke_operation",
     "idx_member_awards_maker_time",
+    "idx_award_reversals_status", "idx_award_reversal_one_pending",
+    "idx_award_reversal_one_applied", "idx_award_reversal_events_reversal",
     "idx_task_outbox_delivery",
     "idx_join_requests_user_status",
     "idx_staff_access_one_active", "idx_staff_grant_capability",
@@ -103,14 +108,16 @@ EXPECTED_SOURCE_TRIGGERS = {
     "tasks_template_provenance_update",
     "task_templates_current_version_update",
     "task_template_events_provenance_insert",
+    "award_reversal_events_immutable_update",
+    "award_reversal_events_immutable_delete",
 }
 
-# Filled from a canonical post-init_db schema-299 fixture,
+# Filled from a canonical post-init_db schema-300 fixture,
 # including table SQL, ordered PRAGMA column metadata, explicit index SQL, and
 # integrity/immutable trigger SQL. Any semantic schema drift is rejected before reading
 # business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "15b6940d3b4239b9daf4d40ba0f28b9431552da2bcaf5b78961023c60fe3900e"
-EXPECTED_SOURCE_USER_VERSION = 299
+EXPECTED_SOURCE_SCHEMA_SHA256 = "0bf44ea28e6a63e0534b2600c786777207769dae93f2d045cee6b532c217b363"
+EXPECTED_SOURCE_USER_VERSION = 300
 
 
 class HarnessError(RuntimeError):

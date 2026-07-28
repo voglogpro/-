@@ -52,6 +52,7 @@ JSON_SHAPES = {
     ("task_template_events", "before_json"): "object",
     ("task_template_events", "after_json"): "object",
     ("task_template_events", "result_json"): "object",
+    ("award_reversal_events", "metadata_json"): "object",
 }
 CANONICAL_JSON_COLUMNS = {
     ("staff_access_changes", "result_json"),
@@ -60,6 +61,7 @@ CANONICAL_JSON_COLUMNS = {
     ("task_template_events", "before_json"),
     ("task_template_events", "after_json"),
     ("task_template_events", "result_json"),
+    ("award_reversal_events", "metadata_json"),
 }
 ALLOWED = {
     ("members", "role"): {"candidate", "applicant", "helper", "employee", "admin"},
@@ -102,6 +104,18 @@ ALLOWED = {
     },
     ("task_template_events", "event_type"): {
         "created", "version_created", "archived", "activated",
+    },
+    ("award_reversals", "origin"): {
+        "maker_checker", "legacy_single_actor", "legacy_unlinked",
+    },
+    ("award_reversals", "status"): {
+        "pending", "manual_required", "applied", "rejected",
+    },
+    ("award_reversal_events", "event_type"): {
+        "requested", "manual_required", "applied", "rejected", "legacy_imported",
+    },
+    ("award_reversal_events", "to_status"): {
+        "pending", "manual_required", "applied", "rejected",
     },
 }
 FORBIDDEN_DSN_QUERY_KEYS = {"host", "hostaddr", "port", "service", "dbname", "user"}
@@ -267,6 +281,17 @@ def iter_transformed_rows(source, table_name):
                             raise ValueError
                     except (ValueError, AttributeError):
                         raise ConversionError("template event reference is not canonical UUID")
+            if table_name == "award_reversals":
+                for name in ("request_hash", "decision_hash"):
+                    value = converted[name]
+                    if value is not None and not re.fullmatch(r"[0-9a-f]{64}", str(value)):
+                        raise ConversionError("invalid award reversal request hash")
+            if table_name == "award_reversal_events":
+                from_status = converted["from_status"]
+                if from_status is not None and from_status not in {
+                    "pending", "manual_required", "applied", "rejected",
+                }:
+                    raise ConversionError("unknown award reversal source status")
         except ConversionError as exc:
             raise DataError(
                 f"invalid source value in {table_name} at row {row_number}: {exc}"
@@ -347,6 +372,201 @@ def _validate_template_relations(source):
         "SELECT COUNT(*) FROM task_templates WHERE origin='system'"
     ).fetchone()[0]) != len(SYSTEM_TEMPLATE_SEEDS):
         raise DataError("unexpected built-in task-template seed")
+
+
+def _validate_award_reversal_relations(source):
+    checks = {
+        "domain references": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN member_awards ma ON ma.id=r.member_award_id
+            LEFT JOIN members m ON m.user_id=r.user_id
+            LEFT JOIN awards a ON a.id=r.award_id
+            WHERE ma.id IS NULL OR m.user_id IS NULL OR a.id IS NULL
+               OR ma.user_id<>r.user_id OR ma.award_id<>r.award_id
+               OR ma.bonus<>r.amount
+        """,
+        "snapshot provenance": """
+            SELECT COUNT(*) FROM award_reversals r
+            JOIN member_awards ma ON ma.id=r.member_award_id
+            JOIN awards a ON a.id=r.award_id
+            WHERE r.award_title<>a.title
+               OR r.original_grant_operation_id IS NOT ma.operation_id
+               OR (r.origin='maker_checker'
+                   AND r.original_granted_by IS NOT ma.granted_by)
+               OR (r.origin<>'maker_checker'
+                   AND r.original_granted_by IS NOT ma.granted_by
+                   AND NOT (
+                     r.original_granted_by IS NULL
+                     AND ma.granted_by IS NOT NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM members historical_granter
+                       WHERE historical_granter.user_id=ma.granted_by
+                     )
+                   ))
+        """,
+        "maker-checker grant lineage": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN bonus_ledger original ON original.id=r.original_ledger_id
+            WHERE r.origin='maker_checker' AND (
+              (r.amount=0 AND r.original_ledger_id IS NOT NULL)
+              OR (r.amount>0 AND (
+                r.original_grant_operation_id IS NULL
+                OR original.id IS NULL OR original.user_id<>r.user_id
+                OR original.amount<>r.amount
+                OR original.operation_id<>'award:' || r.original_grant_operation_id
+              ))
+            )
+        """,
+        "maker-checker applied ledger": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN bonus_ledger reversal ON reversal.id=r.reversal_ledger_id
+            WHERE r.origin='maker_checker' AND r.status='applied' AND (
+              (r.amount=0 AND r.reversal_ledger_id IS NOT NULL)
+              OR (r.amount>0 AND (
+                reversal.id IS NULL OR reversal.user_id<>r.user_id
+                OR reversal.amount<>-r.amount
+                OR reversal.reversal_of_ledger_id<>r.original_ledger_id
+                OR reversal.balance_after<>r.result_balance
+              ))
+            )
+        """,
+        "legacy lineage declaration": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN bonus_ledger original ON original.id=r.original_ledger_id
+            LEFT JOIN bonus_ledger reversal ON reversal.id=r.reversal_ledger_id
+            WHERE (r.origin='legacy_single_actor' AND r.amount>0 AND (
+                     original.id IS NULL OR reversal.id IS NULL
+                     OR original.user_id<>r.user_id OR original.amount<>r.amount
+                     OR reversal.user_id<>r.user_id OR reversal.amount<>-r.amount
+                     OR reversal.reversal_of_ledger_id<>original.id
+                   ))
+               OR (r.origin='legacy_unlinked' AND r.amount>0
+                   AND original.id IS NOT NULL AND reversal.id IS NOT NULL
+                   AND original.user_id=r.user_id AND original.amount=r.amount
+                   AND reversal.user_id=r.user_id AND reversal.amount=-r.amount
+                   AND reversal.reversal_of_ledger_id=original.id)
+        """,
+        "terminal projection": """
+            SELECT COUNT(*) FROM award_reversals r
+            JOIN member_awards ma ON ma.id=r.member_award_id
+            WHERE (r.status='applied' AND (
+                     ma.revoked_at IS NULL
+                     OR (r.origin='maker_checker' AND (
+                       ma.revoked_by<>r.decided_by
+                       OR ma.revoke_operation_id<>r.decision_operation_id
+                       OR ma.revoke_request_hash<>r.decision_hash
+                     ))
+                   ))
+               OR (r.status<>'applied' AND ma.revoked_at IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM award_reversals applied
+                     WHERE applied.member_award_id=r.member_award_id
+                       AND applied.status='applied'
+                   ))
+        """,
+        "event projection": """
+            SELECT COUNT(*) FROM award_reversals r
+            WHERE NOT EXISTS (
+              SELECT 1 FROM award_reversal_events e WHERE e.reversal_id=r.id
+            ) OR COALESCE((
+              SELECT e.to_status FROM award_reversal_events e
+              WHERE e.reversal_id=r.id ORDER BY e.id DESC LIMIT 1
+            ),'')<>r.status
+        """,
+        "event chain continuity": """
+            WITH ordered AS (
+              SELECT e.*,
+                     ROW_NUMBER() OVER (PARTITION BY reversal_id ORDER BY id) AS ordinal,
+                     LAG(to_status) OVER (PARTITION BY reversal_id ORDER BY id) AS prior_status
+              FROM award_reversal_events e
+            )
+            SELECT COUNT(*) FROM ordered
+            WHERE (ordinal=1 AND from_status IS NOT NULL)
+               OR (ordinal>1 AND from_status IS NOT prior_status)
+        """,
+        "event cardinality": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN (
+              SELECT reversal_id,
+                     SUM(CASE WHEN event_type='requested' THEN 1 ELSE 0 END) requested,
+                     SUM(CASE WHEN event_type IN ('applied','rejected') THEN 1 ELSE 0 END) terminal
+              FROM award_reversal_events GROUP BY reversal_id
+            ) counts ON counts.reversal_id=r.id
+            WHERE r.origin='maker_checker' AND (
+              COALESCE(counts.requested,0)<>1
+              OR (r.status IN ('pending','manual_required')
+                  AND COALESCE(counts.terminal,0)<>0)
+              OR (r.status IN ('applied','rejected')
+                  AND COALESCE(counts.terminal,0)<>1)
+            )
+        """,
+        "event actors": """
+            WITH ordered AS (
+              SELECT e.*,
+                     LAG(event_type) OVER (PARTITION BY reversal_id ORDER BY id)
+                       AS prior_event_type
+              FROM award_reversal_events e
+            )
+            SELECT COUNT(*) FROM ordered e
+            JOIN award_reversals r ON r.id=e.reversal_id
+            WHERE r.origin='maker_checker' AND (
+              (e.event_type='requested' AND e.actor_id IS NOT r.requested_by)
+              OR (e.event_type='manual_required' AND (
+                e.operation_id IS NOT NULL
+                OR (e.actor_id IS r.requested_by AND e.prior_event_type<>'requested')
+                OR (e.actor_id IS NOT r.requested_by AND (
+                  e.actor_id IS NULL OR e.actor_id=r.user_id
+                  OR (r.original_granted_by IS NOT NULL
+                      AND e.actor_id=r.original_granted_by)
+                ))
+              ))
+              OR (e.event_type IN ('applied','rejected')
+                  AND e.actor_id IS NOT r.decided_by)
+            )
+        """,
+        "event orphan": """
+            SELECT COUNT(*) FROM award_reversal_events e
+            LEFT JOIN award_reversals r ON r.id=e.reversal_id
+            WHERE r.id IS NULL
+        """,
+        "event operation provenance": """
+            SELECT COUNT(*) FROM award_reversals r
+            WHERE (r.origin='maker_checker' AND NOT EXISTS (
+                     SELECT 1 FROM award_reversal_events e
+                     WHERE e.reversal_id=r.id AND e.event_type='requested'
+                       AND e.operation_id=r.request_operation_id
+                   ))
+               OR (r.origin='maker_checker' AND r.status IN ('applied','rejected')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM award_reversal_events e
+                     WHERE e.reversal_id=r.id AND e.event_type=r.status
+                       AND e.operation_id=r.decision_operation_id
+                   ))
+               OR (r.origin<>'maker_checker' AND NOT EXISTS (
+                     SELECT 1 FROM award_reversal_events e
+                     WHERE e.reversal_id=r.id AND e.event_type='legacy_imported'
+                   ))
+        """,
+        "request operation registry": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN operation_registry o ON o.operation_id=r.request_operation_id
+            WHERE r.origin='maker_checker' AND (
+              o.operation_id IS NULL OR o.command_type<>'award_reversal_request'
+              OR o.request_hash<>r.request_hash OR o.actor_id<>r.requested_by
+            )
+        """,
+        "decision operation registry": """
+            SELECT COUNT(*) FROM award_reversals r
+            LEFT JOIN operation_registry o ON o.operation_id=r.decision_operation_id
+            WHERE r.origin='maker_checker' AND r.status IN ('applied','rejected') AND (
+              o.operation_id IS NULL OR o.command_type<>'award_reversal_decision'
+              OR o.request_hash<>r.decision_hash OR o.actor_id<>r.decided_by
+            )
+        """,
+    }
+    for label, sql in checks.items():
+        if int(source.execute(sql).fetchone()[0]):
+            raise DataError(f"invalid source award-reversal relation: {label}")
 
 
 def _primary_key_digest(rows, columns, *, source_values=False):
@@ -450,6 +670,7 @@ def run(
             for _row in iter_transformed_rows(source, table_name):
                 pass
         _validate_template_relations(source)
+        _validate_award_reversal_relations(source)
     if file_sha256(source_path) != before_hash:
         raise SourceError("source changed during preflight")
     report = {

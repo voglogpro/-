@@ -61,7 +61,7 @@ function emptyAdminOverview(overrides = {}) {
     pending: [], pending_total: 0, rejected: [], city_changes: [], review: [],
     review_total: 0, recent_decisions: [], open_tasks: [], team: [], awards: [],
     granted: [], withdrawals: [], task_templates: [], role_changes: [],
-    manual_grants: [], join_requests: [], ...overrides,
+    manual_grants: [], join_requests: [], award_reversals: { open: [], history: [] }, ...overrides,
   };
 }
 
@@ -74,7 +74,8 @@ const SCOUT_CAPABILITIES = [
 const REVIEWER_CAPABILITIES = [
   'task.review.queue', 'task.review', 'task.dispute.request', 'task.dispute.decide',
   'bonus.grant.small', 'bonus.reversal.request', 'bonus.reversal.decide',
-  'award.view', 'award.grant', 'award.revoke', 'member.task_summary.view',
+  'award.view', 'award.grant', 'award.revoke', 'award.reversal.request',
+  'award.reversal.decide', 'member.task_summary.view',
 ];
 const CASHIER_CAPABILITIES = [
   'withdrawal.queue.view', 'withdrawal.account.reveal', 'withdrawal.handoff',
@@ -112,6 +113,7 @@ async function openMiniApp(page, options = {}) {
   let awardGrantCall = 0;
   let manualGrantCall = 0;
   let manualReversalCall = 0;
+  let awardReversalCall = 0;
   let applyCall = 0;
   let memberSearchCall = 0;
   let taskCreateCall = 0;
@@ -442,6 +444,17 @@ async function openMiniApp(page, options = {}) {
       const sequence = options.manualReversalResponses;
       const value = sequence[Math.min(manualReversalCall, sequence.length - 1)];
       manualReversalCall += 1;
+      return route.fulfill({
+        status: value.status,
+        contentType: 'application/json',
+        body: JSON.stringify(value.body || {}),
+      });
+    }
+    if (url.pathname === '/api/admin/award/reversal' && options.awardReversalResponses) {
+      const sequence = options.awardReversalResponses;
+      const value = sequence[Math.min(awardReversalCall, sequence.length - 1)];
+      awardReversalCall += 1;
+      if (typeof value.commit === 'function') value.commit(body);
       return route.fulfill({
         status: value.status,
         contentType: 'application/json',
@@ -1268,32 +1281,266 @@ test('ручная сверка объясняет причину и требу�
   expect(request.body.reconciliation_reference).toBe('BB-142');
 });
 
-test('снятие награды требует причину и идемпотентную операцию', async ({ page }) => {
+test('исправление награды создаёт запрос только после сводки и безопасно повторяет operation_id', async ({ page }) => {
+  const overview = emptyAdminOverview({ granted: [{
+    id: 41, user_id: 501, full_name: 'Иван', emoji: '🏅', title: 'Спас байк',
+    bonus: 50, note: 'Помог ночью', granted_at: '2026-07-28T12:00:00+00:00',
+    granter_name: 'Скаут Мария', can_request_reversal: true,
+  }] });
   const harness = await openMiniApp(page, {
-    initialState: state({ is_admin: true }),
-    adminOverview: {
-      pending: [], pending_total: 0, rejected: [], review: [], review_total: 0,
-      recent_decisions: [], team: [], awards: [], withdrawals: [], open_tasks: [],
-      task_templates: [], granted: [{
-        id: 41, user_id: 501, full_name: 'Иван', emoji: '🏅', title: 'Спас байк',
-        bonus: 50, note: 'Помог ночью', granted_at: '2026-07-28T12:00:00+00:00',
-      }],
-    },
+    initialState: staffState(['award.view', 'award.reversal.request']),
+    adminOverview: overview,
+    awardReversalResponses: [
+      { status: 503, body: { message: 'Ответ сервера не подтверждён' } },
+      { status: 200, body: { ok: true, reversal_id: 71, status: 'pending' } },
+    ],
   });
   await page.locator('#nav [data-tab="tab-admin"]').click();
   await page.locator('[data-asub="adSubAwards"]').click();
-  await page.locator('[data-awrev="41"]').click();
-  await expect(page.locator('#askSheet')).toBeVisible();
-  await expect(page.locator('#askLead')).toContainText('списан целиком');
+  const requestButton = page.getByRole('button', {
+    name: 'Запросить исправление награды «Спас байк» для Иван',
+  });
+  await expect(requestButton).toHaveText('Исправить выдачу');
+  await requestButton.click();
+  await expect(page.locator('#askLead')).toContainText('не изменятся');
   await page.locator('#askText').fill('Награда выдана не тому участнику');
   await page.locator('#askOk').click();
-  await expect.poll(() => harness.requests.filter(
-    item => item.path === '/api/admin/award/revoke'
-  ).length).toBe(1);
-  const request = harness.requests.find(item => item.path === '/api/admin/award/revoke');
-  expect(request.body.entry_id).toBe(41);
-  expect(request.body.note).toContain('не тому');
-  expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
+  await expect(page.locator('#awardReversalConfirmSheet')).toBeVisible();
+  await expect(page.locator('#awardReversalConfirmBody')).toContainText('Запросить полное сторно: 50⚡');
+  expect(harness.requests.filter(item => item.path === '/api/admin/award/reversal')).toHaveLength(0);
+
+  await page.locator('#awardReversalConfirm').click();
+  await expect(page.locator('#awardReversalConfirmError')).toContainText('номер операции сохранён');
+  await expect(page.locator('#awardReversalConfirmSheet')).toBeVisible();
+  const storage = await page.evaluate(() => sessionStorage.getItem('bibitasks_award_reversal_request_41'));
+  const first = harness.requests.find(item => item.path === '/api/admin/award/reversal');
+  expect(storage).toContain(first.body.operation_id);
+
+  await page.locator('#awardReversalConfirm').click();
+  await expect(page.locator('#awardReversalConfirmSheet')).toBeHidden();
+  const requests = harness.requests.filter(item => item.path === '/api/admin/award/reversal');
+  expect(requests).toHaveLength(2);
+  expect(requests[0].body).toMatchObject({
+    action: 'request', entry_id: 41, reason: 'Награда выдана не тому участнику',
+  });
+  expect(requests[1].body.operation_id).toBe(requests[0].body.operation_id);
+  expect(harness.requests.filter(item => item.path === '/api/admin/award/revoke')).toHaveLength(0);
+  expect(await page.evaluate(() => sessionStorage.getItem('bibitasks_award_reversal_request_41'))).toBeNull();
+});
+
+test('второй ответственный подтверждает полное сторно и повторяет решение с отдельным operation_id', async ({ page }) => {
+  const correction = {
+    id: 72, member_award_id: 42, status: 'pending', user_id: 502, full_name: 'Ольга',
+    award_title: 'Спасла парковку', emoji: '🏅', amount: 80, original_note: 'Ночная помощь',
+    granted_at: '2026-07-27T10:00:00+00:00', granter_name: 'Скаут Мария',
+    reason: 'Выдали не по тому отчёту', requested_by: 201, requester_name: 'Скаут Олег',
+    requested_at: '2026-07-28T12:00:00+00:00', current_balance: 120,
+    available_balance: 100, reserved_amount: 20, deficit: 0, can_decide: true,
+  };
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.decide']),
+    adminOverview: emptyAdminOverview({ award_reversals: { open: [correction], history: [] } }),
+    awardReversalResponses: [
+      { status: 503, body: { message: 'Неопределённый ответ' } },
+      { status: 200, body: { ok: true, reversal_id: 72, status: 'applied', balance: 40 } },
+    ],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await page.getByRole('button', { name: /Подтвердить полное сторно награды «Спасла парковку»/ }).click();
+  await page.locator('#askText').fill('Проверены получатель, выдача и исходная проводка');
+  await page.locator('#askOk').click();
+  await expect(page.locator('#awardReversalConfirmBody')).toContainText('Списать полностью: 80⚡');
+  await page.locator('#awardReversalConfirm').click();
+  await expect(page.locator('#awardReversalConfirmError')).toContainText('номер операции сохранён');
+  const stored = await page.evaluate(() => sessionStorage.getItem('bibitasks_award_reversal_decision_72_approve'));
+  const first = harness.requests.find(item => item.path === '/api/admin/award/reversal');
+  expect(stored).toContain(first.body.operation_id);
+  await page.locator('#awardReversalConfirm').click();
+  await expect(page.locator('#awardReversalConfirmSheet')).toBeHidden();
+  const requests = harness.requests.filter(item => item.path === '/api/admin/award/reversal');
+  expect(requests[0].body).toMatchObject({ action: 'decide', reversal_id: 72, decision: 'approve' });
+  expect(requests[1].body.operation_id).toBe(requests[0].body.operation_id);
+  expect(requests[0].body.operation_id).not.toBe('grant-operation-501');
+});
+
+test('второй ответственный может оставить награду без изменения баланса', async ({ page }) => {
+  const correction = {
+    id: 73, member_award_id: 43, status: 'pending', user_id: 503, full_name: 'Илья',
+    award_title: 'Помощь новичку', emoji: '🤝', amount: 30, reason: 'Нужна повторная проверка',
+    requested_by: 201, requester_name: 'Скаут Олег', requested_at: '2026-07-28T12:00:00+00:00',
+    can_decide: true,
+  };
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.decide']),
+    adminOverview: emptyAdminOverview({ award_reversals: { open: [correction], history: [] } }),
+    awardReversalResponses: [{ status: 200, body: { ok: true, reversal_id: 73, status: 'rejected' } }],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await page.getByRole('button', { name: /Оставить награду «Помощь новичку»/ }).click();
+  await page.locator('#askText').fill('Исходная выдача подтверждена фотоотчётом');
+  await page.locator('#askOk').click();
+  await expect(page.locator('#awardReversalConfirmBody')).toContainText('Оставить: 30⚡');
+  await page.locator('#awardReversalConfirm').click();
+  const request = harness.requests.find(item => item.path === '/api/admin/award/reversal');
+  expect(request.body).toMatchObject({ action: 'decide', reversal_id: 73, decision: 'reject' });
+});
+
+test('недостаточный баланс переводит запрос в постоянную ручную сверку без частичного списания', async ({ page }) => {
+  const pending = {
+    id: 78, member_award_id: 48, status: 'pending', user_id: 508, full_name: 'Пётр',
+    award_title: 'Помощь на парковке', emoji: '🚲', amount: 100, reason: 'Дублирующая выдача',
+    requested_by: 201, requester_name: 'Скаут Олег', requested_at: '2026-07-28T12:00:00+00:00',
+    current_balance: 100, available_balance: 100, deficit: 0, can_decide: true,
+  };
+  const manual = {
+    ...pending, status: 'manual_required', current_balance: 35, available_balance: 20,
+    reserved_amount: 15, deficit: 80, can_approve: false, can_reject: true,
+    approve_block_reason: 'Недостаточно свободного баланса для полного сторно.',
+    manual_reason: 'Незарезервированного баланса недостаточно.',
+    wait_reason: 'Пополните баланс или завершите внешнюю сверку.',
+  };
+  let manualMode = false;
+  const harness = await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.decide']),
+    adminOverview: () => emptyAdminOverview({
+      award_reversals: { open: [manualMode ? manual : pending], history: [] },
+    }),
+    awardReversalResponses: [{
+      status: 409,
+      body: { error: 'manual_required', message: 'Для полного сторно недостаточно баланса.' },
+      commit: () => { manualMode = true; },
+    }],
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await page.getByRole('button', { name: /Подтвердить полное сторно награды «Помощь на парковке»/ }).click();
+  await page.locator('#askText').fill('Проверены выдача и доступный баланс');
+  await page.locator('#askOk').click();
+  await page.locator('#awardReversalConfirm').click();
+  await expect(page.locator('#awardReversalConfirmSheet')).toBeHidden();
+  await expect(page.locator('#awReversalOpen')).toContainText('Не хватает 80⚡');
+  await expect(page.locator('#awReversalOpen').getByRole('alert')).toContainText('Частичного списания не будет');
+  await expect(page.getByRole('button', { name: /Оставить награду «Помощь на парковке»/ })).toBeVisible();
+  await expect(page.locator('#awReversalOpen').getByRole('button', { name: 'Полное сторно недоступно' })).toBeDisabled();
+  expect(harness.requests.find(item => item.path === '/api/admin/award/reversal').body)
+    .toMatchObject({ action: 'decide', reversal_id: 78, decision: 'approve' });
+  expect(await page.evaluate(() => sessionStorage.getItem('bibitasks_award_reversal_decision_78_approve'))).toBeNull();
+});
+
+test('ручная сверка остаётся видимой, а поиск и статус фильтруют полную историю', async ({ page }) => {
+  const manual = {
+    id: 74, member_award_id: 44, status: 'manual_required', user_id: 504, full_name: 'Анна',
+    award_title: 'Ночная помощь', emoji: '🌙', amount: 100, reason: 'Дублирующая выдача',
+    requested_by: 201, requester_name: 'Скаут Олег', requested_at: '2026-07-28T12:00:00+00:00',
+    current_balance: 35, available_balance: 20, reserved_amount: 15, deficit: 80,
+    manual_reason: 'Незарезервированного баланса недостаточно.', can_approve: false, can_reject: true,
+    approve_block_reason: 'Недостаточно свободного баланса.',
+    wait_reason: 'Ожидается другой ответственный',
+  };
+  const applied = { ...manual, id: 75, status: 'applied', full_name: 'Борис', award_title: 'Спас байк', deficit: 0,
+    decided_by: 202, checker_name: 'Скаут Елена', decision_note: 'Проводка проверена', result_balance: 40 };
+  const rejected = { ...manual, id: 76, status: 'rejected', full_name: 'Вера', award_title: 'Помощь новичку', deficit: 0,
+    decided_by: 203, checker_name: 'Скаут Ирина', decision_note: 'Выдача верна' };
+  await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.request', 'award.reversal.decide']),
+    adminOverview: emptyAdminOverview({
+      granted: [{ id: 44, user_id: 504, full_name: 'Анна', title: 'Ночная помощь', emoji: '🌙', bonus: 100,
+        granted_at: '2026-07-27T10:00:00+00:00', reversal_status: 'applied', can_request_reversal: false }],
+      award_reversals: {
+        open: [manual], history: [applied, rejected], history_limit: 100,
+        history_total: 245, history_truncated: true,
+      },
+    }),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await expect(page.locator('#awReversalOpen')).toContainText('Не хватает 80⚡');
+  await expect(page.locator('#awReversalOpen')).toContainText('Запросил: Скаут Олег');
+  await expect(page.locator('#awReversalOpen')).toContainText('Полное сторно недоступно');
+  await expect(page.getByRole('button', { name: /Оставить награду «Ночная помощь»/ })).toBeVisible();
+  await expect(page.locator('#awGranted')).toContainText('Исправлено');
+  await expect(page.locator('#awGranted').getByRole('button', { name: /Запросить исправление/ })).toHaveCount(0);
+
+  await page.locator('#awReversalSearch').fill('Борис');
+  await expect(page.locator('#awReversalHistory')).toContainText('Спас байк');
+  await expect(page.locator('#awReversalHistory')).not.toContainText('Помощь новичку');
+  await page.locator('#awReversalSearch').fill('');
+  await page.locator('#awReversalStatus').selectOption('rejected');
+  await expect(page.locator('#awReversalHistory')).toContainText('Вера');
+  await expect(page.locator('#awReversalHistory')).not.toContainText('Борис');
+  await expect(page.locator('#awReversalMeta')).toContainText('Поиск по последним 100 из 245 записей истории');
+  await expect(page.locator('#awReversalMeta')).toContainText('найдено: 1');
+});
+
+test('split-права независимо показывают approve и reject при отозванных полномочиях автора', async ({ page }) => {
+  const revokedRequester = {
+    id: 79, member_award_id: 49, status: 'pending', user_id: 509, full_name: 'Роман',
+    award_title: 'Спас байк', emoji: '🏅', amount: 60, reason: 'Проверка дубля',
+    requested_by: 101, requester_name: 'Текущий ответственный', requested_at: '2026-07-28T12:00:00+00:00',
+    can_approve: false, can_reject: true,
+    approve_block_reason: 'Полномочие автора запроса отозвано.',
+  };
+  const approveOnly = {
+    id: 80, member_award_id: 50, status: 'pending', user_id: 510, full_name: 'Светлана',
+    award_title: 'Помощь новичку', emoji: '🤝', amount: 20, reason: 'Проверка выдачи',
+    requested_by: 202, requester_name: 'Другой ответственный', requested_at: '2026-07-28T12:10:00+00:00',
+    deficit: 0, can_approve: true, can_reject: false,
+    reject_block_reason: 'Закрыть запрос может только его автор.',
+  };
+  await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.decide']),
+    adminOverview: emptyAdminOverview({
+      award_reversals: { open: [revokedRequester, approveOnly], history: [], history_limit: 100, history_total: 0, history_truncated: false },
+    }),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  const revokedCard = page.locator('#awReversalOpen article').filter({ hasText: 'Роман' });
+  await expect(revokedCard.getByRole('button', { name: /Оставить награду «Спас байк»/ })).toBeVisible();
+  await expect(revokedCard.getByRole('button', { name: 'Полное сторно недоступно' })).toBeDisabled();
+  await expect(revokedCard).toContainText('Полномочие автора запроса отозвано');
+  const approveCard = page.locator('#awReversalOpen article').filter({ hasText: 'Светлана' });
+  await expect(approveCard.getByRole('button', { name: /Подтвердить полное сторно награды «Помощь новичку»/ })).toBeVisible();
+  await expect(approveCard.getByRole('button', { name: 'Закрытие недоступно' })).toBeDisabled();
+  await expect(approveCard).toContainText('Закрыть запрос может только его автор');
+});
+
+test('исправления наград доступны с клавиатуры и не создают горизонтальный скролл на 320–390px', async ({ page }) => {
+  const correction = {
+    id: 77, member_award_id: 45, status: 'pending', user_id: 505,
+    full_name: 'Очень длинное имя участника для мобильного экрана',
+    award_title: 'Очень длинное название награды за помощь на парковке', emoji: '🏅', amount: 120,
+    reason: 'Проверить выдачу', requested_by: 201, requester_name: 'Скаут Олег',
+    requested_at: '2026-07-28T12:00:00+00:00', can_decide: true,
+  };
+  await page.setViewportSize({ width: 320, height: 720 });
+  await openMiniApp(page, {
+    initialState: staffState(['award.view', 'award.reversal.decide']),
+    adminOverview: emptyAdminOverview({ award_reversals: { open: [correction], history: [] } }),
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  for (const width of [320, 360, 390]) {
+    await page.setViewportSize({ width, height: 760 });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+  const approve = page.getByRole('button', { name: /Подтвердить полное сторно награды «Очень длинное название/ });
+  await expect(approve).toBeVisible();
+  expect(await approve.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+  await approve.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#askText').fill('Проверены получатель и исходная выдача');
+  await page.locator('#askOk').click();
+  const dialog = page.getByRole('dialog', { name: 'Подтвердить полное сторно' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute('aria-describedby', 'awardReversalConfirmLead');
+  await expect(page.locator('#awardReversalConfirmCancel')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(approve).toBeFocused();
 });
 
 test('award grant has final confirmation and retries with the same operation id', async ({ page }) => {

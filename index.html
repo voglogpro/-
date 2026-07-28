@@ -511,6 +511,13 @@ select.tinput{appearance:none;background-image:
 .template-card .acts .mini,.template-card .acts .btn{min-height:44px}
 .template-photo-current{width:100%;max-height:220px;object-fit:contain;border-radius:15px;background:var(--surface-2);margin-bottom:8px}
 .template-status{min-height:20px;color:var(--ink-2);font-size:14px;margin-bottom:9px}
+.award-reversal-tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,.45fr);gap:8px;margin-bottom:8px}
+.award-correction-card{min-width:0;overflow-wrap:anywhere}
+.award-correction-card .correction-amount{font-size:18px;font-weight:900;color:var(--brand-ink)}
+.award-correction-card .correction-alert{margin-top:10px;padding:11px;border-radius:13px;background:var(--danger-tint);color:var(--danger);font-size:14px;font-weight:700}
+.award-correction-card .acts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.award-correction-card .acts>*{width:100%;min-width:0}
+.award-grant-card{min-width:0}
 .preview-block{padding:13px;border-radius:16px;background:var(--surface);margin-bottom:10px}
 .preview-block b{display:block;margin-bottom:4px}
 .evidence{margin-top:12px;padding:12px;border-radius:16px;background:var(--surface)}
@@ -542,6 +549,8 @@ select.tinput{appearance:none;background-image:
 
 @media (max-width:420px){
   .two,.searchtools{grid-template-columns:1fr}
+  .award-reversal-tools{grid-template-columns:1fr}
+  .award-correction-card .acts{grid-template-columns:1fr}
   .template-toolbar{align-items:stretch;flex-direction:column}
   .template-card{grid-template-columns:70px minmax(0,1fr)}
   .template-card img{width:70px;height:70px}
@@ -940,8 +949,21 @@ select.tinput{appearance:none;background-image:
       </div>
       <div class="card" data-cap-any="award.view,award.grant,award.catalog.manage"><div class="eyebrow"><b></b>Награды</div>
         <div id="awList" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
-      <div class="card" data-cap-any="award.view,award.grant,award.revoke"><div class="eyebrow"><b></b>Последние выдачи</div>
+      <div class="card" data-cap-any="award.view,award.grant,award.revoke,award.reversal.request,award.reversal.decide"><div class="eyebrow"><b></b>Выдачи наград</div>
         <div id="awGranted" aria-live="polite"><div class="empty">Пока никого не награждали.</div></div></div>
+      <div class="card" data-cap-any="award.revoke,award.reversal.request,award.reversal.decide">
+        <div class="eyebrow"><b></b>Исправления наград<span class="cnt" id="awReversalOpenCnt"></span></div>
+        <p class="sub" style="margin-bottom:12px">Первый ответственный создаёт запрос, второй независимо решает его. До решения награда и баланс не меняются.</p>
+        <div class="award-reversal-tools">
+          <div class="field"><label for="awReversalSearch">Поиск в истории</label><input class="tinput" id="awReversalSearch" type="search" autocomplete="off" placeholder="Имя, награда, ID или причина"></div>
+          <div class="field"><label for="awReversalStatus">Статус</label><select class="tinput" id="awReversalStatus"><option value="all">Все</option><option value="open">Открытые</option><option value="pending">Ждут проверки</option><option value="manual_required">Нужна сверка</option><option value="applied">Исправлено</option><option value="rejected">Оставлено</option></select></div>
+        </div>
+        <div class="search-meta" id="awReversalMeta" role="status" aria-live="polite">Поиск работает по открытым запросам и истории</div>
+        <h3 class="section-subtitle">Требуют решения</h3>
+        <div id="awReversalOpen" aria-live="polite"><div class="empty">Открытых исправлений нет.</div></div>
+        <h3 class="section-subtitle" style="margin-top:18px">История</h3>
+        <div id="awReversalHistory" aria-live="polite"><div class="empty">История исправлений пока пуста.</div></div>
+      </div>
       <div class="card" data-cap-any="bonus.grant.small,bonus.reversal.request,bonus.reversal.decide"><div class="eyebrow"><b></b>Ручные начисления и исправления</div>
         <p class="sub" style="margin-bottom:12px">Ошибочное начисление не списывается сразу: один ответственный создаёт запрос, второй независимо подтверждает полное сторно.</p>
         <div id="manualGrantHistory" aria-live="polite"><div class="empty">Ручных начислений пока нет.</div></div></div>
@@ -1203,6 +1225,18 @@ select.tinput{appearance:none;background-image:
   </div>
 </div></div>
 
+<div id="awardReversalConfirmSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="awardReversalConfirmTitle" aria-describedby="awardReversalConfirmLead"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="awardReversalConfirmTitle">Подтвердить исправление награды</h3>
+  <p class="lead" id="awardReversalConfirmLead"></p>
+  <div id="awardReversalConfirmBody"></div>
+  <div class="field-error" id="awardReversalConfirmError" role="alert"></div>
+  <div class="acts">
+    <button class="mini" id="awardReversalConfirmCancel" type="button" style="flex:1">Отмена</button>
+    <button class="btn btn-volt sm" id="awardReversalConfirm" type="button">Подтвердить</button>
+  </div>
+</div></div>
+
 <div id="memberSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="msName"><div class="inner">
   <div class="grab"></div>
   <div class="mshead">
@@ -1297,7 +1331,7 @@ const STAFF_SECTIONS = {
   ],
   awards: [
     'bonus.grant.small','bonus.reversal.request','bonus.reversal.decide',
-    'award.view','award.grant','award.revoke','award.catalog.manage',
+    'award.view','award.grant','award.revoke','award.reversal.request','award.reversal.decide','award.catalog.manage',
     'withdrawal.queue.view','withdrawal.account.reveal','withdrawal.handoff','withdrawal.decide'
   ],
   access: ['access.view']
@@ -1955,7 +1989,7 @@ function renderAwardShelf(){
 let MY_TASKS = new Map(), WITHDRAW_OPERATION=null;
 const RELEASE_OPERATIONS = new Map(), CANCEL_OPERATIONS = new Map(),
       WITHDRAW_DECISIONS = new Map(), REVIEW_DECISIONS = new Map(),
-      DISPUTE_OPERATIONS = new Map(), AWARD_REVOKE_OPERATIONS = new Map();
+      DISPUTE_OPERATIONS = new Map();
 let APPROVE_PENDING = null;
 function approveStorageKey(assignmentId){ return 'bibitasks_review_approve_'+Number(assignmentId); }
 function persistedApproveOperation(taskId,assignmentId){
@@ -2871,6 +2905,7 @@ async function loadAdmin(){
     syncTaskTemplateSelector(d.task_templates||[]);
 
     renderGrantedList(d.granted || []);
+    renderAwardReversals(d.award_reversals || {open:[],history:[]});
     renderManualGrantHistory(d.manual_grants || []);
     startWithdrawalLeaseClock();
     scheduleAdminDeliveryRefresh(op);
@@ -4297,32 +4332,208 @@ async function loadAwards(){
   finally{ setBusy('adSubAwards',false); }
 }
 
-function renderGrantedList(list){
-  $('awGranted').innerHTML = list.length ? list.map(g=>
-    '<div class="ledger"><div class="tico" style="width:34px;height:34px;font-size:17px">'+
-    esc(g.emoji)+'</div><div style="flex:1;min-width:0">'+
-    '<div class="rs">'+esc(g.title)+' → '+esc(g.full_name||('ID '+g.user_id))+'</div>'+
-    '<div class="dtm">'+fmtDate(g.granted_at)+(g.note?' · '+esc(g.note):'')+'</div></div>'+
-    (g.bonus?'<div class="amt plus">+'+g.bonus+'⚡</div>':'')+
-    (hasCap('award.revoke')?'<button class="mini warn" data-awrev="'+g.id+'" style="margin-left:8px">Снять</button>':'')+
-    '</div>').join('')
-    : '<div class="empty">Пока никого не награждали.</div>';
-  $('awGranted').querySelectorAll('[data-awrev]').forEach(b=>{
-    b.onclick = async()=>{
-      const id=Number(b.dataset.awrev);
-      const note=await askText({title:'Снять награду',
-        lead:'Награда исчезнет у участника, а её бонус будет списан целиком. Укажи проверенную причину.',
-        placeholder:'Почему награда выдана ошибочно',required:true,okLabel:'Снять награду'});
+const canRequestAwardReversal=()=>hasAny(['award.reversal.request','award.revoke']);
+const canDecideAwardReversal=()=>hasAny(['award.reversal.decide','award.revoke']);
+let AWARD_REVERSAL_OPEN=[],AWARD_REVERSAL_HISTORY=[],AWARD_REVERSAL_PENDING=null,AWARD_REVERSAL_RETURN_FOCUS=null,
+    AWARD_REVERSAL_HISTORY_LIMIT=0,AWARD_REVERSAL_HISTORY_TOTAL=0,AWARD_REVERSAL_HISTORY_TRUNCATED=false;
+const awardEntryId=item=>Number(item.member_award_id!=null?item.member_award_id:item.entry_id!=null?item.entry_id:item.id);
+const awardAmount=item=>Number(item.amount!=null?item.amount:item.bonus||0);
+const awardTitle=item=>item.award_title||item.title||'Награда';
+const awardRecipient=item=>item.full_name||('ID '+item.user_id);
+function awardReversalStatus(status){
+  return ({pending:'Ждёт второго ответственного',manual_required:'Нужна ручная сверка',
+    applied:'Исправлено',rejected:'Оставлено без изменений'})[status]||status||'';
+}
+function awardReversalSearchText(item){
+  return [item.id,item.member_award_id,item.entry_id,item.user_id,item.full_name,item.username,
+    awardTitle(item),item.reason,item.original_note,item.requester_name,item.checker_name,
+  ].filter(v=>v!=null).join(' ').toLocaleLowerCase('ru-RU');
+}
+function awardReversalMatches(item,query,status){
+  if(query&&!awardReversalSearchText(item).includes(query)) return false;
+  if(status==='all') return true;
+  if(status==='open') return ['pending','manual_required'].includes(item.status);
+  return item.status===status;
+}
+function awardReversalCard(item,isOpen){
+  const id=Number(item.id),amount=awardAmount(item),title=awardTitle(item),name=awardRecipient(item);
+  const status=item.status||'',deficit=Math.max(0,Number(item.deficit||0));
+  const available=item.available_balance;
+  let actions='';
+  if(isOpen){
+    const hasSplit=Object.prototype.hasOwnProperty.call(item,'can_approve')||Object.prototype.hasOwnProperty.call(item,'can_reject');
+    const legacyCanDecide=!hasSplit&&item.can_decide===true;
+    const manualBlocked=status==='manual_required'||deficit>0;
+    const canApprove=!manualBlocked&&(hasSplit?item.can_approve===true:legacyCanDecide);
+    const canReject=hasSplit?item.can_reject===true:legacyCanDecide;
+    const approveReason=canApprove?'':(item.approve_block_reason||item.approval_block_reason||
+      (manualBlocked?(item.manual_reason||'Нужно завершить ручную сверку или пополнить доступный баланс.'):
+      (hasSplit?(item.wait_reason||'Это действие недоступно текущему ответственному.') : '')));
+    const rejectReason=canReject?'':(item.reject_block_reason||item.rejection_block_reason||
+      (hasSplit?(item.wait_reason||'Это действие недоступно текущему ответственному.') : ''));
+    const controls=[];
+    if(canApprove&&canDecideAwardReversal()) controls.push(
+      '<button class="btn btn-volt sm" data-aw-reversal-decide="'+id+'" data-decision="approve" aria-label="Подтвердить полное сторно награды «'+esc(title)+'» для '+esc(name)+'">Подтвердить полное сторно</button>');
+    else if(approveReason) controls.push(
+      '<button class="mini" type="button" disabled aria-describedby="aw-reversal-approve-block-'+id+'">Полное сторно недоступно</button>');
+    if(canReject&&canDecideAwardReversal()) controls.push(
+      '<button class="mini" data-aw-reversal-decide="'+id+'" data-decision="reject" aria-label="Оставить награду «'+esc(title)+'» у '+esc(name)+'">Оставить награду</button>');
+    else if(rejectReason) controls.push(
+      '<button class="mini" type="button" disabled aria-describedby="aw-reversal-reject-block-'+id+'">Закрытие недоступно</button>');
+    if(!controls.length) controls.push('<button class="mini" type="button" disabled>'+esc(item.wait_reason||'Ожидается другой ответственный')+'</button>');
+    actions=(approveReason?'<div class="dt" id="aw-reversal-approve-block-'+id+'">Полное сторно недоступно: '+esc(approveReason)+'</div>':'')+
+      (rejectReason?'<div class="dt" id="aw-reversal-reject-block-'+id+'">Оставить награду сейчас нельзя: '+esc(rejectReason)+'</div>':'')+
+      '<div class="acts">'+controls.join('')+'</div>';
+  }
+  const balance=(item.current_balance!=null||available!=null)
+    ? '<div class="dt">Баланс: <b>'+Number(item.current_balance||0)+'⚡</b>'+
+      (available!=null?' · доступно без резервов: <b>'+Number(available)+'⚡</b>':'')+'</div>' : '';
+  const alert=status==='manual_required'
+    ? '<div class="correction-alert" role="alert">'+esc(item.manual_reason||'Автоматическое полное сторно пока невозможно.')+
+      (deficit?' Не хватает '+deficit+'⚡. Частичного списания не будет.':' Частичного списания не будет.')+'</div>' : '';
+  return '<article class="task award-correction-card" aria-label="Исправление награды '+esc(title)+' для '+esc(name)+'">'+
+    '<div class="row1"><div class="tico">'+esc(item.emoji||'🏅')+'</div><div style="min-width:0;flex:1"><div class="tt">'+esc(title)+' → '+esc(name)+'</div>'+
+    '<div class="ty">Запрос #'+id+' · '+fmtDate(item.requested_at||item.granted_at)+'</div></div><span class="correction-amount">'+amount+'⚡</span></div>'+
+    '<div class="meta"><span class="pill '+(status==='manual_required'?'warn':status==='applied'?'hot':'on')+'">'+esc(awardReversalStatus(status))+'</span></div>'+
+    (item.granter_name?'<div class="dt">Выдал: '+esc(item.granter_name)+' · '+fmtDate(item.granted_at)+'</div>':'')+
+    (item.original_note?'<div class="dt">Исходный комментарий: '+esc(item.original_note)+'</div>':'')+
+    (item.reason?'<div class="dt">Причина исправления: '+esc(item.reason)+'</div>':'')+
+    (item.requested_by?'<div class="ty">Запросил: '+esc(item.requester_name||('ID '+item.requested_by))+' · '+fmtDate(item.requested_at)+'</div>':'')+
+    (item.decided_by?'<div class="ty">Проверил: '+esc(item.checker_name||('ID '+item.decided_by))+' · '+fmtDate(item.decided_at)+'</div>':'')+
+    (item.decision_note?'<div class="dt">Решение: '+esc(item.decision_note)+'</div>':'')+
+    balance+alert+(item.result_balance!=null?'<div class="dt">Баланс после решения: <b>'+Number(item.result_balance)+'⚡</b></div>':'')+actions+'</article>';
+}
+function bindAwardReversalActions(){
+  document.querySelectorAll('[data-aw-reversal-decide]').forEach(button=>{
+    button.onclick=async()=>{
+      const id=Number(button.dataset.awReversalDecide),decision=button.dataset.decision;
+      const item=AWARD_REVERSAL_OPEN.find(row=>Number(row.id)===id);
+      if(!item) return;
+      AWARD_REVERSAL_RETURN_FOCUS=button;
+      const approve=decision==='approve';
+      const note=await askText({
+        title:approve?'Подтвердить полное сторно':'Оставить награду',
+        lead:approve?'Проверь получателя, исходную выдачу, сумму и причину запроса. Частичное списание запрещено.':'Баланс и награда останутся без изменений. Объясни решение инициатору и получателю.',
+        placeholder:approve?'Что проверено вторым ответственным':'Почему исходная выдача верна',required:true,
+        okLabel:'Перейти к подтверждению'});
       if(note===null) return;
-      const prior=AWARD_REVOKE_OPERATIONS.get(id);
-      const operation=prior&&prior.value===note?prior:{id:newOperationId(),value:note};
-      AWARD_REVOKE_OPERATIONS.set(id,operation);
-      press(b,'Снимаю…', async ()=>{
-        await api('/api/admin/award/revoke',{method:'POST',body:JSON.stringify({
-          entry_id:id,note:note,operation_id:operation.id})});
-        AWARD_REVOKE_OPERATIONS.delete(id);
-        toast('Награда снята.'); await loadAdmin(); await loadAwards();
+      const pending=financialOperation('bibitasks_award_reversal_decision_'+id+'_'+decision,{
+        action:'decide',reversalId:id,decision:decision,note:note,name:awardRecipient(item),
+        title:awardTitle(item),amount:awardAmount(item)
       });
+      openAwardReversalConfirmation(pending,item);
+    };
+  });
+}
+function renderAwardReversals(payload){
+  const data=payload&&typeof payload==='object'?payload:{};
+  AWARD_REVERSAL_OPEN=Array.isArray(data.open)?data.open:[];
+  AWARD_REVERSAL_HISTORY=Array.isArray(data.history)?data.history:[];
+  AWARD_REVERSAL_HISTORY_LIMIT=Math.max(0,Number(data.history_limit||AWARD_REVERSAL_HISTORY.length));
+  AWARD_REVERSAL_HISTORY_TOTAL=Math.max(AWARD_REVERSAL_HISTORY.length,Number(data.history_total||AWARD_REVERSAL_HISTORY.length));
+  AWARD_REVERSAL_HISTORY_TRUNCATED=data.history_truncated===true||AWARD_REVERSAL_HISTORY_TOTAL>AWARD_REVERSAL_HISTORY.length;
+  const query=($('awReversalSearch').value||'').trim().toLocaleLowerCase('ru-RU');
+  const status=$('awReversalStatus').value||'all';
+  const open=AWARD_REVERSAL_OPEN.filter(item=>awardReversalMatches(item,query,status));
+  const history=AWARD_REVERSAL_HISTORY.filter(item=>awardReversalMatches(item,query,status));
+  $('awReversalOpenCnt').textContent=AWARD_REVERSAL_OPEN.length||'';
+  $('awReversalOpen').innerHTML=open.length?open.map(item=>awardReversalCard(item,true)).join(''):
+    '<div class="empty">'+(query||status!=='all'?'Открытых запросов по фильтру нет.':'Открытых исправлений нет.')+'</div>';
+  $('awReversalHistory').innerHTML=history.length?history.map(item=>awardReversalCard(item,false)).join(''):
+    '<div class="empty">'+(query||status!=='all'?'В истории ничего не найдено.':'История исправлений пока пуста.')+'</div>';
+  const scope=AWARD_REVERSAL_HISTORY_TRUNCATED
+    ? 'Поиск по последним '+AWARD_REVERSAL_HISTORY_LIMIT+' из '+AWARD_REVERSAL_HISTORY_TOTAL+' записей истории'
+    : 'История загружена полностью: '+AWARD_REVERSAL_HISTORY_TOTAL;
+  $('awReversalMeta').textContent=scope+' · найдено: '+(open.length+history.length)+' · открытых: '+open.length+' · в истории: '+history.length;
+  bindAwardReversalActions();
+}
+function rerenderAwardReversalFilters(){
+  renderAwardReversals({
+    open:AWARD_REVERSAL_OPEN,history:AWARD_REVERSAL_HISTORY,
+    history_limit:AWARD_REVERSAL_HISTORY_LIMIT,history_total:AWARD_REVERSAL_HISTORY_TOTAL,
+    history_truncated:AWARD_REVERSAL_HISTORY_TRUNCATED
+  });
+}
+$('awReversalSearch').oninput=rerenderAwardReversalFilters;
+$('awReversalStatus').onchange=rerenderAwardReversalFilters;
+
+function openAwardReversalConfirmation(pending,item){
+  AWARD_REVERSAL_PENDING=pending;
+  $('awardReversalConfirmError').textContent='';
+  const request=pending.action==='request',approve=pending.decision==='approve';
+  $('awardReversalConfirmTitle').textContent=request?'Передать исправление второму ответственному':
+    (approve?'Подтвердить полное сторно':'Закрыть без изменений');
+  $('awardReversalConfirmLead').textContent=request
+    ? 'После отправки награда и баланс не изменятся до независимого решения другого ответственного.'
+    : (approve?'Это окончательное финансовое решение. Система проверит полномочия, исходную проводку и полный доступный баланс.':'Награда и баланс останутся без изменений.');
+  const origin=item&&item.granter_name?'<div class="dt">Выдал: '+esc(item.granter_name)+' · '+fmtDate(item.granted_at)+'</div>':'';
+  $('awardReversalConfirmBody').innerHTML='<div class="task"><div class="tt">'+esc(pending.title)+' → '+esc(pending.name)+'</div>'+
+    '<div class="dt">'+(request?'Запросить полное сторно: ':approve?'Списать полностью: ':'Оставить: ')+'<b>'+pending.amount+'⚡</b></div>'+origin+
+    '<div class="dt">'+(request?'Причина: ':'Проверка: ')+esc(request?pending.reason:pending.note)+'</div></div>';
+  $('awardReversalConfirm').textContent=request?'Создать запрос':(approve?'Сторнировать '+pending.amount+'⚡':'Оставить награду');
+  $('awardReversalConfirm').classList.toggle('btn-volt',request||approve);
+  $('awardReversalConfirm').classList.toggle('btn-dark',!request&&!approve);
+  $('awardReversalConfirmSheet').classList.remove('hidden');
+}
+$('awardReversalConfirmCancel').onclick=()=>{
+  clearFinancialOperation(AWARD_REVERSAL_PENDING); AWARD_REVERSAL_PENDING=null;
+  $('awardReversalConfirmError').textContent=''; $('awardReversalConfirmSheet').classList.add('hidden');
+  const back=AWARD_REVERSAL_RETURN_FOCUS; AWARD_REVERSAL_RETURN_FOCUS=null;
+  setTimeout(()=>{ const target=safeReturnFocus(back); if(target) target.focus(); },20);
+};
+$('awardReversalConfirmSheet').onclick=e=>{ if(e.target===$('awardReversalConfirmSheet')) $('awardReversalConfirmCancel').click(); };
+$('awardReversalConfirm').onclick=async()=>{
+  if(!AWARD_REVERSAL_PENDING) return;
+  const pending=AWARD_REVERSAL_PENDING,button=$('awardReversalConfirm'),original=button.textContent;
+  button.disabled=true; button.textContent='Сохраняю…'; $('awardReversalConfirmError').textContent='';
+  const body=pending.action==='request'
+    ? {action:'request',entry_id:pending.entryId,reason:pending.reason,operation_id:pending.id}
+    : {action:'decide',reversal_id:pending.reversalId,decision:pending.decision,note:pending.note,operation_id:pending.id};
+  try{
+    const result=await api('/api/admin/award/reversal',{method:'POST',body:JSON.stringify(body)});
+    clearFinancialOperation(pending); AWARD_REVERSAL_PENDING=null;
+    $('awardReversalConfirmSheet').classList.add('hidden'); buzz('ok');
+    toast(pending.action==='request'
+      ? (result.status==='manual_required'?'Запрос создан. Нужна ручная сверка и второй ответственный.':'Запрос передан второму ответственному.')
+      : (result.status==='applied'?'Награда и бонус исправлены после двойной проверки.':'Проверка закрыта без изменения награды и баланса.'));
+    await loadAdmin(); await loadAwards();
+  }catch(e){
+    if(e.status&&e.status<500){
+      clearFinancialOperation(pending); AWARD_REVERSAL_PENDING=null;
+      $('awardReversalConfirmSheet').classList.add('hidden');
+      if(e.status===409) await loadAdmin();
+      toast(e.message);
+    }else{
+      $('awardReversalConfirmError').textContent='Ответ не подтверждён. Повтори: номер операции сохранён, двойного действия не будет.';
+      buzz('no');
+    }
+  }finally{ button.disabled=false; button.textContent=original; }
+};
+
+function renderGrantedList(list){
+  $('awGranted').innerHTML = list.length ? list.map(g=>{
+    const id=awardEntryId(g),title=awardTitle(g),name=awardRecipient(g),status=g.reversal_status||'';
+    const canRequest=g.can_request_reversal!==false&&!['pending','manual_required','applied'].includes(status)&&canRequestAwardReversal();
+    return '<article class="task award-grant-card" aria-label="Выдача награды '+esc(title)+' для '+esc(name)+'"><div class="row1"><div class="tico">'+
+      esc(g.emoji||'🏅')+'</div><div style="flex:1;min-width:0"><div class="tt">'+esc(title)+' → '+esc(name)+'</div>'+
+      '<div class="ty">'+fmtDate(g.granted_at)+(g.note?' · '+esc(g.note):'')+'</div></div>'+
+      (awardAmount(g)?'<span class="rw">+'+awardAmount(g)+'⚡</span>':'')+'</div>'+
+      (status?'<div class="meta"><span class="pill '+(status==='manual_required'?'warn':status==='applied'?'hot':'on')+'">'+esc(awardReversalStatus(status))+'</span></div>':'')+
+      (canRequest?'<div class="acts"><button class="mini warn" data-aw-reversal-request="'+id+'" aria-label="Запросить исправление награды «'+esc(title)+'» для '+esc(name)+'">Исправить выдачу</button></div>':'')+'</article>';
+  }).join('') : '<div class="empty">Пока никого не награждали.</div>';
+  $('awGranted').querySelectorAll('[data-aw-reversal-request]').forEach(button=>{
+    button.onclick=async()=>{
+      const entryId=Number(button.dataset.awReversalRequest),grant=list.find(item=>awardEntryId(item)===entryId);
+      if(!grant) return;
+      AWARD_REVERSAL_RETURN_FOCUS=button;
+      const reason=await askText({title:'Запросить исправление награды',
+        lead:'Награда и баланс не изменятся до независимой проверки второго ответственного. Частичное сторно запрещено.',
+        placeholder:'Почему награда выдана ошибочно',required:true,okLabel:'Перейти к подтверждению'});
+      if(reason===null) return;
+      const pending=financialOperation('bibitasks_award_reversal_request_'+entryId,{
+        action:'request',entryId:entryId,reason:reason,name:awardRecipient(grant),title:awardTitle(grant),amount:awardAmount(grant)
+      });
+      openAwardReversalConfirmation(pending,grant);
     };
   });
 }
