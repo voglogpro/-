@@ -110,6 +110,8 @@ class RecoveryKeyBackupBindingTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.data = self.root / "data"
         self.data.mkdir()
+        if os.name != "nt":
+            self.data.chmod(0o700)
         self.backups = self.root / "backups"
         telegram = Fernet(Fernet.generate_key())
         withdrawal = Fernet(Fernet.generate_key())
@@ -481,6 +483,25 @@ class ExistingDataEnrollmentTests(unittest.TestCase):
         self.assertFalse((self.data / CANARY_FILENAME).exists())
         self.assertFalse((old_evidence / "report.json").exists())
         self.assertFalse(report.exists())
+
+    def test_missing_reserved_report_path_is_a_domain_failure(self):
+        evidence = self.root / "missing-report-evidence"
+        evidence.mkdir(mode=0o700)
+        if os.name != "nt":
+            evidence.chmod(0o700)
+        report = evidence / "report.json"
+        reservation = canary_module._reserve_enrollment_report(report)
+        try:
+            # Windows cannot unlink an open file. Closing only the target
+            # descriptor still exercises the missing-path revalidation branch;
+            # the separately held parent descriptor remains available.
+            os.close(reservation["descriptor"])
+            reservation["descriptor"] = None
+            report.unlink()
+            with self.assertRaisesRegex(RuntimeError, "reservation changed"):
+                canary_module._verify_report_reservation(reservation)
+        finally:
+            canary_module._close_report_reservation(reservation)
 
     def test_existing_canary_wal_and_invalid_schema_fail_closed(self):
         (self.data / "bibitasks.db-wal").write_bytes(b"not-checkpointed")

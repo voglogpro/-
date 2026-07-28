@@ -1,6 +1,6 @@
 """Add dual-source admin authority and global operation registry.
 
-Revision ID: 0004_authority_operation_registry
+Revision ID: 0004_authority_registry
 Revises: 0003_admin_financial_controls
 """
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from alembic import op
 
 
-revision: str = "0004_authority_operation_registry"
+revision: str = "0004_authority_registry"
 down_revision: str | None = "0003_admin_financial_controls"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

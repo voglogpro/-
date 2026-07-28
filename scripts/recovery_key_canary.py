@@ -678,9 +678,15 @@ def _reserve_enrollment_report(path: Path) -> dict:
 
 
 def _verify_report_reservation(reservation: dict) -> None:
-    parent_now = reservation["parent"].lstat()
-    target_now = reservation["target"].lstat()
-    descriptor_now = os.fstat(reservation["descriptor"])
+    try:
+        parent_now = reservation["parent"].lstat()
+        target_now = reservation["target"].lstat()
+        descriptor_now = os.fstat(reservation["descriptor"])
+    except OSError as exc:
+        # A swapped or removed path is the same security failure as an inode
+        # mismatch.  Keep the public failure fail-closed and independent of
+        # the host-specific errno raised while revalidating it.
+        raise RuntimeError("Enrollment report reservation changed") from exc
     if (
         stat.S_ISLNK(parent_now.st_mode)
         or not _same_file(parent_now, reservation["parent_info"])

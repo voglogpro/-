@@ -24,7 +24,7 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
-        self.assertEqual(ALEMBIC_HEAD, "0004_authority_operation_registry")
+        self.assertEqual(ALEMBIC_HEAD, "0004_authority_registry")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
         self.assertEqual(len(metadata.tables), 32)
         self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 39)
