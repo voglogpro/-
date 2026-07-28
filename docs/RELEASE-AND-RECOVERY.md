@@ -140,7 +140,7 @@ GitHub provenance, красном preflight или неготовом webhook/wo
 только hashes и redacted сводку и не перезаписывает существующий путь. Это не WORM:
 после создания hash записи обязательно закрепляется в append-only CI artifact или
 внешнем versioned/WORM-хранилище. Для v2.10.0 создаётся candidate v1 со schema
-`295` по [`RELEASE-GATE-V3.md`](RELEASE-GATE-V3.md). Даже полный набор evidence
+`296` по [`RELEASE-GATE-V3.md`](RELEASE-GATE-V3.md). Даже полный набор evidence
 сейчас заканчивается terminal NO-GO: deployment запрещён до реализации
 криптографического quorum хранителей, одноразового challenge ledger и
 контроллера, проверяющего подпись непосредственно перед переключением production.
@@ -204,7 +204,7 @@ GitHub provenance, красном preflight или неготовом webhook/wo
    ```
 
 CLI — одноразовый bridge только от v2.9.1 schema `293` к следующему релизу
-(destination schema `295` применяется уже при последующем startup). Он требует
+(destination schema `296` применяется уже при последующем startup). Он требует
 точное подтверждение SHA-256, читает и инспектирует SQLite snapshot из байтов
 одного стабильного regular-file descriptor без повторного открытия pathname,
 проверяет `integrity_check=ok`, exact `user_version=293`, `DATA_DIR` mode `0700`

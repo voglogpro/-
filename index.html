@@ -38,7 +38,7 @@ try{
   --ink-2:#5F6963;        /* второстепенный, WCAG AA */
   --brand:#17C452;        /* акцент: заливки, прогресс, точки */
   --brand-ink:#07742F;    /* акцент: зелёный текст на светлом */
-  --brand-btn:#0E9C42;    /* акцент: кнопка с белым текстом */
+  --brand-btn:#087A35;    /* белый текст: WCAG AA и для 14px */
   --brand-tint:#EDF9F1;   /* акцент: лёгкая подложка */
   --danger:#C8392E;
   --detail:#3F4642;
@@ -65,7 +65,7 @@ try{
   --ink-2:#B6C0BA;
   --brand:#25D366;
   --brand-ink:#67E795;
-  --brand-btn:#159447;
+  --brand-btn:#087A35;
   --brand-tint:#132A1C;
   --danger:#FF756B;
   --detail:#D4DDD7;
@@ -597,12 +597,15 @@ select.tinput{appearance:none;background-image:
           <div class="value-item"><span class="vi">3</span><span>1 бибибонус = 1 ₽ на поездки · минимум 1000 бонусов ≈ 118 минут при 8,5 ₽/мин</span></div>
         </div>
         <div class="field"><label for="apName">Как тебя зовут</label>
-          <input class="tinput" id="apName" placeholder="Кирилл" inputmode="text"></div>
+          <input class="tinput" id="apName" placeholder="Кирилл" inputmode="text"
+            autocomplete="name" maxlength="80"></div>
         <div class="field"><label for="apCity">Город</label>
-          <input class="tinput" id="apCity" placeholder="Краснодар" inputmode="text"></div>
+          <input class="tinput" id="apCity" placeholder="Краснодар" inputmode="text" maxlength="80"></div>
         <div class="field"><label for="apAbout">Как можешь быть полезен</label>
-          <textarea class="tinput" id="apAbout" rows="4"
-            placeholder="Например: могу поправлять парковки, перевозить байки на машине и делать фото результата"></textarea></div>
+          <textarea class="tinput" id="apAbout" rows="4" maxlength="600"
+            aria-describedby="apAboutCount privacyNotice"
+            placeholder="Например: могу поправлять парковки, перевозить байки на машине и делать фото результата"></textarea>
+          <div class="hint" id="apAboutCount" style="text-align:right;margin-top:5px">0 из 600</div></div>
         <div class="hint" style="margin:-5px 0 12px">Номер телефона не нужен. Ответственный увидит имя пользователя Telegram.</div>
         <div class="hint" id="privacyNotice" style="margin:-5px 0 12px"></div>
         <div class="field-error" id="apError" role="alert"></div>
@@ -614,10 +617,11 @@ select.tinput{appearance:none;background-image:
     <div id="waitBox" class="card warm hidden">
       <div class="eyebrow"><b></b>БибиЗадачи · статус заявки</div>
       <h2 class="big">⏳ Заявка на рассмотрении</h2>
-      <p class="sub" id="waitMessage">Ответственный одобрит её — и задания появятся здесь.
-        Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.</p>
+      <p class="sub" id="waitMessage">Ответственный рассмотрит заявку. После решения
+        статус изменится здесь, а уведомление придёт в чат с ботом.</p>
       <div class="charge warm" style="margin-top:13px"><i style="width:55%"></i></div>
       <button class="btn btn-ghost hidden" id="waitBot" style="margin-top:13px">Открыть чат с ботом</button>
+      <button class="btn btn-ghost hidden" id="waitRefresh" type="button" style="margin-top:10px">Обновить статус</button>
       <button class="btn btn-ghost hidden" id="waitContact" style="margin-top:13px">Задать вопрос ответственному</button>
     </div>
 
@@ -884,6 +888,9 @@ select.tinput{appearance:none;background-image:
         <div id="awList" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
       <div class="card"><div class="eyebrow"><b></b>Последние выдачи</div>
         <div id="awGranted" aria-live="polite"><div class="empty">Пока никого не награждали.</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Ручные начисления и исправления</div>
+        <p class="sub" style="margin-bottom:12px">Ошибочное начисление не списывается сразу: один ответственный создаёт запрос, второй независимо подтверждает полное сторно.</p>
+        <div id="manualGrantHistory" aria-live="polite"><div class="empty">Ручных начислений пока нет.</div></div></div>
       <div class="card"><div class="eyebrow"><b></b>Заявки на перевод</div>
         <div id="adWithdrawals" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
     </div>
@@ -941,7 +948,7 @@ select.tinput{appearance:none;background-image:
     <div class="field-error" id="finishPhotoError" role="alert"></div>
   </div>
   <div class="field"><label id="finishNoteLabel" for="finishNote">Комментарий — необязательно</label>
-    <textarea class="tinput" id="finishNote" rows="3" placeholder="Например: выровнял 8 байков, проход свободен"></textarea></div>
+    <textarea class="tinput" id="finishNote" rows="3" maxlength="300" placeholder="Например: выровнял 8 байков, проход свободен"></textarea></div>
   <div class="acts">
     <button class="mini" id="finishCancel" type="button" style="flex:1">Отмена</button>
     <button class="btn btn-volt sm" id="finishSubmit" type="button">Отправить на проверку</button>
@@ -1050,6 +1057,28 @@ select.tinput{appearance:none;background-image:
   </div>
 </div></div>
 
+<div id="balanceConfirmSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="balanceConfirmTitle"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="balanceConfirmTitle">Подтвердить начисление</h3>
+  <p class="lead">Проверь получателя, сумму и причину. После подтверждения бонусы начислятся сразу.</p>
+  <div id="balanceConfirmBody"></div>
+  <div class="acts">
+    <button class="mini" id="balanceConfirmCancel" type="button" style="flex:1">Назад</button>
+    <button class="btn btn-volt sm" id="balanceConfirm" type="button">Начислить</button>
+  </div>
+</div></div>
+
+<div id="manualCorrectionConfirmSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="manualCorrectionConfirmTitle"><div class="inner">
+  <div class="grab"></div>
+  <h3 id="manualCorrectionConfirmTitle">Подтвердить исправление</h3>
+  <p class="lead" id="manualCorrectionConfirmLead">Проверь операцию перед отправкой.</p>
+  <div id="manualCorrectionConfirmBody"></div>
+  <div class="acts">
+    <button class="mini" id="manualCorrectionConfirmCancel" type="button" style="flex:1">Назад</button>
+    <button class="btn btn-volt sm" id="manualCorrectionConfirm" type="button">Подтвердить</button>
+  </div>
+</div></div>
+
 <div id="memberSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="msName"><div class="inner">
   <div class="grab"></div>
   <div class="mshead">
@@ -1130,12 +1159,14 @@ try{
 
 let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
 let TEAM_TAG_FILTER = '', TEAM_REMOTE = null, TEAM_CURSOR = null, TEAM_SEARCH_TIMER = null,
-    TEAM_TAG_CATALOG = [];
+    TEAM_TAG_CATALOG = [], TEAM_SEARCH_SEQUENCE = 0;
 let PENDING_ITEMS=[],PENDING_CURSOR=null,REVIEW_ITEMS=[],REVIEW_CURSOR=null,QUEUE_SEARCH_TIMER=null;
+const QUEUE_REQUEST_SEQUENCE={applications:0,reviews:0};
 let ADMIN_DELIVERY_TIMER=null, ADMIN_DELIVERY_IDS='', ADMIN_DELIVERY_POLL_ATTEMPT=0;
 let WITHDRAW_LEASE_TIMER=null, WITHDRAW_LEASE_REFRESHING=false;
 const START_PARAM = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
 let START_PARAM_HANDLED = false;
+const FALLBACK_BOT_URL = 'https://t.me/BbGalterbot?start=help';
 
 /* Доступные шторки: фокус внутрь, Tab по кругу, Escape и возврат фокуса. */
 const SHEET_RETURN_FOCUS = new WeakMap();
@@ -1425,17 +1456,37 @@ document.querySelectorAll('[data-asub]').forEach(btn=>{
 });
 
 /* ── состояние ─────────────────────────────────────────────── */
+function openFallbackBot(){
+  try{
+    if(tg&&tg.openTelegramLink) tg.openTelegramLink(FALLBACK_BOT_URL);
+    else window.open(FALLBACK_BOT_URL,'_blank','noopener');
+  }catch(e){ toast('@BbGalterbot'); }
+}
+function renderLoadFailure(error){
+  const auth=!!(error&&(error.status===401||error.status===403));
+  const server=!!(error&&Number(error.status)>=500);
+  const title=auth?'Открой приложение из Telegram'
+    :(server?'Сервис временно недоступен':'Нет связи с сервисом');
+  const detail=auth
+    ? 'Приложение проверяет подпись Telegram. Открой чат с ботом и нажми «Открыть задания».'
+    :(server
+      ? 'Повтори запрос. Если ошибка останется, напиши в чат с ботом.'
+      : 'Проверь интернет и повтори. Если связь есть, но ошибка осталась, напиши в чат с ботом.');
+  $('loading').innerHTML='<div class="card"><div class="eyebrow"><b></b>'+
+    (auth?'Нет входа':'Не удалось подключиться')+'</div><h2 class="big">'+title+'</h2><p class="sub">'+detail+'</p>'+
+    '<div class="acts"><button class="btn btn-volt sm" id="loadRetry" type="button">Повторить</button>'+
+    '<button class="mini" id="loadBot" type="button">Открыть чат с ботом</button></div></div>';
+  $('loadRetry').onclick=()=>load();
+  $('loadBot').onclick=openFallbackBot;
+  $('loading').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  $('nav').classList.add('hidden');
+}
 async function load(){
   try{
     STATE = await api('/api/state');
   }catch(e){
-    $('loading').innerHTML =
-      '<div class="card"><div class="eyebrow"><b></b>Нет входа</div>' +
-      '<h2 class="big">Открой приложение из Telegram</h2>' +
-      '<p class="sub">Приложение проверяет подпись Telegram. По прямой ссылке ' +
-      'в браузере вход не работает — открой бота и нажми кнопку меню.</p>'+
-      '<button class="mini retry" type="button" style="width:100%;margin-top:14px">Повторить</button></div>';
-    const retry=$('loading').querySelector('.retry'); if(retry) retry.onclick=load;
+    renderLoadFailure(e);
     return;
   }
   const me = STATE.me;
@@ -1446,6 +1497,7 @@ async function load(){
   if(!$('apName').value) $('apName').value = me.name || '';
   if(!$('apCity').value) $('apCity').value = me.city || '';
   if(!$('apAbout').value) $('apAbout').value = me.about || '';
+  renderAboutCount();
   $('pCityCard').classList.toggle('hidden', !STATE.can_work);
   if(document.activeElement!==$('pCity')) $('pCity').value = me.city || '';
   const requestedCity=me.city_change_requested||'';
@@ -1568,8 +1620,9 @@ function renderTasksTab(){
     : '';
   $('waitMessage').textContent=WRITE_ACCESS_STATE!==true
     ? 'Заявка на рассмотрении. Telegram не разрешил уведомления — проверяй статус здесь или открой чат с ботом и нажми Start.'
-    : 'Ответственный одобрит её — и задания появятся здесь. Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.';
+    : 'Ответственный рассмотрит заявку. После решения статус изменится здесь, а уведомление придёт в чат с ботом.';
   $('waitBot').classList.toggle('hidden', !waiting || WRITE_ACCESS_STATE===true);
+  $('waitRefresh').classList.toggle('hidden', !waiting);
   $('worksBox').classList.toggle('hidden', !canWork);
   if(canWork) loadTasks();
 }
@@ -1608,12 +1661,13 @@ function renderHelpAndPrivacy(){
     links.appendChild(button);
   });
   const privacy=$('privacyNotice');
-  privacy.textContent='Имя, город и комментарий нужны только для рассмотрения заявки.';
+  privacy.textContent='Имя, город и комментарий нужны для заявки и подбора заданий. Сроки хранения и удаление — в политике; запрос — ответственному. Финансовая история сохраняется, исправления записываются отдельно.';
   const privacyUrl=safeHttpsUrl(STATE&&STATE.privacy_url,false);
   if(privacyUrl){
     privacy.appendChild(document.createTextNode(' '));
     const link=document.createElement('a');
-    link.href=privacyUrl; link.textContent='Как обрабатываются данные';
+    link.href=privacyUrl; link.textContent='Сроки и порядок удаления';
+    link.className='privacy-policy-link';
     link.rel='noopener noreferrer'; link.target='_blank';
     privacy.appendChild(link);
   }
@@ -1641,6 +1695,7 @@ $('waitBot').onclick = ()=>{
   try{ tg&&tg.openTelegramLink?tg.openTelegramLink(url):window.open(url,'_blank'); }
   catch(e){ toast('@'+username); }
 };
+$('waitRefresh').onclick=()=>press($('waitRefresh'),'Обновляю…',load);
 
 function renderReferral(ref){
   const count = Number(ref.count||0);
@@ -1763,7 +1818,7 @@ async function loadTasks(){
 
     $('availCnt').textContent = free.length || '';
     $('availList').innerHTML = free.length ? free.map(taskCardOpen).join('')
-      : '<div class="empty">Свободных заданий сейчас нет. Новые появляются в течение дня.<br>'+
+      : '<div class="empty">Свободных заданий сейчас нет. Загляни позже или проверь рабочую тему.<br>'+
         '<button class="mini" id="emptyTasksHelp" type="button" style="margin-top:10px">Как выполнять задания</button>'+
         '<button class="mini hidden" id="emptyTasksWork" type="button" style="margin-top:8px">Открыть рабочую тему</button></div>';
     const emptyHelp=$('emptyTasksHelp');
@@ -1837,7 +1892,7 @@ function taskBody(t){
 function taskCardOpen(t){
   return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
     (t.review_note?'<div class="dt">↩️ Доработать: '+esc(t.review_note)+'</div>':'')+
-    '<div class="acts"><button class="btn btn-volt sm" data-claim="'+t.id+'">'+
+    '<div class="acts"><button class="btn btn-volt sm" data-claim="'+t.id+'" data-claim-policy="'+esc(normalizedEvidencePolicy(t.evidence_policy))+'">'+
     'Взять задание</button></div></div>';
 }
 function taskCardMine(t){
@@ -1860,7 +1915,12 @@ function bindTasks(){
       await api('/api/tasks/claim',{method:'POST',
         body:JSON.stringify({task_id:Number(b.dataset.claim)})});
       buzz('ok'); flash(document.querySelector('[data-card="'+b.dataset.claim+'"]'));
-      toast('Задание твоё. После выполнения добавь фотоотчёт.');
+      const policy=b.dataset.claimPolicy;
+      toast(policy==='comment_only'
+        ? 'Задание твоё. После выполнения добавь комментарий.'
+        : (policy==='none'
+          ? 'Задание твоё. После выполнения отправь отчёт.'
+          : 'Задание твоё. После выполнения добавь фотоотчёт.'));
       await loadTasks();
     });
   });
@@ -2107,6 +2167,11 @@ $('wWithdraw').onclick = ()=>{
 };
 
 /* ── регистрация и вход ────────────────────────────────────── */
+function renderAboutCount(){
+  $('apAboutCount').textContent=$('apAbout').value.length+' из 600';
+}
+$('apAbout').addEventListener('input',renderAboutCount);
+renderAboutCount();
 function requestBotWriteAccess(){
   if(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.allows_write_to_pm===true){
     return Promise.resolve(true);
@@ -2129,8 +2194,15 @@ $('apSend').onclick = ()=>{
   if(about.length < 5){ reportInvalid('apAbout','Коротко напиши, что сможешь выполнять и чем будешь полезен','apError'); return; }
   press($('apSend'),'Отправляю…', async ()=>{
     WRITE_ACCESS_STATE=await requestBotWriteAccess();
-    await api('/api/apply',{method:'POST', body:JSON.stringify({
-      name:name, city:city, about:about})});
+    try{
+      await api('/api/apply',{method:'POST', body:JSON.stringify({
+        name:name, city:city, about:about})});
+    }catch(e){
+      if(e.status===409&&e.data&&e.data.error==='application_pending'){
+        await load(); return;
+      }
+      throw e;
+    }
     buzz('ok'); toast(WRITE_ACCESS_STATE!==true
       ? 'Заявка отправлена. Проверяй решение в приложении.'
       : 'Заявка отправлена!');
@@ -2242,17 +2314,20 @@ function renderTeam(){
 }
 
 async function loadTeamSearch(append){
+  const sequence=++TEAM_SEARCH_SEQUENCE;
   const q=($('adTeamSearch').value||'').trim();
   $('adTeamMeta').textContent='Ищу по всей команде…';
   try{
     const params=new URLSearchParams({q:q,sort:$('adTeamSort').value,tag:TEAM_TAG_FILTER,limit:'50'});
     if(append&&TEAM_CURSOR) params.set('cursor',TEAM_CURSOR);
     const d=await api('/api/admin/members?'+params.toString());
+    if(sequence!==TEAM_SEARCH_SEQUENCE) return;
     const incoming=d.items||d.team||[];
     const merged=append&&TEAM_REMOTE ? TEAM_REMOTE.concat(incoming) : incoming;
     merged._total=Number(d.total!=null?d.total:merged.length);
     TEAM_REMOTE=merged; TEAM_CURSOR=d.next_cursor||null; renderTeam();
   }catch(e){
+    if(sequence!==TEAM_SEARCH_SEQUENCE) return;
     if(e.status===404){ TEAM_REMOTE=null; TEAM_CURSOR=null; renderTeam(); }
     else{ $('adTeamMeta').textContent='Поиск не загрузился: '+e.message; }
   }
@@ -2300,7 +2375,9 @@ async function loadScoutQueue(kind,append){
   const cursor=applications?PENDING_CURSOR:REVIEW_CURSOR;
   const params=new URLSearchParams({kind:kind,q:(input.value||'').trim(),limit:'50'});
   if(append&&cursor) params.set('cursor',cursor);
+  const sequence=++QUEUE_REQUEST_SEQUENCE[kind];
   const d=await api('/api/admin/queue?'+params.toString());
+  if(sequence!==QUEUE_REQUEST_SEQUENCE[kind]) return;
   const items=append?(applications?PENDING_ITEMS:REVIEW_ITEMS).concat(d.items||[]):(d.items||[]);
   if(applications) renderPendingQueue(items,d.total,d.next_cursor);
   else renderReviewQueue(items,d.total,d.next_cursor);
@@ -2558,6 +2635,7 @@ async function loadAdmin(){
     if(templates.some(t=>t.key===selectedTemplate)) $('ntTemplate').value=selectedTemplate;
 
     renderGrantedList(d.granted || []);
+    renderManualGrantHistory(d.manual_grants || []);
     startWithdrawalLeaseClock();
     scheduleAdminDeliveryRefresh(op);
     bindAdmin();
@@ -3073,8 +3151,32 @@ $('ntPhoto').onchange = async ()=>{
 };
 $('ntPhotoClear').onclick = ()=>{ clearTaskPhoto(); buzz('tap'); };
 
+const TASK_CREATE_STORAGE_KEY='bibitasks_task_create_draft';
 let TASK_WIZARD_STEP=1, TASK_PREVIEW_BODY=null, TASK_DRAFT_OPERATION_ID=null;
-function setWizardStep(step){
+function taskDraftSignature(body){
+  const raw=JSON.stringify(body||{});
+  let a=2166136261,b=2246822519;
+  for(let i=0;i<raw.length;i++){
+    const code=raw.charCodeAt(i);
+    a=Math.imul(a^code,16777619);
+    b=Math.imul(b^code,3266489917);
+  }
+  return raw.length+':'+(a>>>0).toString(16)+':'+(b>>>0).toString(16);
+}
+function persistedTaskCreateOperation(body){
+  const signature=taskDraftSignature(body);
+  try{
+    const saved=JSON.parse(sessionStorage.getItem(TASK_CREATE_STORAGE_KEY)||'null');
+    if(saved&&saved.id&&saved.signature===signature) return saved.id;
+  }catch(e){}
+  const id=newOperationId();
+  try{ sessionStorage.setItem(TASK_CREATE_STORAGE_KEY,JSON.stringify({id:id,signature:signature})); }catch(e){}
+  return id;
+}
+function clearTaskCreateOperation(){
+  try{ sessionStorage.removeItem(TASK_CREATE_STORAGE_KEY); }catch(e){}
+}
+function setWizardStep(step,focusHeading){
   TASK_WIZARD_STEP=Math.max(1,Math.min(3,Number(step)||1));
   document.querySelectorAll('.wizard-step').forEach(x=>x.classList.toggle('hidden',Number(x.dataset.wstep)!==TASK_WIZARD_STEP));
   document.querySelectorAll('.wizard-progress i').forEach((x,i)=>x.classList.toggle('on',i<TASK_WIZARD_STEP));
@@ -3084,6 +3186,13 @@ function setWizardStep(step){
   refreshTaskSlotMinimum();
   clearInvalid(['ntTitle','ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd','ntReward','ntBudgetCap'],'ntError');
   window.scrollTo(0,0);
+  if(focusHeading!==false){
+    const heading=document.querySelector('.wizard-step:not(.hidden) h2');
+    if(heading&&heading.getClientRects().length){
+      heading.tabIndex=-1;
+      setTimeout(()=>heading.focus({preventScroll:true}),0);
+    }
+  }
 }
 function refreshTaskSlotMinimum(){
   const soon=new Date(Date.now()+60000);
@@ -3148,7 +3257,7 @@ function openTaskPreview(body){
       body.max_participants+' '+plural(body.max_participants,'исполнитель','исполнителя','исполнителей')+' · '+esc(evidence)+'</span></div>'+
     '<div class="notice"><b>'+(body.announce?'Будет поставлено в очередь приватной OPS-группы':'Только в приложении')+'</b><br>'+
       (body.slot_start?esc(fmtSlot(body.slot_start,body.slot_end)):'Без ограничения по времени')+'</div>';
-  TASK_PREVIEW_BODY=body; TASK_DRAFT_OPERATION_ID=newOperationId();
+  TASK_PREVIEW_BODY=body; TASK_DRAFT_OPERATION_ID=persistedTaskCreateOperation(body);
   $('ntPublish').textContent=$('ntMode').value==='personal'?'Назначить':'Опубликовать';
   $('taskPreviewSheet').classList.remove('hidden');
 }
@@ -3158,7 +3267,7 @@ $('ntCreate').onclick=()=>{
   const body=collectTaskBody(), error=taskValidation(body,TASK_WIZARD_STEP);
   if(error){
     if(['ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd'].includes(error.field)
-      && TASK_WIZARD_STEP!==2) setWizardStep(2);
+      && TASK_WIZARD_STEP!==2) setWizardStep(2,false);
     reportInvalid(error.field,error.message,'ntError'); buzz('no'); return;
   }
   if(TASK_WIZARD_STEP<3){ setWizardStep(TASK_WIZARD_STEP+1); return; }
@@ -3177,8 +3286,9 @@ $('ntPublish').onclick=()=>{
     ['ntTitle','ntDetails','ntAddr','ntReward','ntBudgetCap','ntSlotStart','ntSlotEnd']
       .forEach(id=>$(id).value='');
     clearTaskPhoto();
+    clearTaskCreateOperation();
     TASK_PREVIEW_BODY=null; TASK_DRAFT_OPERATION_ID=null;
-    $('taskPreviewSheet').classList.add('hidden'); setWizardStep(1);
+    $('taskPreviewSheet').classList.add('hidden'); setWizardStep(1,false);
     $('ntRewardHint').textContent = 'Укажи награду — покажем эквивалент в минутах.';
     if(body.announce && d.announcement_status==='not_configured'){
       toast('Задание создано, но приватная OPS-группа не настроена.');
@@ -3190,12 +3300,26 @@ $('ntPublish').onclick=()=>{
     await loadAdmin();
   });
 };
-setWizardStep(1);
+setWizardStep(1,false);
 
 /* баланс вручную */
-let balanceTarget = null, balanceOperationId = null;
+let balanceTarget = null, balanceTargetName = '', BALANCE_PENDING = null;
+function financialOperation(key,payload){
+  const value=Object.assign({},payload);
+  try{
+    const saved=JSON.parse(sessionStorage.getItem(key)||'null');
+    if(saved&&saved.id&&Object.keys(value).every(k=>String(saved[k])===String(value[k]))) return saved;
+  }catch(e){}
+  const pending=Object.assign({id:newOperationId(),storageKey:key},value);
+  try{ sessionStorage.setItem(key,JSON.stringify(pending)); }catch(e){}
+  return pending;
+}
+function clearFinancialOperation(pending){
+  if(!pending||!pending.storageKey) return;
+  try{ sessionStorage.removeItem(pending.storageKey); }catch(e){}
+}
 function openBalance(uid, name){
-  balanceTarget = uid; balanceOperationId = newOperationId();
+  balanceTarget = uid; balanceTargetName = name||('ID '+uid); BALANCE_PENDING=null;
   $('balanceTitle').textContent = 'Поблагодарить ⚡ — ' + name;
   $('balanceAmount').value = ''; $('balanceReason').value = '';
   clearInvalid(['balanceAmount','balanceReason'],'balanceError');
@@ -3210,13 +3334,153 @@ $('balanceSave').onclick = ()=>{
   if(!amount){ reportInvalid('balanceAmount','Укажи сумму','balanceError'); return; }
   const reason = $('balanceReason').value.trim();
   if(!reason){ reportInvalid('balanceReason','Причина обязательна — участник увидит её в истории','balanceError'); return; }
-  press($('balanceSave'),'Сохраняю…', async ()=>{
-    await api('/api/admin/grant',{method:'POST', body:JSON.stringify({
-      user_id:balanceTarget, amount:amount, reason:reason,
-      operation_id:balanceOperationId})});
-    buzz('ok'); $('balanceSheet').classList.add('hidden');
-    toast('Баланс обновлён.'); await loadAdmin();
+  BALANCE_PENDING=financialOperation('bibitasks_manual_grant_'+balanceTarget,{
+    userId:Number(balanceTarget),amount:amount,reason:reason,name:balanceTargetName
   });
+  $('balanceConfirmBody').innerHTML='<div class="task"><div class="tt">'+esc(balanceTargetName)+'</div>'+
+    '<div class="dt">Начисление: <b>+'+amount+'⚡</b></div><div class="dt">Причина: '+esc(reason)+'</div></div>';
+  $('balanceSheet').classList.add('hidden'); $('balanceConfirmSheet').classList.remove('hidden');
+};
+$('balanceConfirmCancel').onclick=()=>{
+  $('balanceConfirmSheet').classList.add('hidden'); $('balanceSheet').classList.remove('hidden');
+};
+$('balanceConfirmSheet').onclick=e=>{ if(e.target===$('balanceConfirmSheet')) $('balanceConfirmCancel').click(); };
+$('balanceConfirm').onclick=async()=>{
+  if(!BALANCE_PENDING) return;
+  const pending=BALANCE_PENDING,button=$('balanceConfirm'),original=button.textContent;
+  button.disabled=true; button.textContent='Начисляю…';
+  try{
+    await api('/api/admin/grant',{method:'POST',body:JSON.stringify({
+      user_id:pending.userId,amount:pending.amount,reason:pending.reason,
+      operation_id:pending.id})});
+    clearFinancialOperation(pending); BALANCE_PENDING=null;
+    $('balanceConfirmSheet').classList.add('hidden'); buzz('ok');
+    toast('Баланс обновлён.'); await loadAdmin();
+  }catch(e){
+    if(e.status&&e.status<500){
+      clearFinancialOperation(pending); BALANCE_PENDING=null;
+      $('balanceConfirmSheet').classList.add('hidden');
+      $('balanceSheet').classList.remove('hidden');
+    }
+    buzz('no'); toast(e.status&&e.status<500?e.message:'Ответ не подтверждён. Повтори — двойного начисления не будет.');
+  }finally{ button.disabled=false; button.textContent=original; }
+};
+
+let MANUAL_CORRECTION_PENDING=null;
+function openManualCorrectionConfirm(pending,title,lead,buttonLabel,body){
+  MANUAL_CORRECTION_PENDING=pending;
+  $('manualCorrectionConfirmTitle').textContent=title;
+  $('manualCorrectionConfirmLead').textContent=lead;
+  $('manualCorrectionConfirmBody').innerHTML=body;
+  $('manualCorrectionConfirm').textContent=buttonLabel;
+  $('manualCorrectionConfirmSheet').classList.remove('hidden');
+}
+function renderManualGrantHistory(list){
+  const statusLabel={
+    pending:'Ждёт второго ответственного',manual_required:'Нужен полный баланс',
+    applied:'Исправлено',rejected:'Оставлено без изменений'
+  };
+  $('manualGrantHistory').innerHTML=list.length?list.map(g=>{
+    let actions='';
+    if(g.can_request_reversal){
+      actions='<button class="mini warn" data-mg-request="'+esc(g.operation_id)+'">Запросить исправление</button>';
+    }else if(g.can_decide_reversal){
+      actions='<button class="btn btn-volt sm" data-mg-decide="'+g.reversal_id+'" data-mg-decision="approve">'+
+        (g.reversal_status==='manual_required'?'Проверить и сторнировать полностью':'Подтвердить полное сторно')+'</button>'+
+        '<button class="mini" data-mg-decide="'+g.reversal_id+'" data-mg-decision="reject">Оставить начисление</button>';
+    }else if(g.reversal_wait_reason){
+      actions='<button class="mini" type="button" disabled>'+esc(g.reversal_wait_reason)+'</button>';
+    }
+    return '<div class="ledger"><div style="flex:1;min-width:0"><div class="rs">'+
+      esc(g.full_name||('ID '+g.user_id))+' · +'+Number(g.amount||0)+'⚡</div>'+
+      '<div class="dtm">'+fmtDate(g.created_at)+' · '+esc(g.reason||'Без причины')+'</div>'+
+      '<div class="dtm">Начислил: '+esc(g.maker_name||(g.maker_id?('ID '+g.maker_id):'ответственный'))+'</div>'+
+      (g.requested_by?'<div class="dtm">Исправление запросил: '+esc(g.requester_name||('ID '+g.requested_by))+'</div>':'')+
+      (g.decided_by?'<div class="dtm">Проверил: '+esc(g.checker_name||('ID '+g.decided_by))+'</div>':'')+
+      (g.reversal_status?'<div class="meta"><span class="pill '+(g.reversal_status==='manual_required'?'warn':'on')+'">'+
+        esc(statusLabel[g.reversal_status]||g.reversal_status)+'</span></div>':'')+
+      (g.reversal_reason?'<div class="dt">Причина исправления: '+esc(g.reversal_reason)+'</div>':'')+
+      (g.manual_reason?'<div class="dt">'+esc(g.manual_reason)+'</div>':'')+
+      (actions?'<div class="acts">'+actions+'</div>':'')+'</div></div>';
+  }).join(''):'<div class="empty">Ручных начислений пока нет.</div>';
+  $('manualGrantHistory').querySelectorAll('[data-mg-request]').forEach(button=>{
+    button.onclick=async()=>{
+      const grant=list.find(item=>item.operation_id===button.dataset.mgRequest);
+      if(!grant) return;
+      const reason=await askText({
+        title:'Запросить исправление начисления',
+        lead:'Баланс не изменится до независимой проверки второго ответственного. Частичное сторно запрещено.',
+        placeholder:'Почему начисление сделано ошибочно',required:true,
+        okLabel:'Проверить запрос'});
+      if(reason===null) return;
+      const pending=financialOperation('bibitasks_manual_reversal_request_'+grant.operation_id,{
+        action:'request',grantOperationId:grant.operation_id,reason:reason,
+        userId:Number(grant.user_id),amount:Number(grant.amount||0),name:grant.full_name||('ID '+grant.user_id)
+      });
+      openManualCorrectionConfirm(pending,'Передать исправление второму ответственному',
+        'После отправки сумма будет зарезервирована до решения другого ответственного.',
+        'Создать запрос','<div class="task"><div class="tt">'+esc(pending.name)+'</div>'+
+        '<div class="dt">Полное сторно: <b>'+pending.amount+'⚡</b></div>'+
+        '<div class="dt">Причина: '+esc(pending.reason)+'</div></div>');
+    };
+  });
+  $('manualGrantHistory').querySelectorAll('[data-mg-decide]').forEach(button=>{
+    button.onclick=async()=>{
+      const reversalId=Number(button.dataset.mgDecide),decision=button.dataset.mgDecision;
+      const grant=list.find(item=>Number(item.reversal_id)===reversalId);
+      if(!grant) return;
+      const approve=decision==='approve';
+      const note=await askText({
+        title:approve?'Подтвердить полное сторно':'Оставить начисление',
+        lead:approve
+          ? 'Система ещё раз проверит исходную проводку, полномочия и незарезервированный баланс.'
+          : 'Баланс не изменится, а проверка будет закрыта с твоим комментарием.',
+        placeholder:approve?'Что проверено вторым ответственным':'Почему начисление верно',
+        required:true,okLabel:'Проверить решение'});
+      if(note===null) return;
+      const pending=financialOperation('bibitasks_manual_reversal_decision_'+reversalId+'_'+decision,{
+        action:'decide',reversalId:reversalId,decision:decision,note:note,
+        userId:Number(grant.user_id),amount:Number(grant.amount||0),name:grant.full_name||('ID '+grant.user_id)
+      });
+      openManualCorrectionConfirm(pending,approve?'Подтвердить полное сторно':'Закрыть без изменения баланса',
+        approve?'Это окончательное финансовое решение второго ответственного.':'Исходное начисление останется на балансе.',
+        approve?'Сторнировать '+pending.amount+'⚡':'Оставить начисление',
+        '<div class="task"><div class="tt">'+esc(pending.name)+'</div>'+
+        '<div class="dt">'+(approve?'Списать полностью: ':'Оставить: ')+'<b>'+pending.amount+'⚡</b></div>'+
+        '<div class="dt">Проверка: '+esc(pending.note)+'</div></div>');
+    };
+  });
+}
+$('manualCorrectionConfirmCancel').onclick=()=>{
+  clearFinancialOperation(MANUAL_CORRECTION_PENDING); MANUAL_CORRECTION_PENDING=null;
+  $('manualCorrectionConfirmSheet').classList.add('hidden');
+};
+$('manualCorrectionConfirmSheet').onclick=e=>{
+  if(e.target===$('manualCorrectionConfirmSheet')) $('manualCorrectionConfirmCancel').click();
+};
+$('manualCorrectionConfirm').onclick=async()=>{
+  if(!MANUAL_CORRECTION_PENDING) return;
+  const pending=MANUAL_CORRECTION_PENDING,button=$('manualCorrectionConfirm'),original=button.textContent;
+  button.disabled=true; button.textContent='Сохраняю…';
+  const body=pending.action==='request'
+    ? {action:'request',grant_operation_id:pending.grantOperationId,reason:pending.reason,operation_id:pending.id}
+    : {action:'decide',reversal_id:pending.reversalId,decision:pending.decision,note:pending.note,operation_id:pending.id};
+  try{
+    const result=await api('/api/admin/grant/reversal',{method:'POST',body:JSON.stringify(body)});
+    clearFinancialOperation(pending); MANUAL_CORRECTION_PENDING=null;
+    $('manualCorrectionConfirmSheet').classList.add('hidden'); buzz('ok');
+    toast(result.status==='manual_required'?'Запрос сохранён: нужен полный баланс и второй ответственный.':
+      (pending.action==='request'?'Запрос передан второму ответственному.':
+      (result.status==='applied'?'Начисление полностью сторнировано.':'Проверка закрыта без изменения баланса.')));
+    await loadAdmin();
+  }catch(e){
+    if(e.status&&e.status<500){
+      clearFinancialOperation(pending); MANUAL_CORRECTION_PENDING=null;
+      $('manualCorrectionConfirmSheet').classList.add('hidden');
+      if(e.status===409) await loadAdmin();
+    }
+    buzz('no'); toast(e.status&&e.status<500?e.message:'Ответ не подтверждён. Повтори с тем же номером операции.');
+  }finally{ button.disabled=false; button.textContent=original; }
 };
 
 /* ── награды: каталог, редактор, выдача ────────────────────── */
@@ -3388,18 +3652,6 @@ function openGrant(userId, awardId){
 }
 $('grantCancel').onclick = ()=>$('grantSheet').classList.add('hidden');
 $('grantSheet').onclick = e=>{ if(e.target===$('grantSheet')) $('grantSheet').classList.add('hidden'); };
-$('grantSave').onclick = ()=>{
-  press($('grantSave'),'Выдаю…', async ()=>{
-    await api('/api/admin/award/grant',{method:'POST', body:JSON.stringify({
-      user_id: Number($('grantMember').value),
-      award_id: Number($('grantAward').value),
-      note: $('grantNote').value.trim(), operation_id:grantOperationId})});
-    buzz('ok'); $('grantSheet').classList.add('hidden');
-    toast('Награда выдана, участник получил сообщение.');
-    await loadAdmin(); await loadAwards();
-  });
-};
-
 function awardGrantStorageKey(uid,awardId){ return 'bibitasks_award_grant_'+uid+'_'+awardId; }
 function persistedAwardGrant(uid,awardId,note){
   const key=awardGrantStorageKey(uid,awardId), value={uid:Number(uid),awardId:Number(awardId),note:String(note||'')};
@@ -3448,7 +3700,11 @@ $('awardGrantConfirm').onclick=async()=>{
     buzz('ok'); toast('Награда выдана, участник получит сообщение.');
     await loadAdmin(); await loadAwards();
   }catch(e){
-    if(e.status&&e.status<500){ clearAwardGrant(pending); AWARD_GRANT_PENDING=null; }
+    if(e.status&&e.status<500){
+      clearAwardGrant(pending); AWARD_GRANT_PENDING=null;
+      $('awardGrantConfirmSheet').classList.add('hidden');
+      $('grantSheet').classList.remove('hidden');
+    }
     buzz('no'); toast(e.status&&e.status<500?e.message:'Ответ не подтверждён. Повтори — двойного начисления не будет.');
   }finally{ button.disabled=false; button.textContent=original; }
 };

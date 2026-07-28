@@ -30,7 +30,7 @@ backup-процесс используют общий Docker volume; запус�
   добавляйте только если IPv6 действительно настроен.
 - Зашифрованное off-host/NFS-хранилище, смонтированное, например, в
   `/mnt/bibitasks-backups`. Каталог на том же диске VPS не считается копией.
-- Публичная forum-supergroup `@bbbikefan` с названием «Бибибайк» и темами
+- Публичная forum-supergroup `@bbbikefan` с названием «Бибибайк | Сообщество помощников» и темами
   «Новости», «Болталка», «Работа», «Франшиза».
 - Отдельная private forum-supergroup без username с темой «Задания OPS».
 - `@BbGalterbot` добавлен администратором в обе группы с минимально нужными
@@ -44,6 +44,7 @@ backup-процесс используют общий Docker volume; запус�
 | Переменная | Откуда взять | Проверено |
 |---|---|---|
 | `BIBITASKS_DOMAIN` | подготовленный поддомен без `https://` | ☐ |
+| `PRIVACY_URL` | публичная HTTPS-политика со сроками хранения и порядком удаления | ☐ |
 | `GROUP_ID` | `chat_id` публичной `@bbbikefan` | ☐ |
 | `TOPIC_NEWS` | `message_thread_id` темы «Новости» | ☐ |
 | `TOPIC_CHAT` | `message_thread_id` темы «Болталка» | ☐ |
@@ -97,7 +98,7 @@ platform: linux/amd64
 Release workflow публикует SPDX SBOM и SLSA provenance.
 
 Этот образ подтверждает только прежний baseline. Он не содержит новых scripts и
-флагов candidate v1, monitor/recovery и schema 295. Поэтому приведённый digest
+флагов candidate v1, monitor/recovery и schema 296. Поэтому приведённый digest
 нельзя использовать для запуска текущего worktree v2.10.0. До публикации и
 проверки нового immutable image действует terminal **NO-GO**.
 
@@ -172,6 +173,7 @@ docker run --rm --user 0:0 -e BOT_TOKEN \
   --output /secure/bibitasks.env \
   --monitor-secrets-dir /secure \
   --public-base-url https://tasks.example.com \
+  --privacy-url https://tasks.example.com/privacy \
   --group-id -1000000000001 --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
   --webapp-shortname bibibike \

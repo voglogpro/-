@@ -17,7 +17,7 @@ def env():
     return {
         "BOT_TOKEN": "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN",
         "BOT_USERNAME": "BbGalterbot",
-        "PREFLIGHT_EXPECTED_BOT_NAME": "Бибибайк",
+        "PREFLIGHT_EXPECTED_BOT_NAME": "БибиЗадачи · Бибибайк",
         "BOT_PROFILE_DESCRIPTION": DEFAULT_BOT_DESCRIPTION,
         "BOT_PROFILE_SHORT_DESCRIPTION": DEFAULT_BOT_SHORT_DESCRIPTION,
         "BOT_MENU_TEXT": DEFAULT_BOT_MENU_TEXT,
@@ -31,7 +31,7 @@ class FakeTelegram:
         self.avatar_sequence = []
         self.state = {
             "username": "BbGalterbot",
-            "name": "Бибибайк" if current else "BibiПомощник",
+            "name": "БибиЗадачи · Бибибайк" if current else "BibiПомощник",
             "description": DEFAULT_BOT_DESCRIPTION if current else "",
             "short_description": DEFAULT_BOT_SHORT_DESCRIPTION if current else "",
             "commands": list(COMMANDS) if current else [],

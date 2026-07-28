@@ -248,6 +248,12 @@ jobs:
           caddyfile = open("deploy/Caddyfile", encoding="utf-8").read()
           assert "@sensitive_routes path /telegram/webhook/* /task-photo/* /media/*" in caddyfile
           assert "log_skip @sensitive_routes" in caddyfile
+          assert "read_header 10s" in caddyfile
+          assert "read_body   2m" in caddyfile
+          assert "write       2m" in caddyfile
+          assert "idle        2m" in caddyfile
+          assert "max_header_size 32KB" in caddyfile
+          assert "max_size 16777216" in caddyfile
           assert "http://127.0.0.1:2015" in caddyfile
           PY
       - name: Validate Caddy edge configuration

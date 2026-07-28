@@ -129,6 +129,7 @@ bonus_ledger = Table(
     Column("created_at", DateTime(timezone=True)),
     Column("operation_id", Text),
     Column("balance_after", BigInteger),
+    Column("reversal_of_ledger_id", BigInteger, fk("bonus_ledger.id")),
 )
 
 referral_rewards = Table(
@@ -287,6 +288,55 @@ manual_grant_commands = Table(
     Column("result_balance", BigInteger, nullable=False),
     CheckConstraint("amount BETWEEN 1 AND 200", name="manual_grant_positive"),
     CheckConstraint("maker_id <> user_id", name="manual_grant_distinct"),
+)
+
+manual_grant_reversals = Table(
+    "manual_grant_reversals", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column(
+        "grant_operation_id", Text, fk("manual_grant_commands.operation_id"),
+        nullable=False,
+    ),
+    Column(
+        "original_ledger_id", BigInteger, fk("bonus_ledger.id"), nullable=False,
+    ),
+    Column("user_id", BigInteger, fk("members.user_id"), nullable=False),
+    Column("amount", BigInteger, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("manual_reason", Text),
+    Column("requested_by", BigInteger, fk("members.user_id"), nullable=False),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("request_operation_id", Text, nullable=False),
+    Column("request_hash", Text, nullable=False),
+    Column("decided_by", BigInteger, fk("members.user_id")),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decision_note", Text),
+    Column("decision_operation_id", Text),
+    Column("decision_hash", Text),
+    Column("reversal_ledger_id", BigInteger, fk("bonus_ledger.id")),
+    Column("result_balance", BigInteger),
+    UniqueConstraint(
+        "request_operation_id", name="uq_manual_grant_reversal_request_operation",
+    ),
+    UniqueConstraint(
+        "decision_operation_id", name="uq_manual_grant_reversal_decision_operation",
+    ),
+    UniqueConstraint(
+        "reversal_ledger_id", name="uq_manual_grant_reversal_ledger",
+    ),
+    CheckConstraint("amount BETWEEN 1 AND 200", name="manual_grant_reversal_amount"),
+    CheckConstraint(
+        "status IN ('pending','manual_required','applied','rejected')",
+        name="manual_grant_reversal_status",
+    ),
+    CheckConstraint(
+        "requested_by <> user_id", name="manual_grant_reversal_maker_target",
+    ),
+    CheckConstraint(
+        "decided_by IS NULL OR (decided_by <> requested_by AND decided_by <> user_id)",
+        name="manual_grant_reversal_checker_distinct",
+    ),
 )
 
 admin_role_changes = Table(
@@ -589,6 +639,15 @@ Index(
     manual_grant_commands.c.created_at,
 )
 Index(
+    "idx_manual_grant_reversals_status", manual_grant_reversals.c.status,
+    manual_grant_reversals.c.requested_at, manual_grant_reversals.c.id,
+)
+Index(
+    "idx_manual_grant_one_pending_reversal",
+    manual_grant_reversals.c.grant_operation_id, unique=True,
+    postgresql_where=manual_grant_reversals.c.status.in_(("pending", "manual_required")),
+)
+Index(
     "idx_admin_role_changes_status", admin_role_changes.c.status,
     admin_role_changes.c.requested_at, admin_role_changes.c.id,
 )
@@ -623,6 +682,10 @@ Index("idx_ledger_user", bonus_ledger.c.user_id)
 Index(
     "idx_ledger_operation", bonus_ledger.c.operation_id, unique=True,
     postgresql_where=bonus_ledger.c.operation_id.is_not(None),
+)
+Index(
+    "idx_ledger_reversal_origin", bonus_ledger.c.reversal_of_ledger_id,
+    unique=True, postgresql_where=bonus_ledger.c.reversal_of_ledger_id.is_not(None),
 )
 Index(
     "idx_tasks_operation", tasks.c.operation_id, unique=True,
@@ -684,12 +747,12 @@ Index("idx_product_events_expiry", product_events.c.expires_at)
 TABLE_ORDER = tuple(metadata.tables)
 IDENTITY_TABLES = (
     "tasks", "bonus_ledger", "task_assignments", "task_evidence", "task_disputes",
-    "admin_role_changes",
+    "admin_role_changes", "manual_grant_reversals",
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
 )
 
-if len(metadata.tables) != 32:
-    raise RuntimeError(f"Expected 32 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 39:
-    raise RuntimeError("Expected exactly 39 semantic indexes")
+if len(metadata.tables) != 33:
+    raise RuntimeError(f"Expected 33 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 42:
+    raise RuntimeError("Expected exactly 42 semantic indexes")

@@ -1,9 +1,30 @@
 {
     admin off
+
+    # Caddy leaves header/body read and response write timeouts disabled by
+    # default. Bound them at the public edge so slow clients cannot retain a
+    # connection indefinitely. Two minutes still permits the Mini App's full
+    # 16 MiB photo-report request over a slow mobile uplink.
+    servers {
+        timeouts {
+            read_header 10s
+            read_body   2m
+            write       2m
+            idle        2m
+        }
+        max_header_size 32KB
+    }
 }
 
 {$BIBITASKS_DOMAIN} {
     encode zstd gzip
+
+    # Keep the edge and aiohttp limits identical (16 * 1024 * 1024 bytes).
+    # The webhook applies its stricter 1 MiB limit in main.py after validating
+    # Telegram's secret header.
+    request_body {
+        max_size 16777216
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"

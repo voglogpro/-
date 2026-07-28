@@ -14,6 +14,7 @@ import binascii
 import contextvars
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import logging
@@ -45,7 +46,7 @@ from aiogram.types import (
 
 APP_VERSION = "v2.10.0"
 BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
-SQLITE_SCHEMA_VERSION = 295
+SQLITE_SCHEMA_VERSION = 296
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -69,6 +70,20 @@ def _as_int_env(name, default=None):
         return int(str(os.getenv(name, "")).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _bounded_int_env(name, default, minimum, maximum):
+    """Read a capacity setting without silently accepting an unsafe value."""
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
 
 
 def _clean_username(raw):
@@ -161,17 +176,26 @@ PRIVACY_URL_RAW = (os.getenv("PRIVACY_URL", "") or "").strip()
 def _safe_https_url(raw):
     """Return a public HTTPS URL, never credentials or a malformed link."""
     value = str(raw or "").strip()
-    if not value:
+    if not value or any(character in value for character in "\r\n\t"):
         return None
     try:
         parsed = urlparse(value)
         port = parsed.port
     except (TypeError, ValueError):
         return None
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    try:
+        public_host = ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        public_host = bool(
+            "." in hostname
+            and hostname != "localhost"
+            and not hostname.endswith((".localhost", ".local"))
+        )
     if (
         parsed.scheme != "https" or not parsed.hostname
         or parsed.username or parsed.password
-        or port not in (None, 443)
+        or port not in (None, 443) or not public_host
     ):
         return None
     return value
@@ -187,6 +211,9 @@ TELEGRAM_RETRY_MAX_SECONDS = max(
 )
 TELEGRAM_RETRY_MAX_ATTEMPTS = max(
     2, min(10, _as_int_env("TELEGRAM_RETRY_MAX_ATTEMPTS", 10) or 10)
+)
+TELEGRAM_HANDLER_TIMEOUT_SEC = _bounded_int_env(
+    "TELEGRAM_HANDLER_TIMEOUT_SEC", 120, 10, 300,
 )
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
 WEBHOOK_ROUTE_ID = (os.getenv("WEBHOOK_ROUTE_ID", "") or "").strip()
@@ -223,11 +250,60 @@ S3_PRIVATE_BUCKET_CONFIRMED = (
 _s3_clients = {}
 API_READS_PER_MIN = max(30, int(os.getenv("API_READS_PER_MIN", "120")))
 API_WRITES_PER_MIN = max(10, int(os.getenv("API_WRITES_PER_MIN", "40")))
+API_READ_INFLIGHT_MAX = _bounded_int_env(
+    "API_READ_INFLIGHT_MAX", 32, 4, 256,
+)
+API_WRITE_INFLIGHT_MAX = _bounded_int_env(
+    "API_WRITE_INFLIGHT_MAX", 16, 2, 128,
+)
+API_HEAVY_INFLIGHT_MAX = _bounded_int_env(
+    "API_HEAVY_INFLIGHT_MAX", 4, 1, 4,
+)
+MEDIA_NORMALIZE_CONCURRENCY = _bounded_int_env(
+    "MEDIA_NORMALIZE_CONCURRENCY", 1, 1, 4,
+)
+MEDIA_NORMALIZE_MAX_WAITERS = _bounded_int_env(
+    "MEDIA_NORMALIZE_MAX_WAITERS", 3, 0, 16,
+)
+MEDIA_NORMALIZE_WAIT_TIMEOUT_SEC = _bounded_int_env(
+    "MEDIA_NORMALIZE_WAIT_TIMEOUT_SEC", 5, 1, 30,
+)
+TELEGRAM_INBOX_SOFT_LIMIT = _bounded_int_env(
+    "TELEGRAM_INBOX_SOFT_LIMIT", 100, 10, 10_000,
+)
+TELEGRAM_INBOX_HARD_LIMIT = _bounded_int_env(
+    "TELEGRAM_INBOX_HARD_LIMIT", 500, 20, 50_000,
+)
+TELEGRAM_OUTBOX_SOFT_LIMIT = _bounded_int_env(
+    "TELEGRAM_OUTBOX_SOFT_LIMIT", 100, 10, 10_000,
+)
+TELEGRAM_QUEUE_OLDEST_SOFT_SEC = _bounded_int_env(
+    "TELEGRAM_QUEUE_OLDEST_SOFT_SEC", 300, 30, 3_600,
+)
+if TELEGRAM_INBOX_HARD_LIMIT <= TELEGRAM_INBOX_SOFT_LIMIT:
+    raise RuntimeError(
+        "TELEGRAM_INBOX_HARD_LIMIT must be greater than TELEGRAM_INBOX_SOFT_LIMIT"
+    )
+if API_HEAVY_INFLIGHT_MAX > API_WRITE_INFLIGHT_MAX:
+    raise RuntimeError(
+        "API_HEAVY_INFLIGHT_MAX must not exceed API_WRITE_INFLIGHT_MAX"
+    )
 _api_rate_buckets = {}
 _api_rate_requests = 0
+_api_capacity = {
+    "active_reads": 0, "active_writes": 0, "active_heavy": 0,
+    "rejected_reads": 0, "rejected_writes": 0, "rejected_heavy": 0,
+}
+_media_capacity = {
+    "active": 0, "waiters": 0, "rejected": 0,
+}
+_media_normalize_semaphore = None
+_media_normalize_loop = None
+_media_normalize_jobs = set()
 _health_cache = {
     "checked_at": 0.0, "database_ok": False,
     "database_error": "", "outbox_dead": 0,
+    "outbox_pending": 0, "outbox_oldest_at": "",
     "inbox_dead": 0, "inbox_pending": 0, "inbox_oldest_at": "",
     "storage_ok": False,
     "media_quarantined": 0, "media_uploading_stale": 0,
@@ -237,6 +313,7 @@ _telegram_runtime = {
     "receiver_ready": False,
     "webhook_configured": False,
     "pending_update_count": 0,
+    "overload_rejected": 0,
     "last_error": "",
     "last_update_at": "",
     "checked_at": "",
@@ -245,6 +322,7 @@ _telegram_runtime = {
 _background_tasks = {}
 _shutdown_event = asyncio.Event()
 _current_update_id = contextvars.ContextVar("telegram_update_id", default=None)
+_telegram_timed_out_jobs = {}
 
 
 def _worker_alive(name):
@@ -301,6 +379,8 @@ def _validate_update_receiver_config():
         raise RuntimeError(
             "Telegram retry overrides are forbidden in production; use staging/test"
         )
+    if BIBITASKS_ENVIRONMENT == "production" and PRIVACY_URL is None:
+        raise RuntimeError("PRIVACY_URL is required in production and must be a public HTTPS URL")
     if TELEGRAM_INBOX_FERNET is None:
         raise RuntimeError("TELEGRAM_INBOX_KEY must be a valid Fernet key")
     if WITHDRAW_FERNET is None:
@@ -771,7 +851,8 @@ async def init_db():
                 created_by INTEGER,
                 created_at TEXT,
                 operation_id TEXT UNIQUE,
-                balance_after INTEGER
+                balance_after INTEGER,
+                reversal_of_ledger_id INTEGER
             )
         """)
         await db.execute("""
@@ -950,6 +1031,47 @@ async def init_db():
                 ledger_id INTEGER NOT NULL,
                 result_balance INTEGER NOT NULL,
                 CHECK(maker_id<>user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS manual_grant_reversals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                grant_operation_id TEXT NOT NULL,
+                original_ledger_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 200),
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','manual_required','applied','rejected')),
+                manual_reason TEXT,
+                requested_by INTEGER NOT NULL,
+                requested_at TEXT NOT NULL,
+                request_operation_id TEXT NOT NULL UNIQUE,
+                request_hash TEXT NOT NULL,
+                decided_by INTEGER,
+                decided_at TEXT,
+                decision_note TEXT,
+                decision_operation_id TEXT UNIQUE,
+                decision_hash TEXT,
+                reversal_ledger_id INTEGER UNIQUE,
+                result_balance INTEGER,
+                CHECK(requested_by<>user_id),
+                CHECK(decided_by IS NULL OR (
+                    decided_by<>requested_by AND decided_by<>user_id
+                )),
+                FOREIGN KEY(grant_operation_id)
+                    REFERENCES manual_grant_commands(operation_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(original_ledger_id) REFERENCES bonus_ledger(id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(user_id) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(requested_by) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(decided_by) REFERENCES members(user_id)
+                    DEFERRABLE INITIALLY DEFERRED,
+                FOREIGN KEY(reversal_ledger_id) REFERENCES bonus_ledger(id)
+                    DEFERRABLE INITIALLY DEFERRED
             )
         """)
         await db.execute("""
@@ -1367,6 +1489,7 @@ async def init_db():
             ("balance_after", "INTEGER"),
             ("assignment_id", "INTEGER"),
             ("withdrawal_id", "INTEGER"),
+            ("reversal_of_ledger_id", "INTEGER"),
         ):
             if name not in ledger_columns:
                 await db.execute(
@@ -1596,6 +1719,13 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_manual_grants_recipient_time "
             "ON manual_grant_commands(user_id, created_at)")
         await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manual_grant_reversals_status "
+            "ON manual_grant_reversals(status, requested_at, id)")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_grant_one_pending_reversal "
+            "ON manual_grant_reversals(grant_operation_id) "
+            "WHERE status IN ('pending','manual_required')")
+        await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_role_changes_status "
             "ON admin_role_changes(status, requested_at, id)")
         await db.execute(
@@ -1649,6 +1779,10 @@ async def init_db():
         await db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_operation "
             "ON bonus_ledger(operation_id) WHERE operation_id IS NOT NULL")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_reversal_origin "
+            "ON bonus_ledger(reversal_of_ledger_id) "
+            "WHERE reversal_of_ledger_id IS NOT NULL")
         await db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_operation "
             "ON tasks(operation_id) WHERE operation_id IS NOT NULL")
@@ -2056,7 +2190,8 @@ ANALYTICS_EVENTS = {
     "task_released", "task_cancelled", "task_expired", "proof_submitted",
     "task_reviewed", "task_reward_credited", "task_dispute_opened",
     "task_dispute_resolved", "city_change_requested", "city_change_decided",
-    "manual_grant_credited", "admin_role_change_requested",
+    "manual_grant_credited", "manual_grant_reversal_requested",
+    "manual_grant_reversal_resolved", "admin_role_change_requested",
     "admin_role_change_resolved", "award_granted", "award_revoked",
     "withdrawal_requested",
     "withdrawal_decided", "referral_confirmed",
@@ -2264,8 +2399,6 @@ def _request_fingerprint(data):
 
 async def _admin_active_in_tx(db, admin_id):
     """Re-authorize a privileged actor inside the write transaction."""
-    if BIBITASKS_ENVIRONMENT == "test":
-        return True
     authority_clause = (
         " AND EXISTS (SELECT 1 FROM admin_authorities aa WHERE aa.user_id=m.user_id)"
         if BIBITASKS_ENVIRONMENT == "production" else ""
@@ -2275,6 +2408,22 @@ async def _admin_active_in_tx(db, admin_id):
         "AND m.status='approved'" + authority_clause, (int(admin_id),),
     )).fetchone()
     return bool(row)
+
+
+async def _active_admin_ids_in_tx(db):
+    """List currently authorized admins under the same policy as writes."""
+    sql = (
+        "SELECT m.user_id FROM members m WHERE m.role='admin' "
+        "AND m.status='approved'"
+    )
+    if BIBITASKS_ENVIRONMENT == "production":
+        sql += (
+            " AND EXISTS (SELECT 1 FROM admin_authorities aa "
+            "WHERE aa.user_id=m.user_id)"
+        )
+    return {
+        int(row[0]) for row in await (await db.execute(sql)).fetchall()
+    }
 
 
 async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, actor_id):
@@ -2296,6 +2445,12 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
             "task_dispute_open": ("task_disputes", "open_operation_id"),
             "task_dispute_decide": ("task_disputes", "decision_operation_id"),
             "manual_grant": ("manual_grant_commands", "operation_id"),
+            "manual_grant_reversal_request": (
+                "manual_grant_reversals", "request_operation_id",
+            ),
+            "manual_grant_reversal_decision": (
+                "manual_grant_reversals", "decision_operation_id",
+            ),
             "admin_role_request": ("admin_role_changes", "request_operation_id"),
             "admin_role_decision": ("admin_role_changes", "decision_operation_id"),
             "award_grant": ("member_awards", "operation_id"),
@@ -2317,6 +2472,14 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
         ("task_disputes", "open_operation_id", "task_dispute_open"),
         ("task_disputes", "decision_operation_id", "task_dispute_decide"),
         ("manual_grant_commands", "operation_id", "manual_grant"),
+        (
+            "manual_grant_reversals", "request_operation_id",
+            "manual_grant_reversal_request",
+        ),
+        (
+            "manual_grant_reversals", "decision_operation_id",
+            "manual_grant_reversal_decision",
+        ),
         ("admin_role_changes", "request_operation_id", "admin_role_request"),
         ("admin_role_changes", "decision_operation_id", "admin_role_decision"),
         ("member_awards", "operation_id", "award_grant"),
@@ -2359,6 +2522,27 @@ async def _discretionary_totals_in_tx(db, maker_id, user_id, cutoff):
         (user_id, cutoff, user_id, cutoff),
     )).fetchone())[0] or 0)
     return maker_total, recipient_total
+
+
+async def _reserved_bonus_in_tx(db, user_id, *, exclude_reversal_id=None):
+    """Return liabilities that must survive every balance-decreasing command."""
+    task_reserved = int((await (await db.execute(
+        "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+        "FROM task_disputes WHERE user_id=? "
+        "AND status IN ('pending','manual_required')",
+        (int(user_id),),
+    )).fetchone())[0] or 0)
+    values = [int(user_id)]
+    exclusion = ""
+    if exclude_reversal_id is not None:
+        exclusion = " AND id<>?"
+        values.append(int(exclude_reversal_id))
+    manual_reserved = int((await (await db.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM manual_grant_reversals "
+        "WHERE user_id=? AND status IN ('pending','manual_required')" + exclusion,
+        values,
+    )).fetchone())[0] or 0)
+    return task_reserved + manual_reserved
 
 
 EVIDENCE_POLICY_ALIASES = {
@@ -2657,6 +2841,72 @@ async def _remove_saved_images(items):
             pass
 
 
+class MediaProcessingBusy(RuntimeError):
+    """The bounded image-normalization lane has no safe capacity left."""
+
+
+def _media_normalizer():
+    """Return the semaphore for the current server loop (also test-loop safe)."""
+    global _media_normalize_semaphore, _media_normalize_loop
+    loop = asyncio.get_running_loop()
+    if _media_normalize_loop is not loop:
+        if _media_capacity["active"] or _media_capacity["waiters"]:
+            raise RuntimeError("media normalizer event loop changed while busy")
+        _media_normalize_loop = loop
+        _media_normalize_semaphore = asyncio.Semaphore(
+            MEDIA_NORMALIZE_CONCURRENCY
+        )
+    return _media_normalize_semaphore
+
+
+async def _normalize_media_bounded(normalizer):
+    """Run Pillow off-loop with one active job and at most three waiters by default."""
+    capacity = MEDIA_NORMALIZE_CONCURRENCY + MEDIA_NORMALIZE_MAX_WAITERS
+    if _media_capacity["active"] + _media_capacity["waiters"] >= capacity:
+        _media_capacity["rejected"] += 1
+        raise MediaProcessingBusy("media_processing_busy")
+    semaphore = _media_normalizer()
+    # Reserve a bounded ticket before the first await. This prevents an
+    # unbounded asyncio.Semaphore waiter list during a photo-upload burst.
+    _media_capacity["waiters"] += 1
+    try:
+        try:
+            await asyncio.wait_for(
+                semaphore.acquire(),
+                timeout=MEDIA_NORMALIZE_WAIT_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError as exc:
+            _media_capacity["rejected"] += 1
+            raise MediaProcessingBusy("media_processing_busy") from exc
+    finally:
+        _media_capacity["waiters"] -= 1
+    _media_capacity["active"] += 1
+
+    async def run_normalizer():
+        try:
+            return await asyncio.to_thread(normalizer)
+        finally:
+            _media_capacity["active"] -= 1
+            semaphore.release()
+
+    # A cancelled/disconnected HTTP request cannot stop a thread already
+    # executing Pillow. Shield the owned job so its slot remains reserved
+    # until the actual thread completes; otherwise cancellation could exceed
+    # the configured CPU/RAM concurrency in the background.
+    job = asyncio.create_task(run_normalizer())
+    _media_normalize_jobs.add(job)
+
+    def forget_finished(completed):
+        _media_normalize_jobs.discard(completed)
+        if not completed.cancelled():
+            # Mark a post-disconnect exception as retrieved. A live caller
+            # awaiting the shield still receives the same result/exception.
+            completed.exception()
+
+    job.add_done_callback(forget_finished)
+    return await asyncio.shield(job)
+
+
 async def _save_image(
     data_url, *, purpose="task_proof", upload_operation_id=None, request_hash=None,
     admin_id=None,
@@ -2725,7 +2975,7 @@ async def _save_image(
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
             raise ValueError("Фотография повреждена или имеет опасный размер.")
 
-    normalized = await asyncio.to_thread(normalize_photo)
+    normalized = await _normalize_media_bounded(normalize_photo)
     digest = hashlib.sha256(normalized).hexdigest()
     upload_operation_id = upload_operation_id or f"adhoc:{uuid.uuid4()}"
     request_hash = request_hash or digest
@@ -2928,11 +3178,7 @@ async def add_bonus(uid, amount, reason, task_id=None, by=None, operation_id=Non
             await db.rollback()
             raise ValueError("На балансе недостаточно бибибонусов.")
         if int(amount) < 0:
-            reserved = int((await (await db.execute(
-                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
-                "FROM task_disputes "
-                "WHERE user_id=? AND status IN ('pending','manual_required')", (uid,),
-            )).fetchone())[0] or 0)
+            reserved = await _reserved_bonus_in_tx(db, uid)
             if new_balance < reserved:
                 await db.rollback()
                 raise ValueError(
@@ -3176,6 +3422,18 @@ async def _body(request):
         return {}
 
 
+def _telegram_log_identity(uid):
+    """Stable, non-reversible tag for correlating logs without Telegram IDs."""
+    secret = (TELEGRAM_INBOX_KEY or BOT_TOKEN or MEDIA_SIGNING_KEY or "local-test").encode(
+        "utf-8"
+    )
+    digest = hmac.new(
+        hashlib.sha256(b"bibitasks-log-identity:" + secret).digest(),
+        str(uid).encode("utf-8"), hashlib.sha256,
+    ).hexdigest()[:16]
+    return f"tg:{digest}"
+
+
 def _as_int(value, default=None):
     """Мягкое приведение к int: фронт может прислать строку или null."""
     try:
@@ -3188,7 +3446,7 @@ async def _send(uid, text, kb=None):
     try:
         await bot.send_message(int(uid), text, reply_markup=kb)
     except Exception:
-        logger.info("Уведомление не доставлено: %s", uid)
+        logger.info("Уведомление не доставлено: %s", _telegram_log_identity(uid))
 
 
 def _notify(uid, text, kb=None):
@@ -3555,6 +3813,22 @@ async def telegram_webhook_handler(request):
                 return _json({"error": "update_conflict"}, status=409)
             _telegram_runtime["last_update_at"] = received_at
             return _json({"ok": True, "duplicate": True})
+        active_count = int((await (await db.execute(
+            "SELECT COUNT(*) FROM telegram_update_inbox "
+            "WHERE status IN ('pending','processing')"
+        )).fetchone())[0])
+        if active_count >= TELEGRAM_INBOX_HARD_LIMIT:
+            # Telegram retries every non-2xx webhook response. Refuse before
+            # persistence when the durable local queue is full, leaving the
+            # update in Telegram instead of growing SQLite without a bound.
+            await db.rollback()
+            _telegram_runtime["overload_rejected"] += 1
+            response = _json({
+                "error": "webhook_overloaded",
+                "message": "Telegram update queue is temporarily full.",
+            }, status=503)
+            response.headers["Retry-After"] = "2"
+            return response
         await db.execute(
             "INSERT INTO telegram_update_inbox "
             "(update_id,payload_json,payload_sha256,status,attempts,available_at,received_at) "
@@ -3587,6 +3861,59 @@ async def _telegram_lease_heartbeat(update_id, worker_id, lease_lost):
             logger.exception("Telegram inbox lease heartbeat failed")
             lease_lost.set()
             return
+
+
+async def _mark_telegram_update_failed(item, worker_id, error_name):
+    """Return an owned inbox item to retry/dead without exposing exception text."""
+    attempts = int(item["attempts"] or 0) + 1
+    status = "dead" if attempts >= TELEGRAM_RETRY_MAX_ATTEMPTS else "pending"
+    delay = _telegram_retry_delay(attempts)
+    available = datetime.now(timezone.utc) + timedelta(seconds=delay)
+    failed_at = now_iso()
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        cur = await db.execute(
+            "UPDATE telegram_update_inbox SET status=?,available_at=?,"
+            "last_error=?,locked_by=NULL,locked_at=NULL,"
+            "dead_at=CASE WHEN ?='dead' THEN ? ELSE dead_at END "
+            "WHERE update_id=? AND status='processing' AND locked_by=?",
+            (
+                status, available.isoformat(), error_name,
+                status, failed_at, item["update_id"], worker_id,
+            ),
+        )
+        await db.commit()
+    return cur.rowcount == 1
+
+
+async def _finalize_timed_out_telegram_update(item, worker_id, dispatch, heartbeat):
+    """Keep the lease fenced until a cancelled handler has actually stopped."""
+    try:
+        try:
+            await dispatch
+        except BaseException:
+            pass
+        await _mark_telegram_update_failed(item, worker_id, "TimeoutError")
+    except Exception as exc:
+        logger.warning(
+            "Telegram timeout finalizer failed: %s", type(exc).__name__,
+        )
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+
+
+def _retain_timed_out_telegram_job(update_id, job):
+    _telegram_timed_out_jobs[int(update_id)] = job
+
+    def forget(completed):
+        if _telegram_timed_out_jobs.get(int(update_id)) is completed:
+            _telegram_timed_out_jobs.pop(int(update_id), None)
+        try:
+            completed.result()
+        except BaseException:
+            pass
+
+    job.add_done_callback(forget)
 
 
 async def telegram_inbox_worker():
@@ -3637,10 +3964,30 @@ async def telegram_inbox_worker():
                     item["update_id"], worker_id, lease_lost,
                 ))
                 try:
-                    await dp.feed_raw_update(bot, payload)
+                    dispatch = asyncio.create_task(dp.feed_raw_update(bot, payload))
+                    completed, _ = await asyncio.wait(
+                        {dispatch}, timeout=TELEGRAM_HANDLER_TIMEOUT_SEC,
+                    )
+                    if not completed:
+                        dispatch.cancel()
+                        timed_out_item = item
+                        finalizer = asyncio.create_task(
+                            _finalize_timed_out_telegram_update(
+                                timed_out_item, worker_id, dispatch, heartbeat,
+                            )
+                        )
+                        _retain_timed_out_telegram_job(
+                            timed_out_item["update_id"], finalizer,
+                        )
+                        logger.warning("Telegram inbox handler timed out")
+                        heartbeat = None
+                        item = None
+                        continue
+                    await dispatch
                 finally:
-                    heartbeat.cancel()
-                    await asyncio.gather(heartbeat, return_exceptions=True)
+                    if heartbeat is not None:
+                        heartbeat.cancel()
+                        await asyncio.gather(heartbeat, return_exceptions=True)
                 if lease_lost.is_set():
                     raise RuntimeError("Telegram inbox lease was lost during dispatch")
                 async with aiosqlite.connect(DB_PATH, timeout=15) as db:
@@ -3658,37 +4005,32 @@ async def telegram_inbox_worker():
             except Exception as exc:
                 logger.warning("Telegram inbox processing failed: %s", type(exc).__name__)
                 if item:
-                    attempts = int(item["attempts"] or 0) + 1
-                    status = (
-                        "dead" if attempts >= TELEGRAM_RETRY_MAX_ATTEMPTS else "pending"
+                    await _mark_telegram_update_failed(
+                        item, worker_id, type(exc).__name__,
                     )
-                    delay = _telegram_retry_delay(attempts)
-                    available = datetime.now(timezone.utc) + timedelta(seconds=delay)
-                    failed_at = now_iso()
-                    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
-                        await db.execute(
-                            "UPDATE telegram_update_inbox SET status=?,available_at=?,"
-                            "last_error=?,locked_by=NULL,locked_at=NULL,"
-                            "dead_at=CASE WHEN ?='dead' THEN ? ELSE dead_at END "
-                            "WHERE update_id=? AND status='processing' AND locked_by=?",
-                            (
-                                status, available.isoformat(), type(exc).__name__,
-                                status, failed_at, item["update_id"], worker_id,
-                            ),
-                        )
-                        await db.commit()
                 try:
                     await asyncio.wait_for(_shutdown_event.wait(), timeout=0.25)
                 except asyncio.TimeoutError:
                     pass
     finally:
         async with aiosqlite.connect(DB_PATH, timeout=15) as db:
-            await db.execute(
-                "UPDATE telegram_update_inbox SET status='pending',locked_by=NULL,"
-                "locked_at=NULL,available_at=? "
-                "WHERE status='processing' AND locked_by=?",
-                (now_iso(), worker_id),
-            )
+            active_timeouts = tuple(_telegram_timed_out_jobs)
+            if active_timeouts:
+                placeholders = ",".join("?" for _ in active_timeouts)
+                await db.execute(
+                    "UPDATE telegram_update_inbox SET status='pending',locked_by=NULL,"
+                    "locked_at=NULL,available_at=? "
+                    "WHERE status='processing' AND locked_by=? "
+                    f"AND update_id NOT IN ({placeholders})",
+                    (now_iso(), worker_id, *active_timeouts),
+                )
+            else:
+                await db.execute(
+                    "UPDATE telegram_update_inbox SET status='pending',locked_by=NULL,"
+                    "locked_at=NULL,available_at=? "
+                    "WHERE status='processing' AND locked_by=?",
+                    (now_iso(), worker_id),
+                )
             await db.commit()
 
 
@@ -3844,17 +4186,26 @@ async def api_apply(request):
     if not tg:
         return _json({"error": "auth"}, status=401)
     body = await _body(request)
-    name = (body.get("name") or "").strip()[:80]
+    name = (body.get("name") or "").strip()
     city = _city_display(body.get("city"))
-    about = (body.get("about") or "").strip()[:600]
+    about = (body.get("about") or "").strip()
     if len(name) < 2:
         return _json({"error": "name", "message": "Укажите имя."}, status=400)
+    if len(name) > 80:
+        return _json({
+            "error": "name_too_long", "message": "Имя — не более 80 символов.",
+        }, status=400)
     if len(city) < 2:
         return _json({"error": "city", "message": "Укажите город."}, status=400)
     if len(about) < 5:
         return _json({
             "error": "about",
             "message": "Коротко напишите, что сможете выполнять и чем будете полезны.",
+        }, status=400)
+    if len(about) > 600:
+        return _json({
+            "error": "about_too_long",
+            "message": "Комментарий — не более 600 символов.",
         }, status=400)
     uid = tg["id"]
     applied_at = now_iso()
@@ -5417,6 +5768,20 @@ async def api_withdraw_request(request):
                 "error": "disputed_reward",
                 "message": "Перевод временно недоступен: ответственным нужно завершить проверку одной выплаты.",
             }, status=409)
+        manual_correction = await (await db.execute(
+            "SELECT id FROM manual_grant_reversals WHERE user_id=? "
+            "AND status IN ('pending','manual_required') LIMIT 1",
+            (uid,),
+        )).fetchone()
+        if manual_correction:
+            await db.rollback()
+            return _json({
+                "error": "manual_grant_correction",
+                "message": (
+                    "Перевод временно недоступен: два ответственных проверяют "
+                    "исправление ручного начисления."
+                ),
+            }, status=409)
         pending = await (await db.execute(
             "SELECT id FROM withdrawal_requests "
             "WHERE user_id=? AND status IN ('pending','processing')",
@@ -5532,6 +5897,39 @@ async def _require_admin(request):
     if not await is_admin(tg["id"]):
         return None, _json({"error": "not_admin"}, status=403)
     return tg["id"], None
+
+
+async def _manual_grants_for_overview_in_tx(db):
+    """Return every active correction plus 100 most recent inactive grants."""
+    return await (await db.execute(
+        "SELECT c.operation_id,c.user_id,c.amount,c.reason,c.maker_id,"
+        "c.created_at,c.result_balance,recipient.full_name,maker.full_name AS maker_name,"
+        "r.id AS reversal_id,r.status AS reversal_status,"
+        "r.reason AS reversal_reason,r.manual_reason,r.requested_by,"
+        "r.requested_at,r.decided_by,r.decided_at,r.decision_note,"
+        "r.result_balance AS reversal_balance,requester.full_name AS requester_name,"
+        "checker.full_name AS checker_name "
+        "FROM manual_grant_commands c "
+        "LEFT JOIN members recipient ON recipient.user_id=c.user_id "
+        "LEFT JOIN members maker ON maker.user_id=c.maker_id "
+        "LEFT JOIN manual_grant_reversals r ON r.id=("
+        "SELECT rr.id FROM manual_grant_reversals rr "
+        "WHERE rr.grant_operation_id=c.operation_id ORDER BY rr.id DESC LIMIT 1) "
+        "LEFT JOIN members requester ON requester.user_id=r.requested_by "
+        "LEFT JOIN members checker ON checker.user_id=r.decided_by "
+        "WHERE COALESCE(r.status,'') IN ('pending','manual_required') "
+        "OR c.operation_id IN ("
+        "SELECT c2.operation_id FROM manual_grant_commands c2 "
+        "LEFT JOIN manual_grant_reversals r2 ON r2.id=("
+        "SELECT rr2.id FROM manual_grant_reversals rr2 "
+        "WHERE rr2.grant_operation_id=c2.operation_id ORDER BY rr2.id DESC LIMIT 1) "
+        "WHERE COALESCE(r2.status,'') NOT IN ('pending','manual_required') "
+        "ORDER BY c2.created_at DESC,c2.operation_id DESC LIMIT 100) "
+        "ORDER BY CASE WHEN COALESCE(r.status,'') IN ('pending','manual_required') "
+        "THEN 0 ELSE 1 END,"
+        "CASE WHEN COALESCE(r.status,'') IN ('pending','manual_required') "
+        "THEN r.requested_at END ASC,c.created_at DESC,c.operation_id DESC"
+    )).fetchall()
 
 
 async def api_admin_overview(request):
@@ -5674,13 +6072,8 @@ async def api_admin_overview(request):
             "WHERE ma.revoked_at IS NULL "
             "ORDER BY ma.id DESC"
         )).fetchall()
-        active_admin_ids = {
-            int(row[0]) for row in await (await db.execute(
-                "SELECT m.user_id FROM members m "
-                "WHERE m.role='admin' AND m.status='approved' AND EXISTS "
-                "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=m.user_id)"
-            )).fetchall()
-        }
+        manual_grants = await _manual_grants_for_overview_in_tx(db)
+        active_admin_ids = await _active_admin_ids_in_tx(db)
         role_changes = await (await db.execute(
             "SELECT rc.*,target.full_name AS user_name,"
             "maker.full_name AS requested_by_name "
@@ -5723,6 +6116,28 @@ async def api_admin_overview(request):
         "withdrawals": [_withdrawal_public(dict(r), viewer_id=uid) for r in withdrawals],
         "awards": [_award_public(dict(r)) for r in awards],
         "granted": [dict(r) for r in granted],
+        "manual_grants": [{
+            **dict(r),
+            "can_request_reversal": (
+                (r["reversal_status"] or "") in {"", "rejected"}
+                and int(r["user_id"]) != int(uid)
+                and bool(active_admin_ids - {int(uid), int(r["user_id"])})
+            ),
+            "can_decide_reversal": (
+                (r["reversal_status"] or "") in {"pending", "manual_required"}
+                and int(r["requested_by"] or 0) != int(uid)
+                and int(r["user_id"]) != int(uid)
+                and int(r["requested_by"] or 0) in active_admin_ids
+            ),
+            "reversal_wait_reason": (
+                "Ожидается второй ответственный."
+                if (r["reversal_status"] or "") in {"pending", "manual_required"}
+                and int(r["requested_by"] or 0) == int(uid) else
+                "Получатель не может проверять собственное исправление."
+                if (r["reversal_status"] or "") in {"pending", "manual_required"}
+                and int(r["user_id"]) == int(uid) else ""
+            ),
+        } for r in manual_grants],
         "role_changes": [{
             **dict(r),
             "can_decide": (
@@ -6890,12 +7305,7 @@ async def api_admin_task_dispute(request):
             member_balance = await (await db.execute(
                 "SELECT bonus FROM members WHERE user_id=?", (assignment["user_id"],),
             )).fetchone()
-            reserved = int((await (await db.execute(
-                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
-                "FROM task_disputes "
-                "WHERE user_id=? AND status IN ('pending','manual_required')",
-                (assignment["user_id"],),
-            )).fetchone())[0] or 0)
+            reserved = await _reserved_bonus_in_tx(db, assignment["user_id"])
             needs_manual_reconciliation = bool(
                 not member_balance
                 or int(member_balance["bonus"] or 0) < reserved + reward
@@ -7058,12 +7468,18 @@ async def api_admin_task_dispute(request):
             if not member or int(member["done_count"] or 0) < 1:
                 await db.rollback()
                 return _json({"error": "member_mismatch"}, status=409)
-            remaining_reserved = int((await (await db.execute(
+            task_other_reserved = int((await (await db.execute(
                 "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
                 "FROM task_disputes WHERE user_id=? "
                 "AND status IN ('pending','manual_required') AND id<>?",
                 (dispute["user_id"], dispute_id),
             )).fetchone())[0] or 0)
+            manual_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM manual_grant_reversals "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (dispute["user_id"],),
+            )).fetchone())[0] or 0)
+            remaining_reserved = task_other_reserved + manual_reserved
             balance = int(member["bonus"] or 0)
             available = max(0, balance - remaining_reserved)
             taken = min(max(0, int(dispute["reward"] or 0)), available)
@@ -7134,12 +7550,18 @@ async def api_admin_task_dispute(request):
                 await db.rollback()
                 return _json({"error": "ledger_already_reversed"}, status=409)
             new_balance = int(member["bonus"] or 0) - reward
-            remaining_reserved = int((await (await db.execute(
+            task_other_reserved = int((await (await db.execute(
                 "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
                 "FROM task_disputes "
                 "WHERE user_id=? AND status IN ('pending','manual_required') AND id<>?",
                 (dispute["user_id"], dispute_id),
             )).fetchone())[0] or 0)
+            manual_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM manual_grant_reversals "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (dispute["user_id"],),
+            )).fetchone())[0] or 0)
+            remaining_reserved = task_other_reserved + manual_reserved
             if new_balance < remaining_reserved:
                 await db.rollback()
                 return _json({
@@ -7325,11 +7747,23 @@ async def api_admin_grant(request):
             await db.rollback()
             return _json({"error": "operation_conflict"}, status=409)
         member = await (await db.execute(
-            "SELECT bonus,status FROM members WHERE user_id=?", (uid,),
+            "SELECT bonus,status,role FROM members WHERE user_id=?", (uid,),
         )).fetchone()
         if not member or member["status"] != "approved":
             await db.rollback()
             return _json({"error": "not_found"}, status=404)
+        if member["role"] == "admin" and await _admin_active_in_tx(db, uid):
+            eligible_checkers = await _active_admin_ids_in_tx(db)
+            eligible_checkers.difference_update({int(admin_id), int(uid)})
+            if not eligible_checkers:
+                await db.rollback()
+                return _json({
+                    "error": "admin_recipient",
+                    "message": (
+                        "Для начисления ответственному нужен третий действующий "
+                        "администратор, который сможет независимо проверить исправление."
+                    ),
+                }, status=409)
         if MANUAL_GRANT_DAILY_LIMIT <= 0:
             await db.rollback()
             return _json({
@@ -7395,6 +7829,392 @@ async def api_admin_grant(request):
         "operation_id": operation_id,
         "idempotent": False,
     })
+
+
+async def _api_admin_grant_reversal_request(admin_id, body, operation_id):
+    grant_operation_id = _operation_uuid(body.get("grant_operation_id"))
+    reason = " ".join(str(body.get("reason") or "").split())[:300]
+    if not grant_operation_id or len(reason) < 5:
+        return _json({
+            "error": "reason",
+            "message": "Укажи исходную операцию и проверяемую причину исправления.",
+        }, status=400)
+    request_hash = _request_fingerprint({
+        "action": "request", "grant_operation_id": grant_operation_id,
+        "reason": reason, "requester_id": int(admin_id),
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _admin_active_in_tx(db, admin_id):
+            await db.rollback()
+            return _json({"error": "admin_revoked"}, status=403)
+        registered = await (await db.execute(
+            "SELECT command_type,request_hash,actor_id FROM operation_registry "
+            "WHERE operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if not await _claim_operation_in_tx(
+            db, operation_id, "manual_grant_reversal_request",
+            request_hash, admin_id,
+        ):
+            await db.rollback()
+            if registered and (
+                registered["command_type"] == "manual_grant_reversal_request"
+                and registered["request_hash"] == request_hash
+                and int(registered["actor_id"]) == int(admin_id)
+            ):
+                return _json({"error": "operation_integrity"}, status=409)
+            return _json({"error": "operation_conflict"}, status=409)
+        replay = await (await db.execute(
+            "SELECT * FROM manual_grant_reversals WHERE request_operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if replay:
+            if replay["request_hash"] != request_hash:
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
+            await db.rollback()
+            return _json({
+                "ok": True, "reversal_id": replay["id"],
+                "status": replay["status"], "amount": replay["amount"],
+                "operation_id": operation_id, "idempotent": True,
+            })
+        if registered:
+            await db.rollback()
+            return _json({"error": "operation_integrity"}, status=409)
+        grant = await (await db.execute(
+            "SELECT c.*,l.user_id AS ledger_user_id,l.amount AS ledger_amount,"
+            "l.operation_id AS ledger_operation_id,m.full_name,m.bonus "
+            "FROM manual_grant_commands c "
+            "JOIN bonus_ledger l ON l.id=c.ledger_id "
+            "JOIN members m ON m.user_id=c.user_id "
+            "WHERE c.operation_id=?", (grant_operation_id,),
+        )).fetchone()
+        if not grant:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if (
+            int(grant["ledger_user_id"]) != int(grant["user_id"])
+            or int(grant["ledger_amount"]) != int(grant["amount"])
+            or grant["ledger_operation_id"] != grant_operation_id
+        ):
+            await db.rollback()
+            return _json({
+                "error": "grant_integrity",
+                "message": "Исходное начисление не совпадает с проводкой.",
+            }, status=409)
+        orphan_reversal = await (await db.execute(
+            "SELECT id FROM bonus_ledger WHERE reversal_of_ledger_id=? LIMIT 1",
+            (grant["ledger_id"],),
+        )).fetchone()
+        if orphan_reversal:
+            await db.rollback()
+            return _json({
+                "error": "ledger_already_reversed",
+                "message": "У исходного начисления уже есть сторнирующая проводка.",
+            }, status=409)
+        if int(grant["user_id"]) == int(admin_id):
+            await db.rollback()
+            return _json({
+                "error": "self_correction",
+                "message": "Получатель не может запрашивать исправление своей выплаты.",
+            }, status=403)
+        applied = await (await db.execute(
+            "SELECT id FROM manual_grant_reversals "
+            "WHERE grant_operation_id=? AND status='applied' LIMIT 1",
+            (grant_operation_id,),
+        )).fetchone()
+        if applied:
+            await db.rollback()
+            return _json({
+                "error": "already_reversed", "reversal_id": applied["id"],
+                "message": "Это начисление уже полностью отменено.",
+            }, status=409)
+        pending = await (await db.execute(
+            "SELECT id,status FROM manual_grant_reversals "
+            "WHERE grant_operation_id=? "
+            "AND status IN ('pending','manual_required') LIMIT 1",
+            (grant_operation_id,),
+        )).fetchone()
+        if pending:
+            await db.rollback()
+            return _json({
+                "error": "correction_pending", "reversal_id": pending["id"],
+                "status": pending["status"],
+                "message": "Исправление уже ждёт второго ответственного.",
+            }, status=409)
+        eligible = await _active_admin_ids_in_tx(db)
+        eligible.difference_update({int(admin_id), int(grant["user_id"])})
+        if not eligible:
+            await db.rollback()
+            return _json({
+                "error": "no_independent_checker",
+                "message": "Нет второго независимого ответственного для исправления.",
+            }, status=409)
+        reserved = await _reserved_bonus_in_tx(db, grant["user_id"])
+        available = max(0, int(grant["bonus"] or 0) - reserved)
+        status_value = (
+            "pending" if available >= int(grant["amount"])
+            else "manual_required"
+        )
+        manual_reason = (
+            None if status_value == "pending"
+            else "Незарезервированного баланса недостаточно для полного сторно."
+        )
+        requested_at = now_iso()
+        cursor = await db.execute(
+            "INSERT INTO manual_grant_reversals "
+            "(grant_operation_id,original_ledger_id,user_id,amount,reason,status,"
+            "manual_reason,requested_by,requested_at,request_operation_id,request_hash) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                grant_operation_id, grant["ledger_id"], grant["user_id"],
+                grant["amount"], reason, status_value, manual_reason,
+                admin_id, requested_at, operation_id, request_hash,
+            ),
+        )
+        reversal_id = cursor.lastrowid
+        await _track_event_in_tx(
+            db, "manual_grant_reversal_requested", "backend",
+            user_id=grant["user_id"], outcome=status_value,
+            dedupe_key=f"manual_grant_reversal_request:{operation_id}",
+        )
+        await _enqueue_admins_in_tx(
+            db, f"manual_grant_reversal:{reversal_id}:requested",
+            f"⚠️ Нужна проверка исправления начисления #{reversal_id}\n"
+            f"Участник: {grant['full_name'] or '—'}\n"
+            f"Сумма: {grant['amount']} бибибонусов\nПричина: {reason}",
+        )
+        await _enqueue_outbox_in_tx(
+            db, f"manual_grant_reversal:{reversal_id}:participant", "direct",
+            {"text": (
+                f"Проверяется исправление ручного начисления на "
+                f"{grant['amount']} бибибонусов. До решения второго "
+                "ответственного эта сумма зарезервирована."
+            )}, recipient_id=grant["user_id"],
+        )
+        await db.commit()
+    return _json({
+        "ok": True, "reversal_id": reversal_id,
+        "status": status_value, "amount": int(grant["amount"]),
+        "operation_id": operation_id, "idempotent": False,
+    })
+
+
+async def _api_admin_grant_reversal_decide(admin_id, body, operation_id):
+    reversal_id = _as_int(body.get("reversal_id"))
+    decision = str(body.get("decision") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    if reversal_id is None or decision not in {"approve", "reject"}:
+        return _json({"error": "decision"}, status=400)
+    if len(note) < 3:
+        return _json({
+            "error": "note", "message": "Укажи, что проверил второй ответственный.",
+        }, status=400)
+    decision_hash = _request_fingerprint({
+        "action": "decide", "reversal_id": reversal_id,
+        "decision": decision, "note": note, "checker_id": int(admin_id),
+    })
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _admin_active_in_tx(db, admin_id):
+            await db.rollback()
+            return _json({"error": "admin_revoked"}, status=403)
+        registered = await (await db.execute(
+            "SELECT 1 FROM operation_registry WHERE operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if registered:
+            if not await _claim_operation_in_tx(
+                db, operation_id, "manual_grant_reversal_decision",
+                decision_hash, admin_id,
+            ):
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
+            replay = await (await db.execute(
+                "SELECT * FROM manual_grant_reversals "
+                "WHERE decision_operation_id=?", (operation_id,),
+            )).fetchone()
+            if not replay or replay["decision_hash"] != decision_hash:
+                await db.rollback()
+                return _json({"error": "operation_integrity"}, status=409)
+            await db.rollback()
+            return _json({
+                "ok": True, "reversal_id": replay["id"],
+                "status": replay["status"], "balance": replay["result_balance"],
+                "operation_id": operation_id, "idempotent": True,
+            })
+        reversal = await (await db.execute(
+            "SELECT r.*,c.maker_id,c.ledger_id AS grant_ledger_id,"
+            "l.user_id AS ledger_user_id,l.amount AS ledger_amount,"
+            "l.operation_id AS ledger_operation_id,m.full_name,m.bonus "
+            "FROM manual_grant_reversals r "
+            "JOIN manual_grant_commands c ON c.operation_id=r.grant_operation_id "
+            "JOIN bonus_ledger l ON l.id=r.original_ledger_id "
+            "JOIN members m ON m.user_id=r.user_id WHERE r.id=?",
+            (reversal_id,),
+        )).fetchone()
+        if not reversal:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if reversal["status"] not in {"pending", "manual_required"}:
+            await db.rollback()
+            return _json({
+                "error": "already_decided", "status": reversal["status"],
+                "message": "Это исправление уже обработано.",
+            }, status=409)
+        if int(reversal["requested_by"]) == int(admin_id):
+            await db.rollback()
+            return _json({
+                "error": "two_person_rule",
+                "message": "Запрос должен подтвердить другой ответственный.",
+            }, status=403)
+        if int(reversal["user_id"]) == int(admin_id):
+            await db.rollback()
+            return _json({
+                "error": "self_correction",
+                "message": "Получатель не может решать исправление своей выплаты.",
+            }, status=403)
+        if decision == "approve" and not await _admin_active_in_tx(
+            db, reversal["requested_by"],
+        ):
+            await db.rollback()
+            return _json({"error": "maker_revoked"}, status=409)
+        if (
+            int(reversal["grant_ledger_id"]) != int(reversal["original_ledger_id"])
+            or int(reversal["ledger_user_id"]) != int(reversal["user_id"])
+            or int(reversal["ledger_amount"]) != int(reversal["amount"])
+            or reversal["ledger_operation_id"] != reversal["grant_operation_id"]
+        ):
+            await db.rollback()
+            return _json({"error": "grant_integrity"}, status=409)
+        orphan_reversal = await (await db.execute(
+            "SELECT id FROM bonus_ledger WHERE reversal_of_ledger_id=? LIMIT 1",
+            (reversal["original_ledger_id"],),
+        )).fetchone()
+        if orphan_reversal:
+            await db.rollback()
+            return _json({
+                "error": "ledger_already_reversed",
+                "message": "У исходного начисления уже есть сторнирующая проводка.",
+            }, status=409)
+        result_balance = None
+        reversal_ledger_id = None
+        if decision == "approve":
+            reserved = await _reserved_bonus_in_tx(
+                db, reversal["user_id"], exclude_reversal_id=reversal_id,
+            )
+            balance = int(reversal["bonus"] or 0)
+            available = max(0, balance - reserved)
+            if available < int(reversal["amount"]):
+                if reversal["status"] != "manual_required":
+                    await db.execute(
+                        "UPDATE manual_grant_reversals SET status='manual_required',"
+                        "manual_reason=? WHERE id=? AND status='pending'",
+                        (
+                            "Незарезервированного баланса недостаточно для полного сторно.",
+                            reversal_id,
+                        ),
+                    )
+                    await db.commit()
+                else:
+                    await db.rollback()
+                return _json({
+                    "error": "manual_required", "status": "manual_required",
+                    "message": (
+                        "Полное сторно пока невозможно: незарезервированного "
+                        "баланса недостаточно. Частичное списание запрещено."
+                    ),
+                }, status=409)
+        if not await _claim_operation_in_tx(
+            db, operation_id, "manual_grant_reversal_decision",
+            decision_hash, admin_id,
+        ):
+            await db.rollback()
+            return _json({"error": "operation_conflict"}, status=409)
+        decided_at = now_iso()
+        status_value = "applied" if decision == "approve" else "rejected"
+        if decision == "approve":
+            result_balance = balance - int(reversal["amount"])
+            changed = await db.execute(
+                "UPDATE members SET bonus=? WHERE user_id=? AND bonus=?",
+                (result_balance, reversal["user_id"], balance),
+            )
+            if changed.rowcount != 1:
+                await db.rollback()
+                return _json({"error": "transition_conflict"}, status=409)
+            cursor = await db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,created_by,created_at,operation_id,"
+                "balance_after,reversal_of_ledger_id) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    reversal["user_id"], -int(reversal["amount"]),
+                    f"Исправление начисления: {reversal['reason']}", admin_id,
+                    decided_at, f"manual_grant_reversal:{operation_id}",
+                    result_balance, reversal["original_ledger_id"],
+                ),
+            )
+            reversal_ledger_id = cursor.lastrowid
+        updated = await db.execute(
+            "UPDATE manual_grant_reversals SET status=?,decided_by=?,decided_at=?,"
+            "decision_note=?,decision_operation_id=?,decision_hash=?,"
+            "reversal_ledger_id=?,result_balance=?,manual_reason=NULL "
+            "WHERE id=? AND status IN ('pending','manual_required')",
+            (
+                status_value, admin_id, decided_at, note, operation_id,
+                decision_hash, reversal_ledger_id, result_balance, reversal_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            await db.rollback()
+            return _json({"error": "transition_conflict"}, status=409)
+        await _track_event_in_tx(
+            db, "manual_grant_reversal_resolved", "backend",
+            user_id=reversal["user_id"], outcome=status_value,
+            dedupe_key=f"manual_grant_reversal_decision:{operation_id}",
+        )
+        participant_text = (
+            f"Ручное начисление на {reversal['amount']} бибибонусов исправлено "
+            f"двумя ответственными. Новый баланс: {result_balance}.\nПричина: {note}"
+            if decision == "approve" else
+            f"Проверка ручного начисления завершена без изменения баланса.\nИтог: {note}"
+        )
+        await _enqueue_outbox_in_tx(
+            db, f"manual_grant_reversal:{reversal_id}:resolved:participant",
+            "direct", {"text": participant_text}, recipient_id=reversal["user_id"],
+        )
+        await _enqueue_admins_in_tx(
+            db, f"manual_grant_reversal:{reversal_id}:resolved",
+            f"Исправление начисления #{reversal_id}: {status_value}. "
+            "Решение проверил второй ответственный.",
+        )
+        await db.commit()
+    return _json({
+        "ok": True, "reversal_id": reversal_id, "status": status_value,
+        "balance": result_balance, "operation_id": operation_id,
+        "idempotent": False,
+    })
+
+
+async def api_admin_grant_reversal(request):
+    admin_id, err = await _require_admin(request)
+    if err is not None:
+        return err
+    body = await _body(request)
+    action = str(body.get("action") or "").strip().lower()
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if action not in {"request", "decide"} or not operation_id:
+        return _json({
+            "error": "correction_identity",
+            "message": "Нужны action и уникальный operation_id UUID.",
+        }, status=400)
+    if action == "request":
+        return await _api_admin_grant_reversal_request(
+            admin_id, body, operation_id,
+        )
+    return await _api_admin_grant_reversal_decide(admin_id, body, operation_id)
 
 
 async def api_admin_withdraw_account(request):
@@ -7815,8 +8635,11 @@ async def check_subscription(uid):
         return None
     try:
         member = await bot.get_chat_member(chat, int(uid))
-    except Exception as e:
-        logger.warning("Не удалось проверить подписку %s: %s", uid, e)
+    except Exception as exc:
+        logger.warning(
+            "Не удалось проверить подписку %s (%s)",
+            _telegram_log_identity(uid), type(exc).__name__,
+        )
         return None
     status = getattr(member, "status", "")
     status = getattr(status, "value", status)
@@ -7943,6 +8766,18 @@ async def _admin_demotion_block_in_tx(db, user_id):
     for dispute in disputes:
         if not (remaining - {int(dispute["opened_by"]), int(dispute["user_id"])}):
             return "Снятие роли оставит открытый спор без независимого проверяющего."
+    corrections = await (await db.execute(
+        "SELECT requested_by,user_id FROM manual_grant_reversals "
+        "WHERE status IN ('pending','manual_required')"
+    )).fetchall()
+    for correction in corrections:
+        if int(correction["requested_by"]) == int(user_id):
+            return "Сначала заверши запрошенное исправление ручного начисления."
+        if not (
+            remaining
+            - {int(correction["requested_by"]), int(correction["user_id"])}
+        ):
+            return "Снятие роли оставит исправление начисления без второго проверяющего."
     return ""
 
 
@@ -8637,12 +9472,7 @@ async def api_admin_award_revoke(request):
             balance_row = await (await db.execute(
                 "SELECT bonus FROM members WHERE user_id=?",
                 (row["user_id"],))).fetchone()
-            reserved = int((await (await db.execute(
-                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
-                "FROM task_disputes "
-                "WHERE user_id=? AND status IN ('pending','manual_required')",
-                (row["user_id"],),
-            )).fetchone())[0] or 0)
+            reserved = await _reserved_bonus_in_tx(db, row["user_id"])
             # Частичный отзыв исказил бы аудит: награда была бы помечена снятой,
             # хотя часть её бонуса осталась бы у участника.
             available = max(0, (int(balance_row[0]) if balance_row else 0) - reserved)
@@ -8904,6 +9734,15 @@ async def api_health(request):
                         outbox_dead = int((await (await db.execute(
                             "SELECT COUNT(*) FROM task_outbox WHERE status='dead'"
                         )).fetchone())[0])
+                        outbox_pending = int((await (await db.execute(
+                            "SELECT COUNT(*) FROM task_outbox "
+                            "WHERE status IN ('pending','sending')"
+                        )).fetchone())[0])
+                        outbox_oldest_row = await (await db.execute(
+                            "SELECT MIN(created_at) FROM task_outbox "
+                            "WHERE status IN ('pending','sending')"
+                        )).fetchone()
+                        outbox_oldest_at = str(outbox_oldest_row[0] or "")
                         inbox_dead = int((await (await db.execute(
                             "SELECT COUNT(*) FROM telegram_update_inbox WHERE status='dead'"
                         )).fetchone())[0])
@@ -8930,6 +9769,8 @@ async def api_health(request):
                 except Exception as exc:
                     database_error = type(exc).__name__
                     outbox_dead = -1
+                    outbox_pending = -1
+                    outbox_oldest_at = ""
                     inbox_dead = -1
                     inbox_pending = -1
                     inbox_oldest_at = ""
@@ -8941,6 +9782,8 @@ async def api_health(request):
                     database_ok=database_ok,
                     database_error=database_error,
                     outbox_dead=outbox_dead,
+                    outbox_pending=outbox_pending,
+                    outbox_oldest_at=outbox_oldest_at,
                     inbox_dead=inbox_dead,
                     inbox_pending=inbox_pending,
                     inbox_oldest_at=inbox_oldest_at,
@@ -8951,20 +9794,31 @@ async def api_health(request):
     database_ok = bool(_health_cache["database_ok"])
     database_error = str(_health_cache["database_error"])
     outbox_dead = int(_health_cache["outbox_dead"])
+    outbox_pending = int(_health_cache["outbox_pending"])
+    outbox_oldest_at = str(_health_cache["outbox_oldest_at"])
     inbox_dead = int(_health_cache["inbox_dead"])
     inbox_pending = int(_health_cache["inbox_pending"])
     inbox_oldest_at = str(_health_cache["inbox_oldest_at"])
-    inbox_stale = False
-    if inbox_oldest_at:
+    def queue_oldest_is_stale(value):
+        if not value:
+            return False
         try:
-            oldest = datetime.fromisoformat(inbox_oldest_at)
+            oldest = datetime.fromisoformat(value)
             if oldest.tzinfo is None:
                 oldest = oldest.replace(tzinfo=timezone.utc)
-            inbox_stale = (
+            return (
                 datetime.now(timezone.utc) - oldest
-            ).total_seconds() > 300
+            ).total_seconds() > TELEGRAM_QUEUE_OLDEST_SOFT_SEC
         except ValueError:
-            inbox_stale = True
+            return True
+    inbox_stale = queue_oldest_is_stale(inbox_oldest_at)
+    outbox_stale = queue_oldest_is_stale(outbox_oldest_at)
+    inbox_backlogged = bool(
+        inbox_pending >= TELEGRAM_INBOX_SOFT_LIMIT or inbox_stale
+    )
+    outbox_backlogged = bool(
+        outbox_pending >= TELEGRAM_OUTBOX_SOFT_LIMIT or outbox_stale
+    )
     storage_ok = bool(_health_cache["storage_ok"])
     media_quarantined = int(_health_cache["media_quarantined"])
     media_uploading_stale = int(_health_cache["media_uploading_stale"])
@@ -8975,7 +9829,8 @@ async def api_health(request):
     healthy = bool(
         database_ok and storage_ok and os.path.exists(INDEX_PATH)
         and os.path.exists(LOGO_PATH) and BOT_TOKEN and WITHDRAW_FERNET is not None
-        and outbox_dead == 0 and not inbox_stale and inbox_crypto_ok
+        and outbox_dead == 0 and not inbox_backlogged and not outbox_backlogged
+        and inbox_crypto_ok
         and media_quarantined == 0 and media_uploading_stale == 0
         and receiver_ready and workers_ok
     )
@@ -8996,16 +9851,27 @@ async def api_health(request):
         "withdrawal_encryption_ready": WITHDRAW_FERNET is not None,
         "telegram_inbox_encryption_ready": TELEGRAM_INBOX_FERNET is not None,
         "outbox_dead": outbox_dead,
+        "outbox_pending": outbox_pending,
+        "outbox_oldest_at": outbox_oldest_at,
+        "outbox_stale": outbox_stale,
+        "outbox_backlogged": outbox_backlogged,
+        "outbox_soft_limit": TELEGRAM_OUTBOX_SOFT_LIMIT,
         "telegram_update_mode": TELEGRAM_UPDATE_MODE,
         "telegram_receiver_ready": receiver_ready,
         "webhook_configured": bool(_telegram_runtime["webhook_configured"]),
         "webhook_pending_updates": _telegram_runtime["pending_update_count"],
         "webhook_last_error": _telegram_runtime["last_error"],
+        "webhook_overload_rejected": _telegram_runtime["overload_rejected"],
         "telegram_checked_at": _telegram_runtime["checked_at"],
         "telegram_inbox_pending": inbox_pending,
         "telegram_inbox_dead": inbox_dead,
         "telegram_inbox_oldest_at": inbox_oldest_at,
         "telegram_inbox_stale": inbox_stale,
+        "telegram_inbox_backlogged": inbox_backlogged,
+        "telegram_inbox_soft_limit": TELEGRAM_INBOX_SOFT_LIMIT,
+        "telegram_inbox_hard_limit": TELEGRAM_INBOX_HARD_LIMIT,
+        "api_capacity": dict(_api_capacity),
+        "media_processing_capacity": dict(_media_capacity),
         "lifecycle_worker_alive": _worker_alive("lifecycle"),
         "outbox_worker_alive": _worker_alive("outbox"),
         "telegram_inbox_worker_alive": _worker_alive("telegram_inbox"),
@@ -9032,6 +9898,18 @@ async def error_middleware(request, handler):
     """Любой сбой отдаём как JSON, иначе фронт показывает пустую «Ошибку»."""
     try:
         return await handler(request)
+    except MediaProcessingBusy:
+        response = _json({
+            "error": "media_processing_busy",
+            "message": (
+                "Сейчас одновременно обрабатывается много фотографий. "
+                "Подожди несколько секунд и повтори отправку — отчёт не изменяй."
+            ),
+        }, status=503)
+        response.headers["Retry-After"] = str(
+            MEDIA_NORMALIZE_WAIT_TIMEOUT_SEC
+        )
+        return response
     except web.HTTPException:
         raise
     except Exception:
@@ -9094,11 +9972,59 @@ async def rate_limit_middleware(request, handler):
     return await handler(request)
 
 
+_HEAVY_API_PATHS = frozenset({
+    "/api/tasks/complete",
+    "/api/admin/task/create",
+})
+
+
+def _capacity_response(kind):
+    _api_capacity[f"rejected_{kind}"] += 1
+    response = _json({
+        "error": "server_busy",
+        "message": (
+            "Сейчас приложением одновременно пользуется много людей. "
+            "Подожди несколько секунд и повтори запрос."
+        ),
+    }, status=503)
+    response.headers["Retry-After"] = "3"
+    return response
+
+
+@web.middleware
+async def capacity_middleware(request, handler):
+    """Fail fast before handlers parse JSON; retain per-user rate limiting."""
+    if not request.path.startswith("/api/") or request.method == "OPTIONS":
+        return await handler(request)
+    read = request.method in {"GET", "HEAD"}
+    lane = "reads" if read else "writes"
+    limit = API_READ_INFLIGHT_MAX if read else API_WRITE_INFLIGHT_MAX
+    if _api_capacity[f"active_{lane}"] >= limit:
+        return _capacity_response(lane)
+    heavy = not read and request.path in _HEAVY_API_PATHS
+    if heavy and _api_capacity["active_heavy"] >= API_HEAVY_INFLIGHT_MAX:
+        return _capacity_response("heavy")
+    # No await occurs between checking and reserving. aiohttp runs one event
+    # loop per pilot process, so the counters form a fail-fast admission gate
+    # rather than an unbounded semaphore waiter queue.
+    _api_capacity[f"active_{lane}"] += 1
+    if heavy:
+        _api_capacity["active_heavy"] += 1
+    try:
+        return await handler(request)
+    finally:
+        _api_capacity[f"active_{lane}"] -= 1
+        if heavy:
+            _api_capacity["active_heavy"] -= 1
+
+
 async def start_api_server():
     runner = None
     try:
         app = web.Application(
-            middlewares=[error_middleware, rate_limit_middleware],
+            middlewares=[
+                error_middleware, rate_limit_middleware, capacity_middleware,
+            ],
             client_max_size=16 * 1024 * 1024,
         )
         app.router.add_route("OPTIONS", "/{tail:.*}", _options)
@@ -9136,6 +10062,9 @@ async def start_api_server():
         app.router.add_post("/api/admin/task/approve", api_admin_task_approve)
         app.router.add_post("/api/admin/task/dispute", api_admin_task_dispute)
         app.router.add_post("/api/admin/grant", api_admin_grant)
+        app.router.add_post(
+            "/api/admin/grant/reversal", api_admin_grant_reversal,
+        )
         app.router.add_post("/api/admin/withdraw/account", api_admin_withdraw_account)
         app.router.add_post("/api/admin/withdraw/handoff", api_admin_withdraw_handoff)
         app.router.add_post("/api/admin/withdraw/decide", api_admin_withdraw_decide)

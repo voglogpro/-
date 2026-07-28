@@ -50,8 +50,15 @@ def main():
             "(user_id,full_name,city,help_type,about,role,status,bonus,done_count,"
             "referred_by,created_at,approved_at,approved_by,applied_at,chat_xp,ref_confirmed) "
             "VALUES (102,'Исполнитель','Краснодар','Парковки','Тест fixture',"
-            "'helper','approved',50,1,101,?,?,?,?,0,1)",
+            "'helper','approved',60,1,101,?,?,?,?,0,1)",
             (stamp, stamp, 101, stamp),
+        )
+        db.execute(
+            "INSERT INTO members "
+            "(user_id,full_name,city,role,status,bonus,done_count,referred_by,"
+            "created_at,approved_at,approved_by,applied_at,chat_xp,ref_confirmed) "
+            "VALUES (103,'Второй администратор','Краснодар','admin','approved',0,0,NULL,"
+            "?,?,101,?,0,0)", (stamp, stamp, stamp),
         )
         db.execute(
             "INSERT INTO admin_authorities "
@@ -132,6 +139,31 @@ def main():
             "INSERT INTO task_review_commands "
             "(operation_id,assignment_id,request_hash,result_status,created_at) "
             "VALUES ('review-fixture',2001,'review-request','done',?)", (stamp,),
+        )
+        manual_ledger_id = db.execute(
+            "INSERT INTO bonus_ledger "
+            "(user_id,amount,reason,created_by,created_at,operation_id,balance_after) "
+            "VALUES (102,10,'Ручная благодарность',101,?,'manual-grant-fixture',60)",
+            (stamp,),
+        ).lastrowid
+        db.execute(
+            "INSERT INTO manual_grant_commands "
+            "(operation_id,request_hash,user_id,amount,reason,maker_id,created_at,"
+            "ledger_id,result_balance) VALUES ('manual-grant-fixture',?,102,10,"
+            "'Тестовая благодарность',101,?,?,60)",
+            ("1" * 64, stamp, manual_ledger_id),
+        )
+        db.execute(
+            "INSERT INTO manual_grant_reversals "
+            "(id,grant_operation_id,original_ledger_id,user_id,amount,reason,status,"
+            "requested_by,requested_at,request_operation_id,request_hash,decided_by,"
+            "decided_at,decision_note,decision_operation_id,decision_hash) "
+            "VALUES (5601,'manual-grant-fixture',?,102,10,'Проверка fixture','rejected',"
+            "101,?,'manual-reversal-request-fixture',?,103,?,'Начисление верно',"
+            "'manual-reversal-decision-fixture',?)",
+            (
+                manual_ledger_id, stamp, "2" * 64, stamp, "3" * 64,
+            ),
         )
         db.execute(
             "INSERT INTO task_disputes "
@@ -220,11 +252,22 @@ def main():
             "balance_after) VALUES (8001,101,?,'fixture',0,'Тест',101,?,"
             "'award-fixture',0)", (award_id, stamp),
         )
-        db.execute(
+        db.executemany(
             "INSERT INTO operation_registry "
             "(operation_id,command_type,request_hash,actor_id,created_at) "
-            "VALUES ('award-fixture','award_grant',?,101,?)",
-            ("f" * 64, stamp),
+            "VALUES (?,?,?,?,?)",
+            [
+                ("award-fixture", "award_grant", "f" * 64, 101, stamp),
+                ("manual-grant-fixture", "manual_grant", "1" * 64, 101, stamp),
+                (
+                    "manual-reversal-request-fixture",
+                    "manual_grant_reversal_request", "2" * 64, 101, stamp,
+                ),
+                (
+                    "manual-reversal-decision-fixture",
+                    "manual_grant_reversal_decision", "3" * 64, 103, stamp,
+                ),
+            ],
         )
         db.commit()
     print(application.DB_PATH)

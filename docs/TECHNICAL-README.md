@@ -39,6 +39,7 @@ export BOT_TOKEN='значение из BotFather'
 python scripts/bootstrap_production_env.py \
   --output /etc/bibitasks/bibitasks.env \
   --public-base-url https://tasks.example.com \
+  --privacy-url https://tasks.example.com/privacy \
   --group-id -1000000000001 \
   --ops-group-id -1000000000002 \
   --admin-id 111111111 --admin-id 222222222 \
@@ -52,7 +53,8 @@ unset BOT_TOKEN
 создаёт независимые webhook/media/encryption secrets и выставляет режим `0600`
 на Linux. ID тем намеренно не имеют значений по умолчанию: возьмите реальные
 `message_thread_id` из созданных Telegram-тем. HTTPS origin разрешён только на
-стандартном порту 443. После настройки реального Telegram выполните read-only проверку,
+стандартном порту 443. Production-генератор также требует публичную HTTPS-политику
+со сроками хранения и порядком удаления. После настройки реального Telegram выполните read-only проверку,
 которая не отправляет и не удаляет сообщения:
 
 ```bash

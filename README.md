@@ -270,12 +270,12 @@ Telegram-бот @BbGalterbot
 
 ### Тесты
 
-**234 автоматические проверки** в локальном прогоне: 224 PASS и 10 ожидаемых
+**265 автоматических проверок** в локальном прогоне: 255 PASS и 10 ожидаемых
 environment-specific SKIP (POSIX/Docker/PostgreSQL интеграции выполняет CI):
 
-- **200** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
+- **218** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
 - **7** — точность PostgreSQL migration harness
-- **27** — интерфейс Mini App в Playwright
+- **40** — интерфейс Mini App в Playwright
 
 ---
 
@@ -318,7 +318,7 @@ Production требует не только `BOT_TOKEN`, но и отдельн�
 | v2.3.0 | светлая и тёмная тема с сохранением выбора, новый графический логотип |
 | v2.9.0 | профессиональный pilot-контур: приватный OPS, фото и шаблоны, поиск и теги, payout lease, durable Telegram ingress/outbox, backup/restore, CI и миграционный harness PostgreSQL |
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
-| v2.10.0 candidate | повторная анкета без телефона, постоянная помощь, единый лимит ручных наград, maker-checker ролей, schema 295, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
+| v2.10.0 candidate | анкета без телефона, maker-checker ролей и полного сторно ручных начислений, bounded API/media/Telegram admission, обязательная privacy policy, schema 296, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
 
 ---
 

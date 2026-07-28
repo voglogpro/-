@@ -25,8 +25,9 @@ SOURCE_COLUMNS = {
     "task_evidence": "id assignment_id task_id user_id kind photo_file media_id sha256 submission_operation_id attempt is_current created_at".split(),
     "withdrawal_requests": "id user_id amount status created_at decided_by decided_at note operation_id request_hash account_type account_ciphertext account_masked account_fingerprint key_version decision_operation_id decision_request_hash provider external_reference external_reference_canonical reject_reason account_purged_at processing_by processing_at".split(),
     "withdrawal_events": "id withdrawal_id event_type from_status to_status actor_id operation_id created_at metadata_json".split(),
-    "bonus_ledger": "id user_id amount reason task_id assignment_id withdrawal_id created_by created_at operation_id balance_after".split(),
+    "bonus_ledger": "id user_id amount reason task_id assignment_id withdrawal_id created_by created_at operation_id balance_after reversal_of_ledger_id".split(),
     "manual_grant_commands": "operation_id request_hash user_id amount reason maker_id created_at ledger_id result_balance".split(),
+    "manual_grant_reversals": "id grant_operation_id original_ledger_id user_id amount reason status manual_reason requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash reversal_ledger_id result_balance".split(),
     "admin_role_changes": "id user_id from_role to_role reason status requested_by requested_at request_operation_id request_hash decided_by decided_at decision_note decision_operation_id decision_hash".split(),
     "operation_registry": "operation_id command_type request_hash actor_id created_at".split(),
     "admin_authorities": "user_id origin granted_operation_id granted_at".split(),
@@ -50,7 +51,7 @@ IDENTITY_TABLES = {
     "awards", "tasks", "task_assignments", "task_evidence",
     "withdrawal_requests", "withdrawal_events", "bonus_ledger",
     "member_awards", "task_outbox", "product_events", "task_disputes",
-    "admin_role_changes",
+    "admin_role_changes", "manual_grant_reversals",
 }
 
 EXPECTED_SOURCE_INDEXES = {
@@ -58,12 +59,14 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_task_assignments_review", "idx_assignment_one_active",
     "idx_assignment_one_done", "idx_assignment_decision_operation",
     "idx_task_disputes_status", "idx_manual_grants_maker_time",
-    "idx_manual_grants_recipient_time", "idx_admin_role_changes_status",
+    "idx_manual_grants_recipient_time", "idx_manual_grant_reversals_status",
+    "idx_manual_grant_one_pending_reversal", "idx_admin_role_changes_status",
     "idx_admin_role_change_one_pending",
     "idx_withdrawals_user", "idx_withdrawals_one_pending",
     "idx_withdrawals_operation", "idx_withdrawals_decision_operation",
     "idx_withdrawals_external_reference_canonical", "idx_withdrawal_events_request",
-    "idx_ledger_user", "idx_ledger_operation", "idx_tasks_operation",
+    "idx_ledger_user", "idx_ledger_operation", "idx_ledger_reversal_origin",
+    "idx_tasks_operation",
     "idx_task_evidence_task", "idx_tasks_completion_operation",
     "idx_tasks_cancel_operation", "idx_assignments_completion_operation",
     "idx_assignments_release_operation", "idx_member_awards_user",
@@ -79,8 +82,8 @@ EXPECTED_SOURCE_INDEXES = {
 # Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
 # PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
 # rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "a374bc81f0dd699bba703bd97f3c4919ca1b02668959590d45754f5011272b0d"
-EXPECTED_SOURCE_USER_VERSION = 295
+EXPECTED_SOURCE_SCHEMA_SHA256 = "86517096c4a9c06e119283767ccfd0bb4af4051b565fe570b543bf96b6eb381a"
+EXPECTED_SOURCE_USER_VERSION = 296
 
 
 class HarnessError(RuntimeError):

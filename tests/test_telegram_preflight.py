@@ -14,11 +14,12 @@ def base_env():
         "OPS_GROUP_ID": "-1002222222222",
         "PUBLIC_BASE_URL": "https://tasks.example.test",
         "MINI_APP_URL": "https://tasks.example.test/",
+        "PRIVACY_URL": "https://tasks.example.test/privacy",
         "WEBAPP_SHORTNAME": "bibibike",
         "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "TELEGRAM_UPDATE_MODE": "webhook",
         "WEBHOOK_ROUTE_ID": "route_" + "x" * 40,
-        "PREFLIGHT_EXPECTED_BOT_NAME": "Бибибайк",
+        "PREFLIGHT_EXPECTED_BOT_NAME": "БибиЗадачи · Бибибайк",
         "PREFLIGHT_EXPECTED_GROUP_TITLE": "Бибибайк | Сообщество помощников",
         "PREFLIGHT_EXPECTED_GROUP_DESCRIPTION": "Помогаем Бибибайку в своём городе и получаем бибибонусы на поездки. Задания: @BbGalterbot → «Открыть задания». 1 бонус = 1 ₽, минута — 8,5 ₽.",
         "BOT_PROFILE_DESCRIPTION": "Полное описание",
@@ -39,7 +40,7 @@ def good_api(method, params=None):
             "has_main_web_app": True,
         }
     if method == "getMyName":
-        return {"name": "Бибибайк"}
+        return {"name": "БибиЗадачи · Бибибайк"}
     if method == "getMyDescription":
         return {"description": "Полное описание"}
     if method == "getMyShortDescription":
@@ -134,6 +135,32 @@ class TelegramPreflightTests(unittest.TestCase):
         env = {**base_env(), "PUBLIC_BASE_URL": "https://tasks.example.test:9443"}
         report = run_preflight(env, good_api)
         self.assertFalse(report["ok"])
+
+    def test_production_requires_safe_public_privacy_url_before_telegram(self):
+        for value in (
+            "",
+            "http://tasks.example.test/privacy",
+            "https://user:pass@tasks.example.test/privacy",
+            "https://tasks.example.test:9443/privacy",
+            "https://localhost/privacy",
+            "https://127.0.0.1/privacy",
+            "https://tasks.example.test/privacy\nX-Injected: yes",
+        ):
+            called = False
+
+            def should_not_call(_method, _params=None):
+                nonlocal called
+                called = True
+                return {}
+
+            with self.subTest(value=value):
+                report = run_preflight({**base_env(), "PRIVACY_URL": value}, should_not_call)
+                self.assertFalse(report["ok"])
+                self.assertFalse(called)
+                self.assertIn(
+                    "PRIVACY_URL",
+                    {item["name"] for item in report["checks"] if item["status"] == "fail"},
+                )
 
     def test_production_cannot_disable_main_app_or_accept_stale_profile(self):
         disabled = {**base_env(), "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "false"}

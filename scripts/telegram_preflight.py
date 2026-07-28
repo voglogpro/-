@@ -8,6 +8,7 @@ check passes; warnings are allowed.
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import sys
 import argparse
@@ -111,6 +112,33 @@ def _canonical_app_url(value):
     return f"https://{parsed.netloc}/"
 
 
+def _safe_https_url(value):
+    raw = str(value or "").strip()
+    if any(char in raw for char in "\r\n\t"):
+        return ""
+    parsed = urllib.parse.urlparse(raw)
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    try:
+        public_host = ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        public_host = bool(
+            "." in hostname
+            and hostname != "localhost"
+            and not hostname.endswith((".localhost", ".local"))
+        )
+    if (
+        parsed.scheme != "https" or not parsed.hostname
+        or parsed.username or parsed.password or port not in (None, 443)
+        or not public_host
+    ):
+        return ""
+    return parsed.geturl()
+
+
 def run_preflight(env=None, api_call: ApiCall | None = None):
     env = os.environ if env is None else env
     checks: list[Check] = []
@@ -126,6 +154,7 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     update_mode = str(env.get("TELEGRAM_UPDATE_MODE", "")).strip().casefold()
     public_origin = _origin(env.get("PUBLIC_BASE_URL"))
     mini_app_url = _canonical_app_url(env.get("MINI_APP_URL"))
+    privacy_url = _safe_https_url(env.get("PRIVACY_URL"))
     webapp_shortname = str(env.get("WEBAPP_SHORTNAME", "")).strip()
     require_main_mini_app = _truthy(env.get("PREFLIGHT_REQUIRE_MAIN_MINI_APP"))
     route_id = str(env.get("WEBHOOK_ROUTE_ID", "")).strip()
@@ -154,6 +183,11 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     add("chat separation", bool(group_id and ops_group_id and group_id != ops_group_id), "public and OPS chats differ", "public and OPS chats must differ")
     add("PUBLIC_BASE_URL", bool(public_origin), "HTTPS origin configured", "must be an HTTPS origin without path/query")
     add("MINI_APP_URL", bool(mini_app_url and mini_app_url == public_origin + "/"), "matches deployment root", "must be the HTTPS deployment root")
+    add(
+        "PRIVACY_URL", bool(privacy_url),
+        "public HTTPS policy configured",
+        "must be a public HTTPS URL without credentials",
+    )
     add("WEBAPP_SHORTNAME", bool(webapp_shortname), "configured", "missing")
     add("bot profile copy", bool(expected_description and expected_short_description and expected_menu_text), "configured", "description, short description or menu text is missing")
     add(

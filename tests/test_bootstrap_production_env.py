@@ -27,6 +27,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
             topic_work=13,
             topic_franchise=14,
             ops_topic_tasks=21,
+            privacy_url="https://tasks.example.test/privacy",
         )
 
     def test_generated_production_secrets_are_independent_and_complete(self):
@@ -42,6 +43,7 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(values["TELEGRAM_UPDATE_MODE"], "webhook")
         self.assertEqual(values["DATA_DIR"], "/app/data")
         self.assertEqual(values["MINI_APP_URL"], "https://tasks.example.test/")
+        self.assertEqual(values["PRIVACY_URL"], "https://tasks.example.test/privacy")
         self.assertEqual(values["TOPIC_WORK"], "13")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
         self.assertEqual(values["MANUAL_GRANT_DAILY_LIMIT"], "300")
@@ -88,6 +90,24 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "HTTPS origin"):
             build_environment(config, token)
+
+    def test_privacy_url_is_required_and_rejects_unsafe_values(self):
+        token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"
+        for value in (
+            "",
+            "http://tasks.example.test/privacy",
+            "https://user:pass@tasks.example.test/privacy",
+            "https://tasks.example.test:9443/privacy",
+            "https://localhost/privacy",
+            "https://127.0.0.1/privacy",
+            "https://tasks.example.test/privacy\nX-Injected: yes",
+        ):
+            with self.subTest(value=value):
+                config = BootstrapConfig(
+                    **{**self.config().__dict__, "privacy_url": value}
+                )
+                with self.assertRaisesRegex(ValueError, "PRIVACY_URL"):
+                    build_environment(config, token)
 
     def test_monitor_secrets_are_separate_restricted_and_never_overwritten(self):
         token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"

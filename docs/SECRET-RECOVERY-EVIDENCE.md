@@ -158,7 +158,7 @@ docker run --rm --network none --read-only \
     --restore-report /input/restore-report.json \
     --commit <full-40-char-commit> \
     --image ghcr.io/voglogpro/bibitasks@sha256:<64-hex-digest> \
-    --schema-version 295 \
+    --schema-version 296 \
     --release-version 'v2.10.0' \
     --preflight-report /input/preflight.json \
     --readiness-report /input/readiness.json \

@@ -24,18 +24,19 @@ from scripts.pg_harness_common import (
 
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
-        self.assertEqual(ALEMBIC_HEAD, "0004_authority_registry")
+        self.assertEqual(ALEMBIC_HEAD, "0005_manual_grant_reversals")
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
-        self.assertEqual(len(metadata.tables), 32)
-        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 39)
+        self.assertEqual(len(metadata.tables), 33)
+        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 42)
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
-        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 295)
+        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 296)
 
     def test_incremental_foreign_keys_match_canonical_deferrability(self):
         versions = Path(__file__).resolve().parents[1] / "migrations" / "versions"
         for filename in (
             "0003_admin_financial_controls.py",
             "0004_authority_operation_registry.py",
+            "0005_manual_grant_reversals.py",
         ):
             ddl = (versions / filename).read_text(encoding="utf-8")
             self.assertGreater(ddl.count("FOREIGN KEY"), 0, filename)

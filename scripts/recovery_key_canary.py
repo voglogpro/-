@@ -38,7 +38,7 @@ _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # One-time bridge only: v2.9.1 is schema 293, while the destination release
-# migrates to schema 295 after this canary has been enrolled.
+# migrates to schema 296 after this canary has been enrolled.
 LEGACY_V291_ENROLL_SCHEMA_VERSION = 293
 
 

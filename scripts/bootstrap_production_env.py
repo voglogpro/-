@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import re
 import secrets
@@ -42,6 +43,7 @@ class BootstrapConfig:
     topic_work: int
     topic_franchise: int
     ops_topic_tasks: int
+    privacy_url: str
     bot_username: str = "BbGalterbot"
     group_username: str = "bbbikefan"
     expected_bot_name: str = "БибиЗадачи · Бибибайк"
@@ -51,6 +53,33 @@ class BootstrapConfig:
 
 def _clean_username(value):
     return str(value or "").strip().lstrip("@")
+
+
+def _safe_privacy_url(value):
+    raw = str(value or "").strip()
+    if any(char in raw for char in "\r\n\t"):
+        return ""
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    try:
+        public_host = ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        public_host = bool(
+            "." in hostname
+            and hostname != "localhost"
+            and not hostname.endswith((".localhost", ".local"))
+        )
+    if (
+        parsed.scheme != "https" or not parsed.hostname
+        or parsed.username or parsed.password or port not in (None, 443)
+        or not public_host
+    ):
+        return ""
+    return raw
 
 
 def validate_config(config: BootstrapConfig, bot_token: str):
@@ -85,6 +114,8 @@ def validate_config(config: BootstrapConfig, bot_token: str):
         errors.append("WEBAPP_SHORTNAME is malformed")
     if not config.expected_bot_name.strip() or not config.expected_group_title.strip():
         errors.append("expected Telegram brand names must not be empty")
+    if not _safe_privacy_url(config.privacy_url):
+        errors.append("PRIVACY_URL must be a public HTTPS URL without credentials")
     if not TOKEN_RE.fullmatch(bot_token.strip()):
         errors.append("BOT_TOKEN is missing or malformed")
     topics = (
@@ -97,7 +128,7 @@ def validate_config(config: BootstrapConfig, bot_token: str):
         errors.append("public topic IDs must be distinct")
     if any("\n" in value or "\r" in value for value in (
         config.expected_bot_name, config.expected_group_title,
-        config.withdraw_contact,
+        config.withdraw_contact, config.privacy_url,
     )):
         errors.append("text values must not contain line breaks")
     if errors:
@@ -132,6 +163,7 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "BOT_PROFILE_DESCRIPTION": DEFAULT_BOT_DESCRIPTION,
         "BOT_PROFILE_SHORT_DESCRIPTION": DEFAULT_BOT_SHORT_DESCRIPTION,
         "BOT_MENU_TEXT": DEFAULT_BOT_MENU_TEXT,
+        "PRIVACY_URL": _safe_privacy_url(config.privacy_url),
         "REQUIRED_CHAT": f"@{group_username}",
         "REQUIRED_CHAT_URL": f"https://t.me/{group_username}",
         "GROUP_USERNAME": group_username,
@@ -149,12 +181,23 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "PORT": "3000",
         "DATA_DIR": "/app/data",
         "MEDIA_STORAGE": "local",
+        "API_READ_INFLIGHT_MAX": "32",
+        "API_WRITE_INFLIGHT_MAX": "16",
+        "API_HEAVY_INFLIGHT_MAX": "4",
+        "MEDIA_NORMALIZE_CONCURRENCY": "1",
+        "MEDIA_NORMALIZE_MAX_WAITERS": "3",
+        "MEDIA_NORMALIZE_WAIT_TIMEOUT_SEC": "5",
         "TELEGRAM_UPDATE_MODE": "webhook",
         "TELEGRAM_RETRY_BASE_SECONDS": "2",
         "TELEGRAM_RETRY_MAX_SECONDS": "3600",
         "TELEGRAM_RETRY_MAX_ATTEMPTS": "10",
+        "TELEGRAM_HANDLER_TIMEOUT_SEC": "120",
         "PUBLIC_BASE_URL": origin,
         "WEBHOOK_MAX_CONNECTIONS": "8",
+        "TELEGRAM_INBOX_SOFT_LIMIT": "100",
+        "TELEGRAM_INBOX_HARD_LIMIT": "500",
+        "TELEGRAM_OUTBOX_SOFT_LIMIT": "100",
+        "TELEGRAM_QUEUE_OLDEST_SOFT_SEC": "300",
         "RIDE_RUB_PER_MIN": "8.5",
         "WITHDRAW_MIN": "1000",
         "WITHDRAW_PROCESSING_LEASE_MIN": "30",
@@ -271,6 +314,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate a production BibiTasks env file")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--public-base-url", required=True)
+    parser.add_argument("--privacy-url", required=True)
     parser.add_argument("--group-id", type=_supergroup_id, required=True)
     parser.add_argument("--ops-group-id", type=_supergroup_id, required=True)
     parser.add_argument("--admin-id", type=_positive_id, action="append", required=True)
@@ -298,6 +342,7 @@ def main():
         topic_work=args.topic_work,
         topic_franchise=args.topic_franchise,
         ops_topic_tasks=args.ops_topic_tasks,
+        privacy_url=args.privacy_url,
         bot_username=args.bot_username,
         group_username=args.group_username,
     )

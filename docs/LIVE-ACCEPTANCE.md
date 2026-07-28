@@ -57,7 +57,7 @@ PASS:
 - OPS — private forum supergroup без публичного username;
 - в `ADMIN_IDS` минимум два действующих скаута;
 - menu button ведёт на production HTTPS origin.
-- имя бота точно «Бибибайк», а аватар — зелёный персонаж из `logo.jpg`, без
+- имя бота точно «БибиЗадачи · Бибибайк», а аватар — зелёный персонаж из `logo.jpg`, без
   старого «BibiПомощник» и букв «ББ»;
 - `getMe` подтверждает Main Mini App, а named-ссылка
   `https://t.me/BbGalterbot/bibibike` открывается отдельно;

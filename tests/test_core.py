@@ -59,6 +59,22 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         await main.init_db()
 
+    async def _seed_admin(self, user_id):
+        await main.upsert_member(
+            user_id, full_name=f"Ответственный {user_id}",
+            status="approved", role="admin",
+        )
+
+    async def test_test_environment_never_bypasses_admin_role(self):
+        unknown_id, helper_id, admin_id = 899_900_001, 899_900_002, 899_900_003
+        await main.upsert_member(
+            helper_id, full_name="Помощник", status="approved", role="helper",
+        )
+        await self._seed_admin(admin_id)
+        self.assertFalse(await main.is_admin(unknown_id))
+        self.assertFalse(await main.is_admin(helper_id))
+        self.assertTrue(await main.is_admin(admin_id))
+
     async def test_atomic_first_login(self):
         uid = 900_000_001
         await asyncio.gather(*(
@@ -78,6 +94,8 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         for unsafe in (
             "http://example.org/privacy", "javascript:alert(1)",
             "https://user:password@example.org/privacy", "https://example.org:8443/privacy",
+            "https://localhost/privacy", "https://127.0.0.1/privacy",
+            "https://10.0.0.1/privacy", "https://policy.local/privacy",
         ):
             self.assertIsNone(main._safe_https_url(unsafe))
         original = (main.PRIVACY_URL_RAW, main.PRIVACY_URL)
@@ -342,6 +360,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dead_telegram_update_redrive_is_audited_and_idempotent(self):
         original_admin = main._require_admin
+        await self._seed_admin(42)
 
         async def allow_admin(_request):
             return 42, None
@@ -1124,6 +1143,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             main.os.remove = original_remove
 
     async def test_media_gc_and_task_attach_never_leave_deleted_reference(self):
+        await self._seed_admin(42)
         media_id = str(uuid.uuid4())
         filename = f"{media_id}.jpg"
         content = b"old-ready-photo"
@@ -1226,6 +1246,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_task_announcement_uses_private_ops_and_dead_retry(self):
         original_admin = main._require_admin
+        await self._seed_admin(42)
         original_config = (
             main.OPS_GROUP_ID, main.OPS_GROUP_USERNAME,
             main.GROUP_ID, main.GROUP_USERNAME,
@@ -1516,6 +1537,43 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(audit_count, 1)
 
+    async def test_application_limits_reject_instead_of_silently_truncating(self):
+        original_auth = main._auth_user
+        current_uid = 901_270_001
+
+        async def allow_user(_request):
+            return {"id": current_uid, "username": "limits_user"}
+
+        main._auth_user = allow_user
+        try:
+            too_long_name = await main.api_apply(DummyRequest({
+                "name": "А" * 81, "city": "Краснодар", "about": "Могу помогать",
+            }))
+            self.assertEqual(too_long_name.status, 400)
+            self.assertEqual(response_json(too_long_name)["error"], "name_too_long")
+
+            current_uid += 1
+            too_long_about = await main.api_apply(DummyRequest({
+                "name": "Анна", "city": "Краснодар", "about": "а" * 601,
+            }))
+            self.assertEqual(too_long_about.status, 400)
+            self.assertEqual(response_json(too_long_about)["error"], "about_too_long")
+
+            current_uid += 1
+            exact_limits = await main.api_apply(DummyRequest({
+                "name": "А" * 80, "city": "Краснодар", "about": "а" * 600,
+            }))
+        finally:
+            main._auth_user = original_auth
+
+        self.assertEqual(exact_limits.status, 200)
+        with sqlite3.connect(main.DB_PATH) as db:
+            stored = db.execute(
+                "SELECT LENGTH(full_name),LENGTH(about) FROM members WHERE user_id=?",
+                (current_uid,),
+            ).fetchone()
+        self.assertEqual(stored, (80, 600))
+
     async def test_admin_application_queue_is_paginated_and_searchable(self):
         original_admin = main._require_admin
 
@@ -1613,6 +1671,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_task_create_retry_returns_one_task(self):
         original = main._require_admin
+        await self._seed_admin(42)
 
         async def allow_admin(_request):
             return 42, None
@@ -1814,6 +1873,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_can_finally_reject_without_payout(self):
         worker_id, admin_id = 905_000_001, 905_000_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(
             worker_id, full_name="Исполнитель", city="Краснодар",
             status="approved", role="helper",
@@ -1862,6 +1922,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_review_decision_is_idempotent_under_concurrency(self):
         worker_id, admin_id = 906_000_001, 906_000_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(
             worker_id, full_name="Исполнитель", status="approved", role="helper",
         )
@@ -1917,6 +1978,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_replay_survives_revision(self):
         worker_id, admin_id = 906_100_001, 906_100_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
         with sqlite3.connect(main.DB_PATH) as db:
             task_id = db.execute(
@@ -1966,6 +2028,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_completion_command_is_backfilled_before_revision(self):
         worker_id, admin_id = 906_200_001, 906_200_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
         operation_id = str(uuid.uuid4())
         note = "Старый принятый отчёт"
@@ -2019,6 +2082,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_revision_deadline_expires_even_when_task_already_expired(self):
         worker_id, admin_id = 907_000_001, 907_000_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(worker_id, full_name="Исполнитель", status="approved")
         past = (main.datetime.now(main.timezone.utc) - main.timedelta(minutes=2)).isoformat()
         future = (main.datetime.now(main.timezone.utc) + main.timedelta(minutes=2)).isoformat()
@@ -2065,6 +2129,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_one_off_task_cannot_be_cancelled(self):
         admin_id = 908_000_001
+        await self._seed_admin(admin_id)
         with sqlite3.connect(main.DB_PATH) as db:
             task_id = db.execute(
                 "INSERT INTO tasks (type,title,city,address,reward,status,repeatable,created_at) "
@@ -2345,6 +2410,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_withdrawal_rejection_refunds_exactly_once(self):
         worker_id, admin_id = 940_000_001, 940_000_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(
             worker_id, full_name="Возврат", city="Краснодар",
             status="approved", role="helper", bonus=1200,
@@ -2814,6 +2880,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_city_change_is_pending_until_admin_approves(self):
         worker_id, admin_id = 911_500_001, 911_500_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(
             worker_id, full_name="Участник", city="Краснодар",
             status="approved", role="helper",
@@ -3078,6 +3145,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_award_revoke_is_all_or_nothing_when_bonus_was_spent(self):
         worker_id, admin_id = 912_200_001, 912_200_002
+        await self._seed_admin(admin_id)
         await main.upsert_member(
             worker_id, full_name="Исполнитель", status="approved",
             role="helper", bonus=5,
@@ -3308,6 +3376,295 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             (200, 1, 1, 0, 0),
         )
         self.assertEqual(outbox, ("pending",))
+
+    async def test_manual_grant_reversal_is_two_person_full_idempotent_and_linked(self):
+        maker, checker, recipient = 990_140_001, 990_140_002, 990_140_003
+        for user_id, role in (
+            (maker, "admin"), (checker, "admin"), (recipient, "helper"),
+        ):
+            await main.upsert_member(
+                user_id, full_name=f"Участник {user_id}", status="approved",
+                role=role, bonus=0,
+            )
+        original_admin = main._require_admin
+        original_environment = main.BIBITASKS_ENVIRONMENT
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        main.BIBITASKS_ENVIRONMENT = "staging"
+        grant_operation = str(uuid.uuid4())
+        request_operation = str(uuid.uuid4())
+        decision_operation = str(uuid.uuid4())
+        try:
+            grant = await main.api_admin_grant(DummyRequest({
+                "user_id": recipient, "amount": 100,
+                "reason": "Поправил парковку и прислал фото",
+                "operation_id": grant_operation,
+            }, maker))
+            request_body = {
+                "action": "request", "grant_operation_id": grant_operation,
+                "reason": "Начисление отправлено не за тот отчёт",
+                "operation_id": request_operation,
+            }
+            requested = await main.api_admin_grant_reversal(
+                DummyRequest(request_body, maker)
+            )
+            request_replay = await main.api_admin_grant_reversal(
+                DummyRequest(request_body, maker)
+            )
+            duplicate = await main.api_admin_grant_reversal(DummyRequest({
+                **request_body, "operation_id": str(uuid.uuid4()),
+            }, maker))
+            reversal_id = response_json(requested)["reversal_id"]
+            self_decision = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проводка проверена",
+                "operation_id": str(uuid.uuid4()),
+            }, maker))
+            decision_body = {
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проводка и получатель проверены",
+                "operation_id": decision_operation,
+            }
+            decided = await main.api_admin_grant_reversal(
+                DummyRequest(decision_body, checker)
+            )
+            decision_replay = await main.api_admin_grant_reversal(
+                DummyRequest(decision_body, checker)
+            )
+            decision_conflict = await main.api_admin_grant_reversal(DummyRequest({
+                **decision_body, "note": "Другой результат проверки",
+            }, checker))
+        finally:
+            main._require_admin = original_admin
+            main.BIBITASKS_ENVIRONMENT = original_environment
+        self.assertEqual(
+            (
+                grant.status, requested.status, request_replay.status,
+                duplicate.status, self_decision.status, decided.status,
+                decision_replay.status, decision_conflict.status,
+            ),
+            (200, 200, 200, 409, 403, 200, 200, 409),
+        )
+        self.assertTrue(response_json(request_replay)["idempotent"])
+        self.assertTrue(response_json(decision_replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            original_ledger = db.execute(
+                "SELECT id FROM bonus_ledger WHERE operation_id=?",
+                (grant_operation,),
+            ).fetchone()[0]
+            reversal = db.execute(
+                "SELECT status,requested_by,decided_by,reversal_ledger_id,result_balance "
+                "FROM manual_grant_reversals WHERE id=?", (reversal_id,),
+            ).fetchone()
+            debit = db.execute(
+                "SELECT amount,reversal_of_ledger_id,balance_after FROM bonus_ledger "
+                "WHERE id=?", (reversal[3],),
+            ).fetchone()
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (recipient,),
+            ).fetchone()[0]
+            command_types = {
+                row[0] for row in db.execute(
+                    "SELECT command_type FROM operation_registry WHERE operation_id IN (?,?,?)",
+                    (grant_operation, request_operation, decision_operation),
+                )
+            }
+            events = db.execute(
+                "SELECT event_name,COUNT(*) FROM product_events "
+                "WHERE event_name LIKE 'manual_grant_reversal_%' GROUP BY event_name"
+            ).fetchall()
+            correction_outbox = db.execute(
+                "SELECT COUNT(*) FROM task_outbox "
+                "WHERE event_key LIKE 'manual_grant_reversal:%'",
+            ).fetchone()[0]
+        self.assertEqual(reversal[:3], ("applied", maker, checker))
+        self.assertIsNotNone(reversal[3])
+        self.assertEqual(reversal[4], 0)
+        self.assertEqual(debit, (-100, original_ledger, 0))
+        self.assertEqual(balance, 0)
+        self.assertEqual(command_types, {
+            "manual_grant", "manual_grant_reversal_request",
+            "manual_grant_reversal_decision",
+        })
+        self.assertEqual(dict(events), {
+            "manual_grant_reversal_requested": 1,
+            "manual_grant_reversal_resolved": 1,
+        })
+        self.assertGreaterEqual(correction_outbox, 4)
+
+    async def test_manual_grant_reversal_manual_required_never_partially_debits(self):
+        maker, checker, recipient = 990_145_001, 990_145_002, 990_145_003
+        for user_id, role in (
+            (maker, "admin"), (checker, "admin"), (recipient, "helper"),
+        ):
+            await main.upsert_member(
+                user_id, full_name=str(user_id), status="approved", role=role, bonus=0,
+            )
+        original_admin = main._require_admin
+        original_environment = main.BIBITASKS_ENVIRONMENT
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        main.BIBITASKS_ENVIRONMENT = "staging"
+        grant_operation = str(uuid.uuid4())
+        decision_operation = str(uuid.uuid4())
+        try:
+            await main.api_admin_grant(DummyRequest({
+                "user_id": recipient, "amount": 100, "reason": "Помощь на парковке",
+                "operation_id": grant_operation,
+            }, maker))
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute("UPDATE members SET bonus=20 WHERE user_id=?", (recipient,))
+                db.commit()
+            requested = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "request", "grant_operation_id": grant_operation,
+                "reason": "Начисление оказалось ошибочным",
+                "operation_id": str(uuid.uuid4()),
+            }, maker))
+            reversal_id = response_json(requested)["reversal_id"]
+            blocked = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверил исходную проводку",
+                "operation_id": decision_operation,
+            }, checker))
+            with self.assertRaisesRegex(ValueError, "зарезервирована"):
+                await main.add_bonus(
+                    recipient, -1, "Попытка списания", operation_id=str(uuid.uuid4()),
+                )
+            with sqlite3.connect(main.DB_PATH) as db:
+                before_topup = db.execute(
+                    "SELECT bonus FROM members WHERE user_id=?", (recipient,),
+                ).fetchone()[0]
+                debit_count = db.execute(
+                    "SELECT COUNT(*) FROM bonus_ledger WHERE reversal_of_ledger_id IS NOT NULL"
+                ).fetchone()[0]
+                decision_registry = db.execute(
+                    "SELECT COUNT(*) FROM operation_registry WHERE operation_id=?",
+                    (decision_operation,),
+                ).fetchone()[0]
+                db.execute("UPDATE members SET bonus=100 WHERE user_id=?", (recipient,))
+                db.commit()
+            decided = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверил исходную проводку",
+                "operation_id": decision_operation,
+            }, checker))
+        finally:
+            main._require_admin = original_admin
+            main.BIBITASKS_ENVIRONMENT = original_environment
+        self.assertEqual(response_json(requested)["status"], "manual_required")
+        self.assertEqual((blocked.status, before_topup, debit_count, decision_registry), (409, 20, 0, 0))
+        self.assertEqual((decided.status, response_json(decided)["status"]), (200, "applied"))
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(
+                db.execute("SELECT bonus FROM members WHERE user_id=?", (recipient,)).fetchone()[0],
+                0,
+            )
+
+    async def test_manual_grant_reversal_authority_and_outbox_fail_closed(self):
+        maker, checker, recipient, admin_recipient = (
+            990_147_001, 990_147_002, 990_147_003, 990_147_004,
+        )
+        for user_id, role in (
+            (maker, "admin"), (checker, "admin"), (recipient, "helper"),
+            (admin_recipient, "admin"),
+        ):
+            await main.upsert_member(
+                user_id, full_name=str(user_id), status="approved", role=role, bonus=0,
+            )
+        original_admin = main._require_admin
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        original_outbox = main._enqueue_outbox_in_tx
+
+        async def allow_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_admin
+        main.BIBITASKS_ENVIRONMENT = "production"
+        grant_operation = str(uuid.uuid4())
+        decision_operation = str(uuid.uuid4())
+        try:
+            with sqlite3.connect(main.DB_PATH) as db:
+                stamp = main.now_iso()
+                db.executemany(
+                    "INSERT OR IGNORE INTO admin_authorities "
+                    "(user_id,origin,granted_operation_id,granted_at) VALUES (?,?,?,?)",
+                    [
+                        (maker, "manual", str(uuid.uuid4()), stamp),
+                        (checker, "manual", str(uuid.uuid4()), stamp),
+                    ],
+                )
+                db.execute("UPDATE members SET role='helper' WHERE user_id=?", (checker,))
+                db.commit()
+            admin_grant = await main.api_admin_grant(DummyRequest({
+                "user_id": admin_recipient, "amount": 10, "reason": "Нельзя админу",
+                "operation_id": str(uuid.uuid4()),
+            }, maker))
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute("UPDATE members SET role='admin' WHERE user_id=?", (checker,))
+                db.commit()
+            await main.api_admin_grant(DummyRequest({
+                "user_id": recipient, "amount": 80, "reason": "Помощь на парковке",
+                "operation_id": grant_operation,
+            }, maker))
+            requested = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "request", "grant_operation_id": grant_operation,
+                "reason": "Выбран неверный фотоотчёт",
+                "operation_id": str(uuid.uuid4()),
+            }, maker))
+            reversal_id = response_json(requested)["reversal_id"]
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute("DELETE FROM admin_authorities WHERE user_id=?", (maker,))
+                db.commit()
+            maker_revoked = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверка завершена",
+                "operation_id": decision_operation,
+            }, checker))
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "INSERT INTO admin_authorities "
+                    "(user_id,origin,granted_operation_id,granted_at) VALUES (?,?,?,?)",
+                    (maker, "manual", str(uuid.uuid4()), main.now_iso()),
+                )
+                db.commit()
+
+            async def broken_outbox(*_args, **_kwargs):
+                raise RuntimeError("outbox unavailable")
+
+            main._enqueue_outbox_in_tx = broken_outbox
+            with self.assertRaisesRegex(RuntimeError, "outbox unavailable"):
+                await main.api_admin_grant_reversal(DummyRequest({
+                    "action": "decide", "reversal_id": reversal_id,
+                    "decision": "approve", "note": "Проверка завершена",
+                    "operation_id": decision_operation,
+                }, checker))
+            main._enqueue_outbox_in_tx = original_outbox
+            with sqlite3.connect(main.DB_PATH) as db:
+                after_failure = (
+                    db.execute("SELECT bonus FROM members WHERE user_id=?", (recipient,)).fetchone()[0],
+                    db.execute("SELECT status FROM manual_grant_reversals WHERE id=?", (reversal_id,)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM operation_registry WHERE operation_id=?", (decision_operation,)).fetchone()[0],
+                    db.execute("SELECT COUNT(*) FROM bonus_ledger WHERE reversal_of_ledger_id IS NOT NULL").fetchone()[0],
+                )
+            retry = await main.api_admin_grant_reversal(DummyRequest({
+                "action": "decide", "reversal_id": reversal_id,
+                "decision": "approve", "note": "Проверка завершена",
+                "operation_id": decision_operation,
+            }, checker))
+        finally:
+            main._require_admin = original_admin
+            main.BIBITASKS_ENVIRONMENT = original_environment
+            main._enqueue_outbox_in_tx = original_outbox
+        self.assertEqual(admin_grant.status, 409)
+        self.assertEqual(maker_revoked.status, 409)
+        self.assertEqual(after_failure, (80, "pending", 0, 0))
+        self.assertEqual((retry.status, response_json(retry)["status"]), (200, "applied"))
 
     async def test_awards_share_manual_grant_limit_and_global_operation_namespace(self):
         maker_a, maker_b, recipient_a, recipient_b = 990_150_001, 990_150_002, 990_150_003, 990_150_004
