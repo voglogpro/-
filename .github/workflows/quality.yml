@@ -95,6 +95,17 @@ jobs:
           PY
       - name: Build production image
         run: docker build --tag bibitasks:ci .
+      - name: Install pinned Compose validator
+        shell: bash
+        run: |
+          compose="$RUNNER_TEMP/docker-compose-v5.3.1"
+          curl --fail --show-error --silent --location \
+            https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-linux-x86_64 \
+            --output "$compose"
+          echo "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959  $compose" \
+            | sha256sum --check --strict
+          chmod 0500 "$compose"
+          "$compose" version --short
       - name: Validate owner pilot stack syntax
         env:
           BIBITASKS_IMAGE: ghcr.io/voglogpro/bibitasks@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -107,14 +118,13 @@ jobs:
           mkdir -p "$BACKUP_DIR"
           touch "$BACKUP_SENTINEL"
           compose="$RUNNER_TEMP/docker-compose-v5.3.1"
-          curl --fail --show-error --silent --location \
-            https://github.com/docker/compose/releases/download/v5.3.1/docker-compose-linux-x86_64 \
-            --output "$compose"
-          echo "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959  $compose" \
-            | sha256sum --check --strict
-          chmod 0500 "$compose"
-          "$compose" version --short
-          "$compose" -f compose.pilot.yaml config --quiet
+          if ! message=$("$compose" -f compose.pilot.yaml config --quiet 2>&1); then
+            message="${message//'%'/'%25'}"
+            message="${message//$'\r'/'%0D'}"
+            message="${message//$'\n'/'%0A'}"
+            echo "::error title=Compose pilot validation failed::$message"
+            exit 1
+          fi
       - name: Validate pilot security policy
         shell: bash
         run: |
