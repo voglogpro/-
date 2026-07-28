@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 SOURCE_COLUMNS = {
-    "members": "user_id full_name username phone city help_type transport availability about tags application_note role status bonus done_count referred_by created_at approved_at approved_by applied_at chat_xp ref_confirmed".split(),
+    "members": "user_id full_name username phone city help_type transport availability about tags application_note role status bonus done_count referred_by created_at approved_at approved_by applied_at city_change_requested city_change_requested_at chat_xp ref_confirmed".split(),
     "awards": "id code emoji title description bonus repeatable active created_by created_at".split(),
     "media_objects": "id backend object_key purpose state content_type size_bytes sha256 upload_operation_id request_hash created_at ready_at delete_after deleted_at last_error reconcile_attempts version_id checked_at".split(),
     "analytics_subjects": "subject_id user_id created_at".split(),
@@ -26,8 +26,9 @@ SOURCE_COLUMNS = {
     "withdrawal_requests": "id user_id amount status created_at decided_by decided_at note operation_id request_hash account_type account_ciphertext account_masked account_fingerprint key_version decision_operation_id decision_request_hash provider external_reference external_reference_canonical reject_reason account_purged_at processing_by processing_at".split(),
     "withdrawal_events": "id withdrawal_id event_type from_status to_status actor_id operation_id created_at metadata_json".split(),
     "bonus_ledger": "id user_id amount reason task_id assignment_id withdrawal_id created_by created_at operation_id balance_after".split(),
-    "member_awards": "id user_id award_id slot bonus note granted_by granted_at operation_id balance_after revoked_at revoked_by".split(),
+    "member_awards": "id user_id award_id slot bonus note granted_by granted_at operation_id balance_after revoked_at revoked_by revoke_note revoke_operation_id revoke_request_hash".split(),
     "task_review_commands": "operation_id assignment_id request_hash result_status created_at".split(),
+    "task_disputes": "id assignment_id task_id user_id reward reason reconciliation_reason reconciliation_reference status opened_by opened_at open_operation_id open_request_hash decided_by decided_at decision_note decision_operation_id decision_request_hash".split(),
     "task_completion_commands": "operation_id assignment_id request_hash result_status created_at".split(),
     "telegram_update_inbox": "update_id payload_json payload_sha256 status attempts available_at received_at processed_at last_error locked_by locked_at dead_at redrive_operation_id redrive_request_hash redrive_reason redriven_by redriven_at".split(),
     "telegram_update_effects": "update_id effect_key created_at".split(),
@@ -44,13 +45,14 @@ TABLE_ORDER = list(SOURCE_COLUMNS)
 IDENTITY_TABLES = {
     "awards", "tasks", "task_assignments", "task_evidence",
     "withdrawal_requests", "withdrawal_events", "bonus_ledger",
-    "member_awards", "task_outbox", "product_events",
+    "member_awards", "task_outbox", "product_events", "task_disputes",
 }
 
 EXPECTED_SOURCE_INDEXES = {
     "idx_tasks_status", "idx_tasks_assigned", "idx_task_assignments_user",
     "idx_task_assignments_review", "idx_assignment_one_active",
     "idx_assignment_one_done", "idx_assignment_decision_operation",
+    "idx_task_disputes_status",
     "idx_withdrawals_user", "idx_withdrawals_one_pending",
     "idx_withdrawals_operation", "idx_withdrawals_decision_operation",
     "idx_withdrawals_external_reference_canonical", "idx_withdrawal_events_request",
@@ -58,7 +60,8 @@ EXPECTED_SOURCE_INDEXES = {
     "idx_task_evidence_task", "idx_tasks_completion_operation",
     "idx_tasks_cancel_operation", "idx_assignments_completion_operation",
     "idx_assignments_release_operation", "idx_member_awards_user",
-    "idx_member_awards_operation", "idx_task_outbox_delivery",
+    "idx_member_awards_operation", "idx_member_awards_revoke_operation",
+    "idx_task_outbox_delivery",
     "idx_telegram_inbox_delivery", "idx_telegram_inbox_redrive_operation",
     "idx_media_gc", "idx_product_events_dedupe", "idx_product_events_funnel",
     "idx_product_events_subject", "idx_product_events_task",
@@ -68,8 +71,8 @@ EXPECTED_SOURCE_INDEXES = {
 # Filled from an exact post-init_db v2.9 schema, including table SQL, ordered
 # PRAGMA column metadata, and explicit index SQL. Any semantic schema drift is
 # rejected before reading business rows.
-EXPECTED_SOURCE_SCHEMA_SHA256 = "a19c67a99efc3a7ff74c63ec309ade6674fba3a1eeed6a882684414876bec117"
-EXPECTED_SOURCE_USER_VERSION = 290
+EXPECTED_SOURCE_SCHEMA_SHA256 = "75bb7189def440e1e519b7f4e07611acef4bdac54d4cb6cd6c9afa7087c5669e"
+EXPECTED_SOURCE_USER_VERSION = 293
 
 
 class HarnessError(RuntimeError):

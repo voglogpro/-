@@ -45,13 +45,16 @@ async function openMiniApp(page, options = {}) {
   await page.route('https://telegram.org/js/telegram-web-app.js', route =>
     route.fulfill({ status: 200, contentType: 'application/javascript', body: '' })
   );
-  await page.addInitScript(startParam => {
+  await page.addInitScript(config => {
     window.Telegram = {
       WebApp: {
         initData: 'query_id=browser-test',
         initDataUnsafe: {
-          user: { id: 101, first_name: 'Анна', allows_write_to_pm: true },
-          start_param: startParam,
+          user: {
+            id: 101, first_name: 'Анна',
+            allows_write_to_pm: config.writeAccessResult === false ? false : true,
+          },
+          start_param: config.startParam,
         },
         colorScheme: 'light',
         ready() {},
@@ -63,10 +66,13 @@ async function openMiniApp(page, options = {}) {
           notificationOccurred() {},
         },
         openTelegramLink(url) { window.__openedTelegramUrl = url; },
-        requestWriteAccess(callback) { if (callback) callback(true); },
+        requestWriteAccess(callback) { if (callback) callback(config.writeAccessResult !== false); },
       },
     };
-  }, options.startParam || '');
+  }, {
+    startParam: options.startParam || '',
+    writeAccessResult: options.writeAccessResult,
+  });
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -90,6 +96,39 @@ async function openMiniApp(page, options = {}) {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ mine: [], available: [] }),
+      });
+    }
+    if (url.pathname === '/api/tasks/available' && options.tasksData) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(options.tasksData),
+      });
+    }
+    if (url.pathname === '/api/tasks/context' && options.taskContext) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(options.taskContext),
+      });
+    }
+    if (url.pathname === '/api/profile/city') {
+      currentState = state({
+        ...currentState,
+        me: {
+          ...currentState.me,
+          city_change_requested: body.action === 'cancel' ? '' : body.city,
+          city_change_requested_at: body.action === 'cancel' ? '' : '2026-07-28T12:00:00+00:00',
+        },
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true, city: currentState.me.city,
+          requested_city: body.city, requested_at: currentState.me.city_change_requested_at,
+          pending: body.action !== 'cancel',
+        }),
       });
     }
     if (url.pathname === '/api/wallet' && options.walletFailure) {
@@ -167,6 +206,108 @@ test('светлая и тёмная темы меняют фон и цвет т
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.locator('body')).toHaveCSS('color', 'rgb(15, 21, 18)');
   await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+});
+
+test('исполнитель до взятия видит формат отчёта, а после возврата — причину', async ({ page }) => {
+  await openMiniApp(page, {
+    initialState: state({ can_work: true, me: { status: 'approved' } }),
+    tasksData: {
+      available: [{
+        id: 17, title: 'Поправить парковку', type_title: 'Парковка',
+        city: 'Краснодар', address: 'ТЦ Центр', reward: 80,
+        evidence_policy: 'after_required', status: 'open',
+      }],
+      mine: [{
+        id: 18, assignment_id: 9, title: 'Проверить байки', type_title: 'Осмотр',
+        city: 'Краснодар', address: 'ул. Красная', reward: 60,
+        evidence_policy: 'comment_only', status: 'claimed',
+        review_note: 'Добавь точный номер парковки',
+      }],
+    },
+  });
+
+  await expect(page.locator('[data-card="17"]')).toContainText('Отчёт: 1–4 фото');
+  await expect(page.locator('[data-card="18"]')).toContainText('Отчёт: комментарий');
+  await expect(page.locator('[data-card="18"]')).toContainText('Вернули на доработку');
+  await expect(page.locator('[data-card="18"]')).toContainText('Добавь точный номер парковки');
+});
+
+test('не найденное задание по прямой ссылке объясняет причину', async ({ page }) => {
+  await openMiniApp(page, {
+    startParam: 'task_404',
+    initialState: state({ can_work: true, me: { status: 'approved' } }),
+    tasksData: { available: [], mine: [] },
+    taskContext: {
+      ok: true, reason: 'city_mismatch',
+      message: 'Задание относится к другому городу. Проверь город в профиле.',
+    },
+  });
+
+  await expect(page.locator('#availList [role="status"]')).toContainText('другому городу');
+});
+
+test('одобренный участник запрашивает смену города без обхода проверки', async ({ page }) => {
+  const harness = await openMiniApp(page, {
+    initialState: state({ can_work: true, me: { status: 'approved', city: 'Краснодар' } }),
+    tasksData: { available: [], mine: [] },
+  });
+  await page.locator('#nav [data-tab="tab-profile"]').click();
+  await page.locator('#pCity').fill('Орёл');
+  await page.locator('#pCitySave').click();
+
+  await expect.poll(() => harness.requests.some(item =>
+    item.path === '/api/profile/city' && item.body.city === 'Орёл'
+  )).toBe(true);
+  await expect(page.locator('#pCity')).toHaveValue('Краснодар');
+  await expect(page.locator('#pCityPending')).toContainText('Ожидает подтверждения: Орёл');
+  await page.locator('#pCityCancel').click();
+  await expect(page.locator('#pCityPending')).toBeHidden();
+  expect(harness.requests.some(item =>
+    item.path === '/api/profile/city' && item.body.action === 'cancel'
+    && item.body.requested_at === '2026-07-28T12:00:00+00:00'
+  )).toBe(true);
+});
+
+test('отказ Telegram в уведомлениях не скрывает способ вернуться к боту', async ({ page }) => {
+  await openMiniApp(page, { writeAccessResult: false });
+  await page.locator('#apName').fill('Анна');
+  await page.locator('#apCity').fill('Краснодар');
+  await page.locator('#apAbout').fill('Могу поправлять парковки');
+  await page.locator('#apSend').click();
+
+  await expect(page.locator('#waitMessage')).toContainText('Telegram не разрешил уведомления');
+  await expect(page.locator('#waitBot')).toBeVisible();
+});
+
+test('скаут видит честную проверку без фото и открывает доказательство полностью', async ({ page }) => {
+  const overview = {
+    pending: [], pending_total: 0, rejected: [], review_total: 2,
+    team: [], awards: [], granted: [], withdrawals: [], open_tasks: [],
+    task_templates: [], recent_decisions: [],
+    review: [{
+      id: 31, assignment_id: 301, title: 'Комментарий', type_title: 'Проверка',
+      city: 'Краснодар', address: 'Центр', reward: 40, status: 'review',
+      evidence_policy: 'comment_only', proof_note: 'Всё проверено',
+      can_approve: false, approval_block_reason: 'Задание создал этот ответственный',
+    }, {
+      id: 32, assignment_id: 302, title: 'Фото парковки', type_title: 'Парковка',
+      city: 'Краснодар', address: 'Вокзал', reward: 80, status: 'review',
+      evidence_policy: 'after_required', can_approve: true,
+      proof_photos: ['data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='],
+    }],
+  };
+  await openMiniApp(page, {
+    initialState: state({ is_admin: true }), adminOverview: overview,
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+
+  await expect(page.locator('#adReview')).toContainText('Фото не требовалось');
+  await expect(page.getByRole('button', { name: 'Нужен второй ответственный' })).toBeDisabled();
+  await page.locator('#adReview [data-evidence-url]').click();
+  await expect(page.locator('#evidenceSheet')).toBeVisible();
+  await expect(page.locator('#evidenceFull')).toHaveAttribute('src', /^data:image\/gif/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#evidenceSheet')).toBeHidden();
 });
 
 test('Escape отменяет обязательный ввод, а пустое значение не принимается', async ({ page }) => {
@@ -447,4 +588,74 @@ test('таймер выплаты проходит через ноль и вкл
   });
   await expect.poll(() => overviewCalls, { timeout: 4000 }).toBeGreaterThanOrEqual(2);
   await expect(withdrawals.getByRole('button', { name: 'Забрать заявку' })).toBeEnabled();
+});
+
+test('ручная сверка объясняет причину и требует аудиторский комментарий', async ({ page }) => {
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }),
+    adminOverview: {
+      pending: [], pending_total: 0, rejected: [], review: [], review_total: 0,
+      team: [], awards: [], granted: [], withdrawals: [], open_tasks: [],
+      task_templates: [], pending_dispute_total: 1,
+      recent_decisions: [{
+        id: 91, assignment_id: 81, dispute_id: 71, title: 'Поправить парковку',
+        type_title: 'Парковка', emoji: '🚲', reward: 100, status: 'closed',
+        city: 'Краснодар', address: 'ТЦ Центр', claimed_name: 'Иван',
+        dispute_status: 'manual_required', can_decide_dispute: true,
+        dispute_reason: 'Фото относится к другой парковке',
+        dispute_reconciliation_reason: 'Свободный баланс ниже суммы спора.',
+        dispute_opened_at: '2026-07-28T12:00:00+00:00',
+        dispute_opened_by_name: 'Скаут один',
+      }],
+    },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  const card = page.locator('#adDecisions .task').filter({ hasText: 'Поправить парковку' });
+  await expect(card).toContainText('Нужна ручная сверка');
+  await expect(card).toContainText('Свободный баланс ниже суммы спора');
+  await card.getByRole('button', { name: 'Выплату исправили' }).click();
+  await expect(page.locator('#askSheet')).toBeVisible();
+  await expect(page.locator('#askTitle')).toHaveText('Номер операции или обращения');
+  await page.locator('#askText').fill('BB-142');
+  await page.locator('#askOk').click();
+  await expect(page.locator('#askTitle')).toHaveText('Записать исправление выплаты');
+  await page.locator('#askText').fill('Сверено с Бибибайком, обращение BB-142');
+  await page.locator('#askOk').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/task/dispute' && item.body?.decision === 'manual_reversed'
+  ).length).toBe(1);
+  const request = harness.requests.find(
+    item => item.path === '/api/admin/task/dispute' && item.body?.decision === 'manual_reversed'
+  );
+  expect(request.body.dispute_id).toBe(71);
+  expect(request.body.note).toContain('BB-142');
+  expect(request.body.reconciliation_reference).toBe('BB-142');
+});
+
+test('снятие награды требует причину и идемпотентную операцию', async ({ page }) => {
+  const harness = await openMiniApp(page, {
+    initialState: state({ is_admin: true }),
+    adminOverview: {
+      pending: [], pending_total: 0, rejected: [], review: [], review_total: 0,
+      recent_decisions: [], team: [], awards: [], withdrawals: [], open_tasks: [],
+      task_templates: [], granted: [{
+        id: 41, user_id: 501, full_name: 'Иван', emoji: '🏅', title: 'Спас байк',
+        bonus: 50, note: 'Помог ночью', granted_at: '2026-07-28T12:00:00+00:00',
+      }],
+    },
+  });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubAwards"]').click();
+  await page.locator('[data-awrev="41"]').click();
+  await expect(page.locator('#askSheet')).toBeVisible();
+  await expect(page.locator('#askLead')).toContainText('списан целиком');
+  await page.locator('#askText').fill('Награда выдана не тому участнику');
+  await page.locator('#askOk').click();
+  await expect.poll(() => harness.requests.filter(
+    item => item.path === '/api/admin/award/revoke'
+  ).length).toBe(1);
+  const request = harness.requests.find(item => item.path === '/api/admin/award/revoke');
+  expect(request.body.entry_id).toBe(41);
+  expect(request.body.note).toContain('не тому');
+  expect(request.body.operation_id).toMatch(/^[0-9a-f-]{36}$/i);
 });

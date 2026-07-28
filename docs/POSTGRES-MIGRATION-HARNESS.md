@@ -7,7 +7,7 @@
 ## Гарантии
 
 - источник — только отдельная неизменяемая копия exact current SQLite schema;
-- `quick_check`, полный manifest 27 таблиц/32 индексов и типизация всех строк
+- `quick_check`, полный manifest 28 таблиц/34 индексов и типизация всех строк
   выполняются до записи в PostgreSQL;
 - target обязан быть отдельной пустой PostgreSQL database на точном Alembic head;
 - import сохраняет legacy ID и выполняется одной транзакцией под advisory lock;

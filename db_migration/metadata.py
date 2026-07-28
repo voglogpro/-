@@ -69,6 +69,8 @@ members = Table(
     Column("applied_at", DateTime(timezone=True)),
     Column("chat_xp", BigInteger, nullable=False, server_default=text("0")),
     Column("ref_confirmed", Boolean, nullable=False, server_default=text("false")),
+    Column("city_change_requested", Text),
+    Column("city_change_requested_at", DateTime(timezone=True)),
 )
 
 tasks = Table(
@@ -271,6 +273,33 @@ task_review_commands = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+task_disputes = Table(
+    "task_disputes", metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("assignment_id", BigInteger, fk("task_assignments.id"), nullable=False),
+    Column("task_id", BigInteger, nullable=False),
+    Column("user_id", BigInteger, nullable=False),
+    Column("reward", BigInteger, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("reconciliation_reason", Text),
+    Column("reconciliation_reference", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("opened_by", BigInteger, nullable=False),
+    Column("opened_at", DateTime(timezone=True), nullable=False),
+    Column("open_operation_id", Text, nullable=False),
+    Column("open_request_hash", Text, nullable=False),
+    Column("decided_by", BigInteger),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decision_note", Text),
+    Column("decision_operation_id", Text),
+    Column("decision_request_hash", Text),
+    UniqueConstraint("assignment_id", name="uq_task_disputes_assignment_id"),
+    UniqueConstraint("open_operation_id", name="uq_task_disputes_open_operation_id"),
+    UniqueConstraint(
+        "decision_operation_id", name="uq_task_disputes_decision_operation_id",
+    ),
+)
+
 task_completion_commands = Table(
     "task_completion_commands", metadata,
     Column("operation_id", Text, primary_key=True),
@@ -457,6 +486,9 @@ member_awards = Table(
     Column("balance_after", BigInteger),
     Column("revoked_at", DateTime(timezone=True)),
     Column("revoked_by", BigInteger),
+    Column("revoke_note", Text),
+    Column("revoke_operation_id", Text),
+    Column("revoke_request_hash", Text),
     UniqueConstraint("user_id", "award_id", "slot", name="uq_member_awards_user_award_slot"),
 )
 
@@ -478,6 +510,10 @@ Index(
 Index(
     "idx_assignment_decision_operation", task_assignments.c.decision_operation_id,
     unique=True, postgresql_where=task_assignments.c.decision_operation_id.is_not(None),
+)
+Index(
+    "idx_task_disputes_status", task_disputes.c.status,
+    task_disputes.c.opened_at, task_disputes.c.id,
 )
 Index("idx_withdrawals_user", withdrawal_requests.c.user_id, withdrawal_requests.c.created_at)
 Index(
@@ -533,6 +569,10 @@ Index(
     "idx_member_awards_operation", member_awards.c.operation_id, unique=True,
     postgresql_where=member_awards.c.operation_id.is_not(None),
 )
+Index(
+    "idx_member_awards_revoke_operation", member_awards.c.revoke_operation_id,
+    unique=True, postgresql_where=member_awards.c.revoke_operation_id.is_not(None),
+)
 Index("idx_task_outbox_delivery", task_outbox.c.status, task_outbox.c.available_at, task_outbox.c.id)
 Index(
     "idx_telegram_inbox_delivery", telegram_update_inbox.c.status,
@@ -558,12 +598,12 @@ Index("idx_product_events_expiry", product_events.c.expires_at)
 
 TABLE_ORDER = tuple(metadata.tables)
 IDENTITY_TABLES = (
-    "tasks", "bonus_ledger", "task_assignments", "task_evidence",
+    "tasks", "bonus_ledger", "task_assignments", "task_evidence", "task_disputes",
     "withdrawal_requests", "withdrawal_events", "task_outbox",
     "product_events", "awards", "member_awards",
 )
 
-if len(metadata.tables) != 27:
-    raise RuntimeError(f"Expected 27 migration tables, found {len(metadata.tables)}")
-if sum(len(table.indexes) for table in metadata.tables.values()) != 32:
-    raise RuntimeError("Expected exactly 32 semantic indexes")
+if len(metadata.tables) != 28:
+    raise RuntimeError(f"Expected 28 migration tables, found {len(metadata.tables)}")
+if sum(len(table.indexes) for table in metadata.tables.values()) != 34:
+    raise RuntimeError("Expected exactly 34 semantic indexes")

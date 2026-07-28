@@ -504,8 +504,17 @@ select.tinput{appearance:none;background-image:
 .evidence-title{font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2)}
 .evidence-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}
 .evidence-shot{margin:0;min-width:0}
-.evidence-shot img{width:100%;aspect-ratio:1/1;display:block;object-fit:cover;border-radius:13px;background:var(--surface-2)}
+.evidence-open{display:block;width:100%;padding:0;border:0;background:transparent;border-radius:13px;cursor:zoom-in}
+.evidence-open:focus-visible{outline:3px solid var(--brand);outline-offset:2px}
+.evidence-shot img{width:100%;aspect-ratio:1/1;display:block;object-fit:contain;border-radius:13px;background:var(--surface-2)}
 .evidence-shot figcaption{font-size:12px;color:var(--ink-2);margin-top:5px}
+.evidence-viewer{align-items:stretch;background:rgba(0,0,0,.94)}
+.evidence-viewer .inner{max-height:none;height:100%;display:flex;flex-direction:column;background:#080b09;
+  color:#fff;border-radius:0;padding:max(14px,var(--safe-top)) var(--pad) calc(14px + var(--safe-bottom))}
+.evidence-viewer img{width:100%;height:100%;min-height:0;object-fit:contain;display:block;flex:1}
+.evidence-viewer .viewer-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.evidence-viewer .viewer-head h3{color:#fff;margin:0}
+.evidence-viewer .viewer-head button{color:#fff;background:#202522;box-shadow:none}
 .proof-preview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
 .proof-preview .shot{position:relative}
 .proof-preview img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;border-radius:13px}
@@ -604,9 +613,10 @@ select.tinput{appearance:none;background-image:
     <div id="waitBox" class="card warm hidden">
       <div class="eyebrow"><b></b>БибиЗадачи · статус заявки</div>
       <h2 class="big">⏳ Заявка на рассмотрении</h2>
-      <p class="sub">Ответственный одобрит её — и задания появятся здесь.
+      <p class="sub" id="waitMessage">Ответственный одобрит её — и задания появятся здесь.
         Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.</p>
       <div class="charge warm" style="margin-top:13px"><i style="width:55%"></i></div>
+      <button class="btn btn-ghost hidden" id="waitBot" style="margin-top:13px">Открыть чат с ботом</button>
       <button class="btn btn-ghost hidden" id="waitContact" style="margin-top:13px">Задать вопрос ответственному</button>
     </div>
 
@@ -682,6 +692,17 @@ select.tinput{appearance:none;background-image:
         и за живое участие в беседе группы. Он показывает твой опыт в сообществе.</p>
     </div>
 
+    <div class="card hidden" id="pCityCard">
+      <div class="eyebrow"><b></b>Мой город</div>
+      <p class="sub">По городу приложение показывает подходящие задания. Изменение подтвердит ответственный, чтобы задания не попадали не в ту команду.</p>
+      <div class="notice hidden" id="pCityPending" role="status"></div>
+      <div class="field" style="margin-top:12px"><label for="pCity">Город</label>
+        <input class="tinput" id="pCity" inputmode="text" placeholder="Краснодар"></div>
+      <div class="field-error" id="pCityError" role="alert"></div>
+      <button class="btn btn-ghost" id="pCitySave" type="button">Запросить изменение</button>
+      <button class="mini hidden" id="pCityCancel" type="button" style="width:100%;margin-top:8px">Отменить запрос</button>
+    </div>
+
     <div class="card warm" id="pAwardsCard">
       <div class="eyebrow"><b></b>Награды<span class="cnt" id="pAwardsCnt"></span></div>
       <div id="pAwards"></div>
@@ -742,12 +763,18 @@ select.tinput{appearance:none;background-image:
         <button class="mini hidden" id="adPendingMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button></div>
       <div class="card"><div class="eyebrow"><b></b>Отклонённые заявки<span class="cnt" id="adRejectedCnt"></span></div>
         <div id="adRejected" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Смена города<span class="cnt" id="adCityCnt"></span></div>
+        <p class="sub" style="margin-bottom:12px">Проверь запрос: до подтверждения участник продолжает видеть задания прежнего города.</p>
+        <div id="adCityChanges" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
       <div class="card lit"><div class="eyebrow"><b></b>На проверке<span class="cnt" id="adReviewCnt"></span></div>
         <div class="field"><label for="adReviewSearch">Быстрый поиск отчётов</label><input class="tinput" id="adReviewSearch" placeholder="Задание, город или исполнитель"></div>
         <div id="adReview" aria-live="polite"><div class="empty">Загружаю…</div></div>
         <button class="mini hidden" id="adReviewMore" type="button" style="width:100%;margin-top:8px">Показать ещё</button></div>
       <div class="card"><div class="eyebrow"><b></b>Активные задания<span class="cnt" id="adOpenCnt"></span></div>
         <div id="adOpen" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
+      <div class="card"><div class="eyebrow"><b></b>Недавние решения<span class="cnt" id="adDecisionCnt"></span></div>
+        <p class="sub" style="margin-bottom:12px">Ошибочную выплату сначала оспаривает один ответственный, затем независимо подтверждает второй.</p>
+        <div id="adDecisions" aria-live="polite"><div class="empty">Загружаю…</div></div></div>
     </div>
 
     <div id="adSubCreate" class="card hidden">
@@ -797,7 +824,7 @@ select.tinput{appearance:none;background-image:
           <div class="field"><label for="ntEvidence">Подтверждение</label>
             <select class="tinput" id="ntEvidence">
               <option value="after_required">Фото результата обязательно</option>
-              <option value="before_and_after_required">Фото до и после</option>
+              <option value="before_and_after_required">Исходное фото + фото результата</option>
               <option value="none">Достаточно комментария</option>
             </select></div>
           <div class="field" id="ntMaxParticipantsField"><label for="ntMaxParticipants">Максимум исполнителей</label>
@@ -1037,6 +1064,13 @@ select.tinput{appearance:none;background-image:
   </div>
 </div></div>
 
+<!-- защищённый полноразмерный просмотр доказательства -->
+<div id="evidenceSheet" class="sheet evidence-viewer hidden" role="dialog" aria-modal="true" aria-labelledby="evidenceTitle"><div class="inner">
+  <div class="viewer-head"><h3 id="evidenceTitle">Фотография результата</h3>
+    <button class="mini" id="evidenceClose" type="button">Закрыть</button></div>
+  <img id="evidenceFull" alt="" src="">
+</div></div>
+
 <div id="nav" class="tabbar hidden" aria-label="Основная навигация">
   <button class="tab on" data-tab="tab-tasks" aria-current="page"><span class="i">🚲</span>Задания</button>
   <button class="tab" data-tab="tab-wallet"><span class="i">⚡</span>Бонусы</button>
@@ -1057,7 +1091,8 @@ try{
 }catch(e){}
 
 let STATE = null, ADMIN = null, AWARDS = null, lastBonus = null;
-let TEAM_TAG_FILTER = '', TEAM_REMOTE = null, TEAM_CURSOR = null, TEAM_SEARCH_TIMER = null;
+let TEAM_TAG_FILTER = '', TEAM_REMOTE = null, TEAM_CURSOR = null, TEAM_SEARCH_TIMER = null,
+    TEAM_TAG_CATALOG = [];
 let PENDING_ITEMS=[],PENDING_CURSOR=null,REVIEW_ITEMS=[],REVIEW_CURSOR=null,QUEUE_SEARCH_TIMER=null;
 let ADMIN_DELIVERY_TIMER=null, ADMIN_DELIVERY_IDS='', ADMIN_DELIVERY_POLL_ATTEMPT=0;
 let WITHDRAW_LEASE_TIMER=null, WITHDRAW_LEASE_REFRESHING=false;
@@ -1372,6 +1407,14 @@ async function load(){
   $('pVersion').textContent = STATE.build_version || '';
   if(!$('apName').value) $('apName').value = me.name || '';
   if(!$('apCity').value) $('apCity').value = me.city || '';
+  $('pCityCard').classList.toggle('hidden', !STATE.can_work);
+  if(document.activeElement!==$('pCity')) $('pCity').value = me.city || '';
+  const requestedCity=me.city_change_requested||'';
+  $('pCityPending').classList.toggle('hidden',!requestedCity);
+  $('pCityCancel').classList.toggle('hidden',!requestedCity);
+  $('pCityPending').textContent=requestedCity
+    ? 'Ожидает подтверждения: '+requestedCity+'. До решения задания подбираются для города '+(me.city||'из профиля')+'.'
+    : '';
   if(!$('ntCity').value){
     try{ $('ntCity').value = localStorage.getItem('bibitasks_task_city') || me.city || ''; }
     catch(e){ $('ntCity').value = me.city || ''; }
@@ -1440,7 +1483,10 @@ function roleLabel(me){
   return 'Гость';
 }
 
-let REFERRAL_PENDING_APPROVAL=false;
+const TELEGRAM_WRITE_HINT=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user
+  ? tg.initDataUnsafe.user.allows_write_to_pm : undefined;
+let REFERRAL_PENDING_APPROVAL=false,
+    WRITE_ACCESS_STATE=TELEGRAM_WRITE_HINT===true?true:(TELEGRAM_WRITE_HINT===false?false:null);
 function renderSubscribeBox(){
   const g = (STATE && STATE.referral_gate) || {};
   const show = !!(g.required && g.invited && !g.confirmed && !REFERRAL_PENDING_APPROVAL);
@@ -1474,6 +1520,10 @@ function renderTasksTab(){
   $('blockedReason').textContent = me.application_note
     ? 'Причина: ' + me.application_note
     : 'Причину можно уточнить у ответственного.';
+  $('waitMessage').textContent=WRITE_ACCESS_STATE!==true
+    ? 'Заявка на рассмотрении. Telegram не разрешил уведомления — проверяй статус здесь или открой чат с ботом и нажми Start.'
+    : 'Ответственный одобрит её — и задания появятся здесь. Обычно это занимает до одного дня. Уведомление придёт в чат с ботом.';
+  $('waitBot').classList.toggle('hidden', !waiting || WRITE_ACCESS_STATE===true);
   $('worksBox').classList.toggle('hidden', !canWork);
   if(canWork) loadTasks();
 }
@@ -1486,6 +1536,13 @@ function openSupport(){
 }
 $('waitContact').onclick = openSupport;
 $('blockedContact').onclick = openSupport;
+$('waitBot').onclick = ()=>{
+  const username=(STATE&&STATE.bot_username)||'';
+  if(!username){ toast('Имя бота не настроено'); return; }
+  const url='https://t.me/'+username+'?start=tasks';
+  try{ tg&&tg.openTelegramLink?tg.openTelegramLink(url):window.open(url,'_blank'); }
+  catch(e){ toast('@'+username); }
+};
 
 function renderReferral(ref){
   const count = Number(ref.count||0);
@@ -1535,7 +1592,8 @@ function renderAwardShelf(){
 /* ── задания ───────────────────────────────────────────────── */
 let MY_TASKS = new Map(), WITHDRAW_OPERATION=null;
 const RELEASE_OPERATIONS = new Map(), CANCEL_OPERATIONS = new Map(),
-      WITHDRAW_DECISIONS = new Map(), REVIEW_DECISIONS = new Map();
+      WITHDRAW_DECISIONS = new Map(), REVIEW_DECISIONS = new Map(),
+      DISPUTE_OPERATIONS = new Map(), AWARD_REVOKE_OPERATIONS = new Map();
 async function loadTasks(){
   setBusy('tab-tasks',true);
   try{
@@ -1569,6 +1627,16 @@ async function loadTasks(){
           card.scrollIntoView({behavior:'smooth',block:'center'}); flash(card);
           card.focus({preventScroll:true});
         },80);
+      }else{
+        START_PARAM_HANDLED=true;
+        try{
+          const context=await api('/api/tasks/context?id='+encodeURIComponent(taskId));
+          $('availList').insertAdjacentHTML('afterbegin','<div class="notice bad" role="status">'+esc(context.message||'Задание сейчас недоступно.')+'</div>');
+        }catch(e){
+          START_PARAM_HANDLED=false;
+          $('availList').insertAdjacentHTML('afterbegin','<div class="notice bad" role="status">'+esc(e.message||'Не удалось открыть задание по ссылке.')+'<button class="mini" id="taskContextRetry" type="button" style="margin-top:8px">Повторить</button></div>');
+          $('taskContextRetry').onclick=()=>loadTasks();
+        }
       }
     }
   }catch(e){
@@ -1587,6 +1655,13 @@ function taskBody(t){
   if(t.is_personal) pills.push('<span class="pill on">Только для тебя</span>');
   if(t.repeatable)  pills.push('<span class="pill on">Для всех</span>');
   if(slot)          pills.push('<span class="pill">🕒 '+esc(slot)+'</span>');
+  const evidenceLabel={
+    none:'Отчёт: фото или комментарий',
+    comment_only:'Отчёт: комментарий',
+    after_required:'Отчёт: 1–4 фото',
+    before_after:'Исходное фото приложено · добавь 1–4 фото результата'
+  }[normalizedEvidencePolicy(t.evidence_policy)];
+  pills.push('<span class="pill">📎 '+evidenceLabel+'</span>');
   return '<div class="row1"><div class="tico">'+esc(t.emoji||'📍')+'</div>'+
     '<div><div class="tt">'+esc(t.title)+'</div>'+
     '<div class="ty">'+esc(t.type_title)+'</div></div>'+
@@ -1610,6 +1685,7 @@ function taskCardMine(t){
   return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
     '<div class="meta"><span class="'+(review?'pill hot':'pill on')+'">'+
     (review?'⏳ На проверке':'🔧 В работе')+'</span></div>'+
+    (!review&&t.review_note?'<div class="notice bad"><b>Вернули на доработку</b><br>'+esc(t.review_note)+'</div>':'')+
     (review ? '' :
       '<div class="acts"><button class="btn btn-volt sm" data-done="'+t.id+'">'+
       reportLabel+'</button>'+
@@ -1681,12 +1757,46 @@ function normalizedEvidencePolicy(value){
 }
 function renderReviewEvidence(t){
   const after=proofUrls(t), before=safeMediaUrl(t&&t.photo_url);
-  if(!before && !after.length) return '<div class="notice bad">Фотоотчёт не приложен.</div>';
+  const policy=normalizedEvidencePolicy(t&&t.evidence_policy);
+  if(!before && !after.length){
+    return policy==='comment_only'
+      ? '<div class="notice">Фото не требовалось — проверь комментарий исполнителя.</div>'
+      : '<div class="notice bad">Фотоотчёт не приложен.</div>';
+  }
   let shots='';
-  if(before) shots+='<figure class="evidence-shot"><img src="'+esc(before)+'" alt="До выполнения" loading="lazy"><figcaption>До</figcaption></figure>';
-  after.forEach((u,i)=>{ shots+='<figure class="evidence-shot"><img src="'+esc(u)+'" alt="Результат '+(i+1)+'" loading="lazy"><figcaption>После'+(after.length>1?' · '+(i+1):'')+'</figcaption></figure>'; });
+  if(before) shots+='<figure class="evidence-shot"><button class="evidence-open" type="button" data-evidence-url="'+esc(before)+'" data-evidence-label="До выполнения"><img src="'+esc(before)+'" alt="До выполнения" loading="lazy"></button><figcaption>До · открыть полностью</figcaption></figure>';
+  after.forEach((u,i)=>{ const label='Результат '+(i+1); shots+='<figure class="evidence-shot"><button class="evidence-open" type="button" data-evidence-url="'+esc(u)+'" data-evidence-label="'+label+'"><img src="'+esc(u)+'" alt="'+label+'" loading="lazy"></button><figcaption>После'+(after.length>1?' · '+(i+1):'')+' · открыть полностью</figcaption></figure>'; });
   return '<div class="evidence"><div class="evidence-title">Доказательства до / после</div><div class="evidence-grid">'+shots+'</div></div>';
 }
+
+let EVIDENCE_HISTORY=false;
+function hideEvidenceViewer(){
+  $('evidenceSheet').classList.add('hidden'); $('evidenceFull').removeAttribute('src');
+  EVIDENCE_HISTORY=false;
+  try{ if(tg&&tg.BackButton) tg.BackButton.hide(); }catch(e){}
+}
+function closeEvidenceViewer(){
+  if(EVIDENCE_HISTORY){ history.back(); return; }
+  hideEvidenceViewer();
+}
+function openEvidenceViewer(url,label){
+  const safe=safeMediaUrl(url); if(!safe) return;
+  $('evidenceTitle').textContent=label||'Фотография результата';
+  $('evidenceFull').alt=label||'Фотография результата'; $('evidenceFull').src=safe;
+  $('evidenceSheet').classList.remove('hidden');
+  try{ history.pushState({bibitasksEvidence:true},''); EVIDENCE_HISTORY=true; }catch(e){}
+  try{ if(tg&&tg.BackButton) tg.BackButton.show(); }catch(e){}
+}
+document.addEventListener('click',event=>{
+  const button=event.target.closest&&event.target.closest('[data-evidence-url]');
+  if(button) openEvidenceViewer(button.dataset.evidenceUrl,button.dataset.evidenceLabel);
+});
+window.addEventListener('popstate',()=>{ if(!$('evidenceSheet').classList.contains('hidden')) hideEvidenceViewer(); });
+$('evidenceClose').onclick=closeEvidenceViewer;
+$('evidenceSheet').onclick=event=>{ if(event.target===$('evidenceSheet')) closeEvidenceViewer(); };
+try{ if(tg&&tg.BackButton&&tg.BackButton.onClick) tg.BackButton.onClick(()=>{
+  if(!$('evidenceSheet').classList.contains('hidden')) closeEvidenceViewer();
+}); }catch(e){}
 
 let FINISH_TASK=null, FINISH_BUTTON=null, FINISH_OPERATION_ID=null, PROOF_PHOTOS=[];
 function renderFinishPreview(){
@@ -1777,15 +1887,18 @@ async function loadWallet(){
     $('wBonus').textContent = bonus;
     setBonus(bonus);
     $('wBar').style.width = pct(bonus, min) + '%';
-    $('wRate').textContent = '1⚡ = 1 ₽ · минута — '+
-      rate.toLocaleString('ru-RU')+' ₽ · баланс ≈ '+Math.round(bonus/rate)+' мин';
+    $('wRate').textContent = bonus<0
+      ? 'Баланс скорректирован после спора. Новые начисления сначала погасят '+Math.abs(bonus)+'⚡ задолженности.'
+      : '1⚡ = 1 ₽ · минута — '+rate.toLocaleString('ru-RU')+' ₽ · баланс ≈ '+Math.round(bonus/rate)+' мин';
     const enough = bonus >= min;
     $('wWithdraw').disabled = !enough;
-    $('wWithdrawHint').textContent = enough
+    $('wWithdrawHint').textContent = bonus<0
+      ? 'Перевод временно недоступен до погашения '+Math.abs(bonus)+'⚡ задолженности.'
+      : enough
       ? 'Можно перевести. Минимум — ' + min + '.'
       : 'Нужно ещё ' + (min-bonus) + ' ' + plural(min-bonus,'молния','молнии','молний') +
         ' до перевода. Минимум — ' + min + '.';
-    $('wWithdrawHint').classList.toggle('bad', false);
+    $('wWithdrawHint').classList.toggle('bad', bonus<0);
     if(!$('wWithdrawAmount').value) $('wWithdrawAmount').placeholder = String(min);
 
     const reqs = d.withdrawals || [];
@@ -1832,6 +1945,18 @@ $('wWithdraw').onclick = ()=>{
 };
 
 /* ── регистрация и вход ────────────────────────────────────── */
+function requestBotWriteAccess(){
+  if(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.allows_write_to_pm===true){
+    return Promise.resolve(true);
+  }
+  if(!tg||typeof tg.requestWriteAccess!=='function') return Promise.resolve(null);
+  return new Promise(resolve=>{
+    let settled=false;
+    const finish=value=>{ if(!settled){ settled=true; resolve(value===true); } };
+    try{ tg.requestWriteAccess(value=>finish(value)); }
+    catch(e){ resolve(null); }
+  });
+}
 $('apSend').onclick = ()=>{
   clearInvalid(['apName','apCity','apAbout'],'apError');
   const name = $('apName').value.trim();
@@ -1840,18 +1965,35 @@ $('apSend').onclick = ()=>{
   if(name.length < 2){ reportInvalid('apName','Укажи имя — ответственный должен понимать, кто это','apError'); return; }
   if(city.length < 2){ reportInvalid('apCity','Укажи город','apError'); return; }
   if(about.length < 5){ reportInvalid('apAbout','Коротко напиши, что сможешь выполнять и чем будешь полезен','apError'); return; }
-  try{
-    if(tg && tg.requestWriteAccess && !(tg.initDataUnsafe&&tg.initDataUnsafe.user&&tg.initDataUnsafe.user.allows_write_to_pm)){
-      tg.requestWriteAccess(()=>{});
-    }
-  }catch(e){}
   press($('apSend'),'Отправляю…', async ()=>{
+    WRITE_ACCESS_STATE=await requestBotWriteAccess();
     await api('/api/apply',{method:'POST', body:JSON.stringify({
       name:name, city:city, about:about})});
-    buzz('ok'); toast('Заявка отправлена!');
+    buzz('ok'); toast(WRITE_ACCESS_STATE!==true
+      ? 'Заявка отправлена. Проверяй решение в приложении.'
+      : 'Заявка отправлена!');
     await load();
   });
 };
+
+$('pCitySave').onclick = ()=>{
+  clearInvalid(['pCity'],'pCityError');
+  const city=$('pCity').value.trim();
+  if(city.length<2){ reportInvalid('pCity','Укажи город','pCityError'); return; }
+  press($('pCitySave'),'Сохраняю…',async()=>{
+    const d=await api('/api/profile/city',{method:'POST',body:JSON.stringify({city:city})});
+    buzz('ok'); toast(d.pending
+      ? 'Запрос отправлен ответственному: '+d.requested_city
+      : 'Город уже указан: '+d.city); await load();
+  });
+};
+
+$('pCityCancel').onclick=()=>press($('pCityCancel'),'Отменяю…',async()=>{
+  await api('/api/profile/city',{method:'POST',body:JSON.stringify({
+    action:'cancel',requested_at:(STATE&&STATE.me.city_change_requested_at)||''
+  })});
+  buzz('ok'); toast('Запрос на смену города отменён.'); await load();
+});
 
 $('pRef').onclick = ()=>{
   const link = STATE && STATE.referral_url;
@@ -1872,6 +2014,7 @@ function updateTaskMode(){
   $('ntAnnounce').classList.toggle('hidden', personal);
   $('ntMaxParticipantsField').classList.toggle('hidden', !repeatable);
   $('ntBudgetCapField').classList.toggle('hidden', !repeatable);
+  if(personal) loadAssigneeOptions($('ntAssigneeSearch').value);
   if(!repeatable){
     $('ntMaxParticipants').value='1';
     $('ntBudgetCap').value=$('ntReward').value||'';
@@ -1892,8 +2035,9 @@ function renderTeam(){
   const team = TEAM_REMOTE || fullTeam;
   const query = ($('adTeamSearch').value||'').trim().toLocaleLowerCase('ru-RU').replace(/^#/,'');
   const sort = $('adTeamSort').value;
-  const tags = Array.from(new Set(team.flatMap(m=>m.tags||[])))
-    .sort((a,b)=>a.localeCompare(b,'ru'));
+  const tags = TEAM_TAG_CATALOG.length
+    ? TEAM_TAG_CATALOG.map(item=>item.tag)
+    : Array.from(new Set(team.flatMap(m=>m.tags||[]))).sort((a,b)=>a.localeCompare(b,'ru'));
   $('adTagFilters').innerHTML = tags.length
     ? '<button class="mini '+(!TEAM_TAG_FILTER?'on':'')+'" aria-pressed="'+(!TEAM_TAG_FILTER?'true':'false')+'" data-teamtag="">Все</button>'+tags.map(t=>
       '<button class="mini '+(TEAM_TAG_FILTER===t?'on':'')+'" aria-pressed="'+(TEAM_TAG_FILTER===t?'true':'false')+'" data-teamtag="'+esc(t)+'">#'+esc(t)+'</button>').join('')
@@ -1951,6 +2095,12 @@ async function loadTeamSearch(append){
     else{ $('adTeamMeta').textContent='Поиск не загрузился: '+e.message; }
   }
 }
+async function loadTeamTags(){
+  try{
+    const d=await api('/api/admin/member/tags');
+    TEAM_TAG_CATALOG=d.items||[]; renderTeam();
+  }catch(e){ TEAM_TAG_CATALOG=[]; }
+}
 $('adTeamSearch').oninput = ()=>{
   clearTimeout(TEAM_SEARCH_TIMER); TEAM_SEARCH_TIMER=setTimeout(()=>loadTeamSearch(false),280);
 };
@@ -1968,8 +2118,17 @@ function renderPendingQueue(items,total,next){
 function renderReviewQueue(items,total,next){
   REVIEW_ITEMS=items; REVIEW_CURSOR=next;
   $('adReviewCnt').textContent=Number(total)||'';
-  $('adReview').innerHTML=items.length?items.map(t=>
-    '<div class="task">'+taskBody(t)+(t.claimed_name?'<div class="meta"><span class="pill on">'+esc(t.claimed_name)+'</span></div>':'')+(t.proof_note?'<div class="dt">💬 '+esc(t.proof_note)+'</div>':'')+renderReviewEvidence(t)+'<div class="acts">'+(Number(t.created_by)===Number(STATE.me.user_id)||Number(t.assignment_user_id||t.claimed_by)===Number(STATE.me.user_id)?'<button class="btn sm" type="button" disabled title="Нужен другой ответственный">Нужен второй ответственный</button>':'<button class="btn btn-volt sm" data-tok="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Подтвердить +'+Number(t.reward||0)+'⚡</button>')+'<button class="mini" data-tno="'+t.id+'" data-as="'+(t.assignment_id||'')+'" data-expired="'+(t.task_status==='expired'?'1':'0')+'">Вернуть</button><button class="mini warn" data-treject="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Отклонить</button></div></div>').join('')
+  $('adReview').innerHTML=items.length?items.map(t=>{
+    const approve=t.can_approve===false
+      ? '<button class="btn sm" type="button" disabled title="'+esc(t.approval_block_reason||'Нужен другой ответственный')+'">Нужен второй ответственный</button>'
+      : '<button class="btn btn-volt sm" data-tok="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Подтвердить +'+Number(t.reward||0)+'⚡</button>';
+    return '<div class="task">'+taskBody(t)+
+      (t.claimed_name?'<div class="meta"><span class="pill on">'+esc(t.claimed_name)+'</span></div>':'')+
+      (t.proof_note?'<div class="dt">💬 '+esc(t.proof_note)+'</div>':'')+
+      renderReviewEvidence(t)+'<div class="acts">'+approve+
+      '<button class="mini" data-tno="'+t.id+'" data-as="'+(t.assignment_id||'')+'" data-expired="'+(t.task_status==='expired'?'1':'0')+'">Вернуть</button>'+
+      '<button class="mini warn" data-treject="'+t.id+'" data-as="'+(t.assignment_id||'')+'">Отклонить</button></div></div>';
+  }).join('')
     :'<div class="empty">Проверять нечего — все задания закрыты.</div>';
   $('adReviewMore').classList.toggle('hidden',!next);
 }
@@ -2101,6 +2260,16 @@ async function loadAdmin(){
       '<div class="acts"><button class="btn btn-volt sm" data-appr="'+p.user_id+'">Одобрить сейчас</button></div></div>').join('')
       : '<div class="empty">Отклонённых заявок нет.</div>';
 
+    const cityChanges=d.city_changes||[];
+    $('adCityCnt').textContent=cityChanges.length||'';
+    $('adCityChanges').innerHTML=cityChanges.length?cityChanges.map(item=>
+      '<div class="task"><div class="row1"><div class="tico">📍</div><div>'+
+      '<div class="tt">'+esc(item.full_name||('ID '+item.user_id))+'</div>'+
+      '<div class="ty">'+esc(item.city||'город не указан')+' → '+esc(item.city_change_requested)+'</div></div></div>'+
+      '<div class="acts"><button class="btn btn-volt sm" data-city-approve="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Подтвердить</button>'+
+      '<button class="mini warn" data-city-reject="'+item.user_id+'" data-city-requested-at="'+esc(item.city_change_requested_at||'')+'">Отклонить</button></div></div>'
+    ).join(''):'<div class="empty">Запросов на смену города нет.</div>';
+
     const rev = d.review || [];
     renderReviewQueue(
       rev,Number(d.review_total!=null?d.review_total:rev.length),
@@ -2126,9 +2295,38 @@ async function loadAdmin(){
       '<button class="mini warn" data-tcancel="'+t.id+'">Отменить задание</button></div></div>').join('')
       : '<div class="empty">Активных заданий нет. Создай первое на вкладке «Задание».</div>';
 
+    const decisions=d.recent_decisions||[];
+    const disputeLabel={
+      pending:'⚠️ Ждёт второго ответственного',
+      manual_required:'🧾 Нужна ручная сверка',
+      approved:'↩️ Выплата исправлена',rejected:'Без изменений',
+      manual_reversed:'↩️ Выплата исправлена после сверки',
+      manual_no_change:'✅ Сверено, без изменений'
+    };
+    $('adDecisionCnt').textContent=decisions.length||'';
+    $('adDecisions').innerHTML=decisions.length?decisions.map(t=>{
+      let actions='';
+      if(t.can_open_dispute) actions='<button class="mini warn" data-dopen="'+t.assignment_id+'">Оспорить решение</button>';
+      else if(t.can_decide_dispute&&t.dispute_status==='manual_required') actions='<button class="btn btn-volt sm" data-dmanual-reverse="'+t.dispute_id+'">Выплату исправили</button><button class="mini" data-dmanual-keep="'+t.dispute_id+'">Исходное решение верно</button>';
+      else if(t.can_decide_dispute) actions='<button class="btn btn-volt sm" data-dapprove="'+t.dispute_id+'">Подтвердить сторно</button><button class="mini" data-dreject="'+t.dispute_id+'">Оставить решение</button>';
+      else if(t.dispute_waits_for_second) actions='<button class="mini" type="button" disabled>Ожидается второй ответственный</button>';
+      return '<div class="task">'+taskBody(t)+
+        (t.claimed_name?'<div class="dt">Исполнитель: '+esc(t.claimed_name)+'</div>':'')+
+        (t.assignment_terminal_by_name?'<div class="ty">Исходное решение: '+esc(t.assignment_terminal_by_name)+'</div>':'')+
+        '<div class="meta"><span class="pill '+(t.dispute_status==='approved'?'warn':'on')+'">'+
+        esc(disputeLabel[t.dispute_status]||(t.status==='reversed'?'Выплата исправлена':'Подтверждено'))+'</span></div>'+
+        (t.dispute_reason?'<div class="dt">Причина спора: '+esc(t.dispute_reason)+'</div>':'')+
+        (t.dispute_reconciliation_reason?'<div class="dt">Почему нужна ручная сверка: '+esc(t.dispute_reconciliation_reason)+'</div>':'')+
+        (t.dispute_opened_at?'<div class="ty">Открыл: '+esc(t.dispute_opened_by_name||'ответственный')+' · '+esc(fmtDate(t.dispute_opened_at))+'</div>':'')+
+        (t.dispute_decision_note?'<div class="dt">Решение: '+esc(t.dispute_decision_note)+'</div>':'')+
+        (t.dispute_decided_at?'<div class="ty">Решил: '+esc(t.dispute_decided_by_name||'ответственный')+' · '+esc(fmtDate(t.dispute_decided_at))+'</div>':'')+
+        renderReviewEvidence(t)+
+        (actions?'<div class="acts">'+actions+'</div>':'')+'</div>';
+    }).join(''):'<div class="empty">Подтверждённых решений пока нет.</div>';
+
     const team = d.team || [];
     renderTeam();
-    await loadTeamSearch(false);
+    await Promise.all([loadTeamSearch(false),loadTeamTags()]);
 
     const ws = d.withdrawals || [];
     const label = {pending:'⏳ На рассмотрении',processing:'🔎 В работе',completed:'✅ Переведено',rejected_refunded:'↩️ Возвращено'};
@@ -2201,6 +2399,107 @@ async function loadAdmin(){
 }
 
 function bindAdmin(){
+  document.querySelectorAll('[data-city-approve],[data-city-reject]').forEach(b=>{
+    b.onclick=()=>press(b,'…',async()=>{
+      const approve=b.hasAttribute('data-city-approve');
+      const userId=Number(approve?b.dataset.cityApprove:b.dataset.cityReject);
+      await api('/api/admin/member/city',{method:'POST',body:JSON.stringify({
+        user_id:userId,decision:approve?'approve':'reject',
+        requested_at:b.dataset.cityRequestedAt})});
+      toast(approve?'Город подтверждён.':'Запрос на смену города отклонён.');
+      await loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-dopen]').forEach(b=>{
+    b.onclick=async()=>{
+      const reason=await askText({
+        title:'Оспорить подтверждённую выплату',
+        lead:'Данные пока не изменятся. Второй ответственный независимо проверит причину и только затем сможет выполнить сторно.',
+        placeholder:'Например: фото относится к другой парковке',required:true,
+        okLabel:'Передать второму ответственному'});
+      if(reason===null) return;
+      const assignmentId=Number(b.dataset.dopen),key='open:'+assignmentId;
+      const prior=DISPUTE_OPERATIONS.get(key);
+      const operation=prior&&prior.value===reason?prior:{id:newOperationId(),value:reason};
+      DISPUTE_OPERATIONS.set(key,operation);
+      press(b,'Открываю…',async()=>{
+        const result=await api('/api/admin/task/dispute',{method:'POST',body:JSON.stringify({
+          action:'open',assignment_id:assignmentId,reason:reason,operation_id:operation.id})});
+        DISPUTE_OPERATIONS.delete(key);
+        toast(result.manual_reconciliation?'Спор сохранён. Нужна ручная сверка и второй ответственный.':'Спор открыт. Нужен второй ответственный.');
+        await loadAdmin();
+      });
+    };
+  });
+  document.querySelectorAll('[data-dapprove]').forEach(b=>{
+    b.onclick=async()=>{
+      const note=await askText({
+        title:'Подтвердить исправление выплаты',
+        lead:'Это уменьшит баланс, счётчик выполнений и создаст связанную сторно-проводку. Если выплаты уже не хватает на балансе, автоматическое сторно будет заблокировано и понадобится ручная сверка.',
+        placeholder:'Что проверено вторым ответственным',required:true,
+        okLabel:'Подтвердить сторно'});
+      if(note===null) return;
+      const id=Number(b.dataset.dapprove),key='approve:'+id;
+      const prior=DISPUTE_OPERATIONS.get(key);
+      const operation=prior&&prior.value===note?prior:{id:newOperationId(),value:note};
+      DISPUTE_OPERATIONS.set(key,operation);
+      press(b,'Исправляю…',async()=>{
+        await api('/api/admin/task/dispute',{method:'POST',body:JSON.stringify({
+          action:'decide',dispute_id:id,decision:'approve',note:note,
+          operation_id:operation.id})});
+        DISPUTE_OPERATIONS.delete(key); toast('Выплата исправлена и записана в историю.'); await loadAdmin();
+      });
+    };
+  });
+  document.querySelectorAll('[data-dreject]').forEach(b=>{
+    b.onclick=async()=>{
+      const note=await askText({
+        title:'Оставить исходное решение',
+        lead:'Спор закроется без изменения баланса и выполнений.',
+        placeholder:'Почему исходное решение корректно',required:true,
+        okLabel:'Закрыть без изменений'});
+      if(note===null) return;
+      const id=Number(b.dataset.dreject),key='reject:'+id;
+      const prior=DISPUTE_OPERATIONS.get(key);
+      const operation=prior&&prior.value===note?prior:{id:newOperationId(),value:note};
+      DISPUTE_OPERATIONS.set(key,operation);
+      press(b,'Закрываю…',async()=>{
+        await api('/api/admin/task/dispute',{method:'POST',body:JSON.stringify({
+          action:'decide',dispute_id:id,decision:'reject',note:note,
+          operation_id:operation.id})});
+        DISPUTE_OPERATIONS.delete(key); toast('Спор закрыт без изменений.'); await loadAdmin();
+      });
+    };
+  });
+  document.querySelectorAll('[data-dmanual-reverse],[data-dmanual-keep]').forEach(b=>{
+    b.onclick=async()=>{
+      const reverse=b.hasAttribute('data-dmanual-reverse');
+      const reference=await askText({
+        title:'Номер операции или обращения',
+        lead:'Введи проверяемый номер из Бибибайка. Без него финансовую сверку закрыть нельзя.',
+        placeholder:'Например: BB-142',required:true,okLabel:'Продолжить'});
+      if(reference===null) return;
+      const note=await askText({
+        title:reverse?'Записать исправление выплаты':'Оставить исходное решение',
+        lead:'Проверь баланс и связанные проводки в Бибибайке. В комментарии укажи результат сверки и внешний номер операции или обращения.',
+        placeholder:'Например: сверено с Бибибайком, обращение BB-142, баланс исправлен вручную',required:true,
+        okLabel:reverse?'Записать исправление':'Закрыть без изменений'});
+      if(note===null) return;
+      const id=Number(reverse?b.dataset.dmanualReverse:b.dataset.dmanualKeep);
+      const decision=reverse?'manual_reversed':'manual_no_change',key=decision+':'+id;
+      const prior=DISPUTE_OPERATIONS.get(key);
+      const operationValue=reference+'\n'+note;
+      const operation=prior&&prior.value===operationValue?prior:{id:newOperationId(),value:operationValue};
+      DISPUTE_OPERATIONS.set(key,operation);
+      press(b,'Сохраняю…',async()=>{
+        await api('/api/admin/task/dispute',{method:'POST',body:JSON.stringify({
+          action:'decide',dispute_id:id,decision:decision,note:note,
+          reconciliation_reference:reference,
+          operation_id:operation.id})});
+        DISPUTE_OPERATIONS.delete(key); toast(reverse?'Выплата и выполнение исправлены.':'Исходное решение оставлено без изменений.'); await loadAdmin();
+      });
+    };
+  });
   document.querySelectorAll('[data-topen]').forEach(b=>{
     b.onclick=()=>{
       const url=b.dataset.topen;
@@ -2441,7 +2740,9 @@ let ASSIGNEE_SEARCH_TIMER=null;
 async function loadAssigneeOptions(query){
   const current=$('ntAssignee').value;
   try{
-    const params=new URLSearchParams({q:(query||'').trim(),sort:'name',limit:'50'});
+    const params=new URLSearchParams({
+      q:(query||'').trim(),city:$('ntCity').value.trim(),sort:'name',limit:'50'
+    });
     const data=await api('/api/admin/members?'+params.toString());
     const workers=(data.items||[]).filter(m=>m.role==='helper'||m.role==='employee');
     $('ntAssignee').innerHTML=workers.length
@@ -2455,6 +2756,9 @@ $('ntAssigneeSearch').oninput=()=>{
   clearTimeout(ASSIGNEE_SEARCH_TIMER);
   ASSIGNEE_SEARCH_TIMER=setTimeout(()=>loadAssigneeOptions($('ntAssigneeSearch').value),280);
 };
+$('ntCity').addEventListener('change',()=>{
+  if($('ntMode').value==='personal') loadAssigneeOptions($('ntAssigneeSearch').value);
+});
 function closeMember(){ $('memberSheet').classList.add('hidden'); }
 $('msClose').onclick = closeMember;
 $('memberSheet').onclick = e=>{ if(e.target===$('memberSheet')) closeMember(); };
@@ -2764,11 +3068,22 @@ function renderGrantedList(list){
     '</div>').join('')
     : '<div class="empty">Пока никого не награждали.</div>';
   $('awGranted').querySelectorAll('[data-awrev]').forEach(b=>{
-    b.onclick = ()=>press(b,'…', async ()=>{
-      await api('/api/admin/award/revoke',{method:'POST',
-        body:JSON.stringify({entry_id:Number(b.dataset.awrev)})});
-      toast('Награда снята.'); await loadAdmin(); await loadAwards();
-    });
+    b.onclick = async()=>{
+      const id=Number(b.dataset.awrev);
+      const note=await askText({title:'Снять награду',
+        lead:'Награда исчезнет у участника, а её бонус будет списан целиком. Укажи проверенную причину.',
+        placeholder:'Почему награда выдана ошибочно',required:true,okLabel:'Снять награду'});
+      if(note===null) return;
+      const prior=AWARD_REVOKE_OPERATIONS.get(id);
+      const operation=prior&&prior.value===note?prior:{id:newOperationId(),value:note};
+      AWARD_REVOKE_OPERATIONS.set(id,operation);
+      press(b,'Снимаю…', async ()=>{
+        await api('/api/admin/award/revoke',{method:'POST',body:JSON.stringify({
+          entry_id:id,note:note,operation_id:operation.id})});
+        AWARD_REVOKE_OPERATIONS.delete(id);
+        toast('Награда снята.'); await loadAdmin(); await loadAwards();
+      });
+    };
   });
 }
 

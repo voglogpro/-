@@ -129,6 +129,16 @@ def main():
             "VALUES ('review-fixture',2001,'review-request','done',?)", (stamp,),
         )
         db.execute(
+            "INSERT INTO task_disputes "
+            "(id,assignment_id,task_id,user_id,reward,reason,status,opened_by,opened_at,"
+            "open_operation_id,open_request_hash,decided_by,decided_at,decision_note,"
+            "decision_operation_id,decision_request_hash) "
+            "VALUES (5501,2001,1001,102,100,'Проверка fixture','rejected',101,?,"
+            "'dispute-open-fixture','dispute-open-request',103,?,'Решение верно',"
+            "'dispute-decision-fixture','dispute-decision-request')",
+            (stamp, stamp),
+        )
+        db.execute(
             "INSERT INTO task_completion_commands "
             "(operation_id,assignment_id,request_hash,result_status,created_at) "
             "VALUES ('complete-fixture',2001,'complete-request','review',?)", (stamp,),

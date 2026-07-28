@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import sys
 import secrets
@@ -41,8 +42,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatMemberUpdated, Update,
 )
 
-BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.9.0 (операционный UX скаута)"
-SQLITE_SCHEMA_VERSION = 290
+BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.9.1 (пилотная надёжность)"
+SQLITE_SCHEMA_VERSION = 293
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
 # Local development follows the documented `.env` workflow. Existing process
@@ -212,6 +213,7 @@ _telegram_runtime = {
     "webhook_configured": False,
     "pending_update_count": 0,
     "last_error": "",
+    "last_update_at": "",
     "checked_at": "",
     "configured_at": "",
 }
@@ -669,7 +671,9 @@ async def init_db():
                 created_at  TEXT,
                 approved_at TEXT,
                 approved_by INTEGER,
-                applied_at  TEXT
+                applied_at  TEXT,
+                city_change_requested TEXT,
+                city_change_requested_at TEXT
             )
         """)
         await db.execute("""
@@ -872,6 +876,28 @@ async def init_db():
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_disputes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assignment_id INTEGER NOT NULL UNIQUE,
+                task_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                reward INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                reconciliation_reason TEXT,
+                reconciliation_reference TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                opened_by INTEGER NOT NULL,
+                opened_at TEXT NOT NULL,
+                open_operation_id TEXT NOT NULL UNIQUE,
+                open_request_hash TEXT NOT NULL,
+                decided_by INTEGER,
+                decided_at TEXT,
+                decision_note TEXT,
+                decision_operation_id TEXT UNIQUE,
+                decision_request_hash TEXT
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS task_completion_commands (
                 operation_id TEXT PRIMARY KEY,
                 assignment_id INTEGER NOT NULL,
@@ -1056,6 +1082,9 @@ async def init_db():
                 balance_after INTEGER,
                 revoked_at TEXT,
                 revoked_by INTEGER,
+                revoke_note TEXT,
+                revoke_operation_id TEXT,
+                revoke_request_hash TEXT,
                 UNIQUE(user_id, award_id, slot)
             )
         """)
@@ -1080,6 +1109,10 @@ async def init_db():
         if "applied_at" not in member_columns:
             await db.execute("ALTER TABLE members ADD COLUMN applied_at TEXT")
             member_columns.add("applied_at")
+        for name in ("city_change_requested", "city_change_requested_at"):
+            if name not in member_columns:
+                await db.execute(f"ALTER TABLE members ADD COLUMN {name} TEXT")
+                member_columns.add(name)
         for name in (
             "city", "help_type", "transport", "availability",
             "about", "tags", "application_note",
@@ -1374,6 +1407,9 @@ async def init_db():
             ("operation_id", "TEXT"),
             ("revoked_at", "TEXT"),
             ("revoked_by", "INTEGER"),
+            ("revoke_note", "TEXT"),
+            ("revoke_operation_id", "TEXT"),
+            ("revoke_request_hash", "TEXT"),
         ):
             if name not in member_award_columns:
                 await db.execute(
@@ -1413,6 +1449,14 @@ async def init_db():
                 await db.execute(
                     f"ALTER TABLE media_objects ADD COLUMN {name} {sql_type}"
                 )
+        dispute_columns = {
+            row[1] for row in await (
+                await db.execute("PRAGMA table_info(task_disputes)")
+            ).fetchall()
+        }
+        for name in ("reconciliation_reason", "reconciliation_reference"):
+            if name not in dispute_columns:
+                await db.execute(f"ALTER TABLE task_disputes ADD COLUMN {name} TEXT")
         # Заявки из предыдущей версии, где был указан телефон, не должны снова
         # превращаться в пустую форму после миграции.
         await db.execute(
@@ -1443,6 +1487,9 @@ async def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_assignment_decision_operation "
             "ON task_assignments(decision_operation_id) "
             "WHERE decision_operation_id IS NOT NULL")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_disputes_status "
+            "ON task_disputes(status, opened_at, id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_withdrawals_user "
             "ON withdrawal_requests(user_id, created_at)")
@@ -1519,6 +1566,10 @@ async def init_db():
         await db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_member_awards_operation "
             "ON member_awards(operation_id) WHERE operation_id IS NOT NULL")
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_member_awards_revoke_operation "
+            "ON member_awards(revoke_operation_id) "
+            "WHERE revoke_operation_id IS NOT NULL")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_task_outbox_delivery "
             "ON task_outbox(status, available_at, id)")
@@ -1654,6 +1705,21 @@ async def init_db():
             )
             WHERE assignment_id IS NULL
               AND operation_id LIKE 'task_reward:task:%'
+        """)
+        await db.execute("""
+            UPDATE task_assignments SET terminal_by=(
+                SELECT l.created_by FROM bonus_ledger l
+                WHERE l.assignment_id=task_assignments.id
+                  AND l.amount=task_assignments.reward_snapshot
+                ORDER BY l.id DESC LIMIT 1
+            )
+            WHERE status='done' AND terminal_by IS NULL
+              AND EXISTS (
+                SELECT 1 FROM bonus_ledger l
+                WHERE l.assignment_id=task_assignments.id
+                  AND l.created_by IS NOT NULL
+                  AND l.amount=task_assignments.reward_snapshot
+              )
         """)
         await db.execute("""
             INSERT OR IGNORE INTO task_completion_commands
@@ -1844,7 +1910,9 @@ ANALYTICS_EVENTS = {
     "task_catalog_served", "task_created", "task_published",
     "task_announcement_retried", "task_claimed",
     "task_released", "task_cancelled", "task_expired", "proof_submitted",
-    "task_reviewed", "task_reward_credited", "withdrawal_requested",
+    "task_reviewed", "task_reward_credited", "task_dispute_opened",
+    "task_dispute_resolved", "city_change_requested", "city_change_decided",
+    "withdrawal_requested",
     "withdrawal_decided", "referral_confirmed",
 }
 
@@ -2016,6 +2084,20 @@ def _has_exact_tag(value, expected):
     return bool(expected) and expected in {
         item.casefold() for item in _tags_list(value)
     }
+
+
+def _city_display(value):
+    """Canonical human-readable city without common Russian prefixes."""
+    city = unicodedata.normalize("NFKC", str(value or ""))
+    city = " ".join(city.strip().split())[:80]
+    city = re.sub(r"^(?:г(?:ород)?\.?)[\s,-]+", "", city, flags=re.IGNORECASE)
+    return city.strip(" .,-")[:80]
+
+
+def _city_key(value):
+    """Stable comparison key for legacy and free-text city values."""
+    city = _city_display(value).casefold().replace("ё", "е")
+    return "".join(character for character in city if character.isalnum())
 
 
 def _operation_uuid(value):
@@ -2587,6 +2669,17 @@ async def add_bonus(uid, amount, reason, task_id=None, by=None, operation_id=Non
         if new_balance < 0:
             await db.rollback()
             raise ValueError("На балансе недостаточно бибибонусов.")
+        if int(amount) < 0:
+            reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+                "FROM task_disputes "
+                "WHERE user_id=? AND status IN ('pending','manual_required')", (uid,),
+            )).fetchone())[0] or 0)
+            if new_balance < reserved:
+                await db.rollback()
+                raise ValueError(
+                    "Часть баланса зарезервирована до решения спора по заданию."
+                )
         await db.execute(
             "UPDATE members SET bonus = ? WHERE user_id = ?", (new_balance, uid))
         await db.execute(
@@ -2789,14 +2882,20 @@ def _get_init_data(request):
 
 
 async def _auth_user(request):
-    tg_user = _check_webapp_auth(_get_init_data(request))
+    context = _auth_context(request)
+    tg_user = context["user"] if context else None
     if not tg_user or "id" not in tg_user:
         return None
     return tg_user
 
 
 def _auth_context(request):
-    return _check_webapp_context(_get_init_data(request))
+    cache_key = "bibitasks_auth_context"
+    if cache_key in request:
+        return request[cache_key]
+    context = _check_webapp_context(_get_init_data(request))
+    request[cache_key] = context
+    return context
 
 
 # ============================================================
@@ -3195,6 +3294,7 @@ async def telegram_webhook_handler(request):
             if not hmac.compare_digest(existing["payload_sha256"], payload_hash):
                 logger.error("Telegram update_id collision detected: %s", update_id)
                 return _json({"error": "update_conflict"}, status=409)
+            _telegram_runtime["last_update_at"] = received_at
             return _json({"ok": True, "duplicate": True})
         await db.execute(
             "INSERT INTO telegram_update_inbox "
@@ -3203,6 +3303,7 @@ async def telegram_webhook_handler(request):
             (update_id, encrypted_payload, payload_hash, received_at, received_at),
         )
         await db.commit()
+    _telegram_runtime["last_update_at"] = received_at
     return _json({"ok": True, "duplicate": False})
 
 
@@ -3356,6 +3457,8 @@ def _member_public(m):
         "next_trust_at": (nxt[3] if nxt else None),
         "applied": bool(m.get("applied_at") or m.get("role") == "applicant"),
         "city": m.get("city") or "",
+        "city_change_requested": m.get("city_change_requested") or "",
+        "city_change_requested_at": m.get("city_change_requested_at") or "",
         "application_note": m.get("application_note") or "",
     }
 
@@ -3440,7 +3543,7 @@ async def api_apply(request):
         return _json({"error": "auth"}, status=401)
     body = await _body(request)
     name = (body.get("name") or "").strip()[:80]
-    city = (body.get("city") or "").strip()[:80]
+    city = _city_display(body.get("city"))
     about = (body.get("about") or "").strip()[:600]
     if len(name) < 2:
         return _json({"error": "name", "message": "Укажите имя."}, status=400)
@@ -3484,6 +3587,113 @@ async def api_apply(request):
         )
         await db.commit()
     return _json({"ok": True})
+
+
+async def api_profile_city(request):
+    """Request an audited city correction; an admin must approve the gate change."""
+    tg = await _auth_user(request)
+    if not tg:
+        return _json({"error": "auth"}, status=401)
+    body = await _body(request)
+    action = str(body.get("action") or "request").strip().lower()
+    city = _city_display(body.get("city"))
+    if action not in {"request", "cancel"}:
+        return _json({"error": "action"}, status=400)
+    if action == "request" and (len(city) < 2 or not _city_key(city)):
+        return _json({"error": "city", "message": "Укажи город."}, status=400)
+    uid = int(tg["id"])
+    admin = await is_admin(uid)
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        member = await (await db.execute(
+            "SELECT status,city,city_change_requested,city_change_requested_at "
+            "FROM members WHERE user_id=?", (uid,),
+        )).fetchone()
+        if not member or (member["status"] != "approved" and not admin):
+            await db.rollback()
+            return _json({
+                "error": "not_approved",
+                "message": "Город можно изменить после одобрения заявки.",
+            }, status=403)
+        if action == "cancel":
+            expected_at = str(body.get("requested_at") or "")
+            if (
+                not member["city_change_requested"]
+                or not expected_at
+                or not hmac.compare_digest(
+                    str(member["city_change_requested_at"] or ""), expected_at,
+                )
+            ):
+                await db.rollback()
+                return _json({
+                    "error": "request_changed",
+                    "message": "Запрос уже изменился или обработан. Обнови профиль.",
+                }, status=409)
+            await db.execute(
+                "UPDATE members SET city_change_requested=NULL,"
+                "city_change_requested_at=NULL WHERE user_id=? "
+                "AND city_change_requested_at=?", (uid, expected_at),
+            )
+            await _track_event_in_tx(
+                db, "city_change_decided", "miniapp", user_id=uid,
+                outcome="cancel", dedupe_key=f"city_change_cancel:{uid}:{expected_at}",
+            )
+            await _enqueue_admins_in_tx(
+                db, f"city_change:{uid}:{expected_at}:cancelled",
+                f"📍 Участник ID {uid} отменил запрос на смену города.",
+            )
+            await db.commit()
+            return _json({"ok": True, "city": member["city"] or "", "pending": False})
+        if member["city_change_requested"]:
+            if _city_key(member["city_change_requested"]) == _city_key(city):
+                await db.rollback()
+                return _json({
+                    "ok": True, "city": member["city"] or "",
+                    "requested_city": member["city_change_requested"],
+                    "requested_at": member["city_change_requested_at"],
+                    "pending": True,
+                })
+            await db.rollback()
+            return _json({
+                "error": "request_pending",
+                "message": "Сначала отмени текущий запрос на смену города.",
+            }, status=409)
+        if _city_key(member["city"]) == _city_key(city):
+            await db.rollback()
+            return _json({"ok": True, "city": member["city"], "pending": False})
+        active = await (await db.execute(
+            "SELECT 1 FROM task_assignments WHERE user_id=? "
+            "AND status IN ('claimed','review') UNION ALL "
+            "SELECT 1 FROM tasks WHERE assigned_to=? AND status='open' LIMIT 1",
+            (uid, uid),
+        )).fetchone()
+        if active:
+            await db.rollback()
+            return _json({
+                "error": "active_assignment",
+                "message": "Сначала заверши или освободи активное задание, затем запроси смену города.",
+            }, status=409)
+        requested_at = now_iso()
+        await db.execute(
+            "UPDATE members SET city_change_requested=?,city_change_requested_at=? "
+            "WHERE user_id=?", (city, requested_at, uid),
+        )
+        await _track_event_in_tx(
+            db, "city_change_requested", "miniapp", user_id=uid,
+            outcome="pending", dedupe_key=f"city_change:{uid}:{requested_at}",
+        )
+        await _enqueue_admins_in_tx(
+            db, f"city_change:{uid}:{requested_at}",
+            f"📍 Запрос на смену города\nУчастник: ID {uid}\n"
+            f"Было: {member['city'] or 'не указан'}\nНовый город: {city}\n\n"
+            "Подтверди изменение в разделе «Скаут».",
+        )
+        await db.commit()
+    return _json({
+        "ok": True, "city": member["city"] or "", "requested_city": city,
+        "requested_at": requested_at, "pending": True,
+    })
 
 
 async def _all_admin_ids():
@@ -3602,10 +3812,7 @@ async def api_tasks_available(request):
         member = await (await db.execute(
             "SELECT city FROM members WHERE user_id=?", (uid,)
         )).fetchone()
-        worker_city = (
-            " ".join(str(member["city"] or "").split()).casefold()
-            if member else ""
-        )
+        worker_city = _city_key(member["city"] if member else "")
         task_rows = await (await db.execute(
             "SELECT t.*, m.full_name AS assigned_name FROM tasks t "
             "LEFT JOIN members m ON m.user_id=t.assigned_to "
@@ -3629,10 +3836,7 @@ async def api_tasks_available(request):
         available = []
         for source in task_rows:
             row = dict(source)
-            if not worker_city or (
-                " ".join(str(row.get("city") or "").split()).casefold()
-                != worker_city
-            ):
+            if not worker_city or _city_key(row.get("city")) != worker_city:
                 continue
             runs = by_task.get(int(row["id"]), [])
             committed = [
@@ -3699,6 +3903,70 @@ async def api_tasks_available(request):
     })
 
 
+async def api_task_context(request):
+    """Explain why a task deep link is not present in the worker catalog."""
+    uid, err = await _require_worker(request)
+    if err is not None:
+        return err
+    task_id = _as_int(request.rel_url.query.get("id"))
+    if task_id is None or task_id <= 0:
+        return _json({"error": "task", "message": "Некорректная ссылка на задание."}, status=400)
+    await _expire_due_tasks()
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        task = await (await db.execute(
+            "SELECT id,status,city,assigned_to,repeatable,max_participants "
+            "FROM tasks WHERE id=?", (task_id,),
+        )).fetchone()
+        if not task:
+            return _json({
+                "ok": True, "reason": "not_found",
+                "message": "Задание по этой ссылке не найдено или уже удалено.",
+            })
+        member = await (await db.execute(
+            "SELECT city FROM members WHERE user_id=?", (uid,),
+        )).fetchone()
+        own = await (await db.execute(
+            "SELECT status FROM task_assignments WHERE task_id=? AND user_id=? "
+            "ORDER BY id DESC LIMIT 1", (task_id, uid),
+        )).fetchone()
+        active_count = int((await (await db.execute(
+            "SELECT COUNT(*) FROM task_assignments WHERE task_id=? "
+            "AND status IN ('claimed','review','done')", (task_id,),
+        )).fetchone())[0])
+    if own:
+        messages = {
+            "done": "Ты уже выполнил это задание — результат есть в истории бонусов.",
+            "rejected": "Этот отчёт был окончательно отклонён ответственным.",
+            "cancelled": "Твоё выполнение этого задания отменено.",
+            "claimed": "Задание уже находится у тебя в работе.",
+            "review": "Твой отчёт уже ожидает проверки.",
+        }
+        if own["status"] in messages:
+            return _json({"ok": True, "reason": own["status"], "message": messages[own["status"]]})
+    if _city_key(member["city"] if member else "") != _city_key(task["city"]):
+        return _json({
+            "ok": True, "reason": "city_mismatch",
+            "message": "Задание относится к другому городу. Проверь город в профиле.",
+        })
+    if task["assigned_to"] is not None and int(task["assigned_to"]) != int(uid):
+        return _json({
+            "ok": True, "reason": "not_assigned",
+            "message": "Это персональное задание назначено другому участнику.",
+        })
+    if task["status"] == "expired":
+        message = "Срок задания по этой ссылке уже закончился."
+    elif task["status"] != "open":
+        message = "Задание по этой ссылке уже закрыто или отменено."
+    elif not task["repeatable"] and active_count:
+        message = "Это задание уже взял другой участник."
+    elif task["max_participants"] is not None and active_count >= int(task["max_participants"]):
+        message = "Все места в этом задании уже заняты."
+    else:
+        message = "Задание сейчас недоступно. Обнови каталог или уточни у ответственного."
+    return _json({"ok": True, "reason": str(task["status"]), "message": message})
+
+
 def _telegram_message_url(chat_id, message_id, thread_id=None, username=""):
     """Строит официальный t.me message link для public/private supergroup."""
     try:
@@ -3756,7 +4024,8 @@ def _task_public(t):
         "assigned_name": t.get("assigned_name") or "",
         "is_personal": bool(t.get("assigned_to")),
         "slot_start": t.get("slot_start"),
-        "slot_end": t.get("assignment_due_at") or t.get("slot_end"),
+        "slot_end": t.get("revision_due_at") or t.get("assignment_due_at") or t.get("slot_end"),
+        "revision_due_at": t.get("revision_due_at"),
         "repeatable": bool(t.get("repeatable")),
         "evidence_policy": _public_evidence_policy(t.get("evidence_policy")),
         "max_participants": t.get("max_participants"),
@@ -3796,6 +4065,60 @@ def _task_public(t):
         "announcement_thread_id": t.get("announcement_thread_id"),
         "announcement_url": announcement_url,
     }
+
+
+def _admin_task_public(t, admin_id):
+    """Add maker-checker UI state without exposing Telegram IDs."""
+    item = _task_public(t)
+    if t.get("assignment_status") == "review":
+        self_review = int(t.get("assignment_user_id") or 0) == int(admin_id)
+        maker_review = int(t.get("created_by") or 0) == int(admin_id)
+        item["can_approve"] = not (self_review or maker_review)
+        item["approval_block_reason"] = (
+            "Нельзя подтверждать собственное выполнение — нужен второй ответственный."
+            if self_review else
+            "Создатель задания не подтверждает выплату — нужен второй ответственный."
+            if maker_review else ""
+        )
+    return item
+
+
+def _admin_decision_public(t, admin_id):
+    item = _task_public(t)
+    dispute_status = t.get("dispute_status") or ""
+    assignment_user = int(t.get("assignment_user_id") or 0)
+    item.update({
+        "dispute_id": t.get("dispute_id"),
+        "dispute_status": dispute_status,
+        "dispute_reason": t.get("dispute_reason") or "",
+        "dispute_reconciliation_reason": (
+            t.get("dispute_reconciliation_reason") or ""
+        ),
+        "dispute_reconciliation_reference": (
+            t.get("dispute_reconciliation_reference") or ""
+        ),
+        "dispute_decision_note": t.get("dispute_decision_note") or "",
+        "dispute_opened_at": t.get("dispute_opened_at"),
+        "dispute_decided_at": t.get("dispute_decided_at"),
+        "dispute_opened_by_name": t.get("dispute_opened_by_name") or "",
+        "dispute_decided_by_name": t.get("dispute_decided_by_name") or "",
+        "assignment_terminal_by_name": t.get("assignment_terminal_by_name") or "",
+        "can_open_dispute": (
+            t.get("assignment_status") == "done" and not dispute_status
+            and assignment_user != int(admin_id)
+        ),
+        "can_decide_dispute": (
+            dispute_status in {"pending", "manual_required"}
+            and int(t.get("dispute_opened_by") or 0) != int(admin_id)
+            and assignment_user != int(admin_id)
+            and int(t.get("assignment_terminal_by") or 0) != int(admin_id)
+        ),
+        "dispute_waits_for_second": (
+            dispute_status in {"pending", "manual_required"}
+            and int(t.get("dispute_opened_by") or 0) == int(admin_id)
+        ),
+    })
+    return item
 
 
 def _evidence_public(row):
@@ -3923,8 +4246,8 @@ async def api_task_claim(request):
             "SELECT city FROM members WHERE user_id=? AND status='approved'",
             (uid,),
         )).fetchone()
-        worker_city = " ".join(str(member["city"] or "").split()).casefold() if member else ""
-        task_city = " ".join(str(row["city"] or "").split()).casefold()
+        worker_city = _city_key(member["city"] if member else "")
+        task_city = _city_key(row["city"])
         if not worker_city or not task_city or worker_city != task_city:
             await db.rollback()
             return _json({
@@ -4730,6 +5053,17 @@ async def api_withdraw_request(request):
         if not member:
             await db.rollback()
             return _json({"error": "not_approved"}, status=403)
+        disputed = await (await db.execute(
+            "SELECT id FROM task_disputes WHERE user_id=? "
+            "AND status IN ('pending','manual_required') LIMIT 1",
+            (uid,),
+        )).fetchone()
+        if disputed:
+            await db.rollback()
+            return _json({
+                "error": "disputed_reward",
+                "message": "Перевод временно недоступен: ответственным нужно завершить проверку одной выплаты.",
+            }, status=409)
         pending = await (await db.execute(
             "SELECT id FROM withdrawal_requests "
             "WHERE user_id=? AND status IN ('pending','processing')",
@@ -4868,6 +5202,13 @@ async def api_admin_overview(request):
             "application_note, created_at FROM members "
             "WHERE status='blocked' AND (applied_at IS NOT NULL OR role='applicant') "
             "ORDER BY applied_at DESC, created_at DESC LIMIT 50")).fetchall()
+        city_changes = await (await db.execute(
+            "SELECT user_id,full_name,username,city,city_change_requested,"
+            "city_change_requested_at FROM members "
+            "WHERE status='approved' AND city_change_requested IS NOT NULL "
+            "AND TRIM(city_change_requested)<>'' "
+            "ORDER BY city_change_requested_at ASC,user_id ASC"
+        )).fetchall()
         review = await (await db.execute(
             "SELECT t.*, m.full_name AS assigned_name, "
             "a.id AS assignment_id, a.status AS assignment_status, "
@@ -4884,6 +5225,51 @@ async def api_admin_overview(request):
         review_total = int((await (await db.execute(
             "SELECT COUNT(*) FROM task_assignments WHERE status='review'"
         )).fetchone())[0])
+        pending_disputes = await (await db.execute(
+            "SELECT t.*,a.id AS assignment_id,a.status AS assignment_status,"
+            "a.user_id AS assignment_user_id,a.proof_note AS assignment_proof_note,"
+            "a.review_note AS assignment_review_note,a.reward_snapshot,"
+            "a.done_at AS assignment_done_at,a.terminal_by AS assignment_terminal_by,"
+            "u.full_name AS claimed_name,"
+            "d.id AS dispute_id,d.status AS dispute_status,d.reason AS dispute_reason,"
+            "d.reconciliation_reason AS dispute_reconciliation_reason,"
+            "d.reconciliation_reference AS dispute_reconciliation_reference,"
+            "d.opened_by AS dispute_opened_by,d.opened_at AS dispute_opened_at,"
+            "d.decision_note AS dispute_decision_note,d.decided_at AS dispute_decided_at,"
+            "op.full_name AS dispute_opened_by_name,dc.full_name AS dispute_decided_by_name,"
+            "rv.full_name AS assignment_terminal_by_name "
+            "FROM task_assignments a JOIN tasks t ON t.id=a.task_id "
+            "LEFT JOIN members u ON u.user_id=a.user_id "
+            "LEFT JOIN task_disputes d ON d.assignment_id=a.id "
+            "LEFT JOIN members op ON op.user_id=d.opened_by "
+            "LEFT JOIN members dc ON dc.user_id=d.decided_by "
+            "LEFT JOIN members rv ON rv.user_id=a.terminal_by "
+            "WHERE d.status IN ('pending','manual_required') "
+            "ORDER BY d.opened_at ASC,a.id ASC"
+        )).fetchall()
+        recent_decisions = await (await db.execute(
+            "SELECT t.*,a.id AS assignment_id,a.status AS assignment_status,"
+            "a.user_id AS assignment_user_id,a.proof_note AS assignment_proof_note,"
+            "a.review_note AS assignment_review_note,a.reward_snapshot,"
+            "a.done_at AS assignment_done_at,a.terminal_by AS assignment_terminal_by,"
+            "u.full_name AS claimed_name,"
+            "d.id AS dispute_id,d.status AS dispute_status,d.reason AS dispute_reason,"
+            "d.reconciliation_reason AS dispute_reconciliation_reason,"
+            "d.reconciliation_reference AS dispute_reconciliation_reference,"
+            "d.opened_by AS dispute_opened_by,d.opened_at AS dispute_opened_at,"
+            "d.decision_note AS dispute_decision_note,d.decided_at AS dispute_decided_at,"
+            "op.full_name AS dispute_opened_by_name,dc.full_name AS dispute_decided_by_name,"
+            "rv.full_name AS assignment_terminal_by_name "
+            "FROM task_assignments a JOIN tasks t ON t.id=a.task_id "
+            "LEFT JOIN members u ON u.user_id=a.user_id "
+            "LEFT JOIN task_disputes d ON d.assignment_id=a.id "
+            "LEFT JOIN members op ON op.user_id=d.opened_by "
+            "LEFT JOIN members dc ON dc.user_id=d.decided_by "
+            "LEFT JOIN members rv ON rv.user_id=a.terminal_by "
+            "WHERE a.status IN ('done','reversed') AND "
+            "(d.status IS NULL OR d.status NOT IN ('pending','manual_required')) "
+            "ORDER BY COALESCE(d.opened_at,a.terminal_at,a.done_at) DESC,a.id DESC LIMIT 50"
+        )).fetchall()
         open_tasks = await (await db.execute(
             "SELECT t.*, m.full_name AS assigned_name, "
             "a.id AS assignment_id, a.status AS assignment_status, "
@@ -4900,8 +5286,8 @@ async def api_admin_overview(request):
             "AND aa.status IN ('claimed','review') ORDER BY aa.id DESC LIMIT 1) "
             "LEFT JOIN members c ON c.user_id=a.user_id "
             "LEFT JOIN task_outbox o ON o.event_key=('task:' || t.id || ':announcement') "
-            "WHERE t.status IN ('open','closed') "
-            "ORDER BY t.created_at DESC LIMIT 100")).fetchall()
+            "WHERE t.status='open' OR a.status='claimed' "
+            "ORDER BY t.created_at DESC")).fetchall()
         team = await (await db.execute(
             "SELECT user_id, full_name, username, city, about, tags, role, bonus, "
             "done_count, chat_xp, created_at FROM members "
@@ -4916,8 +5302,12 @@ async def api_admin_overview(request):
             "FROM withdrawal_requests w "
             "LEFT JOIN members m ON m.user_id=w.user_id "
             "LEFT JOIN members p ON p.user_id=w.processing_by "
-            "ORDER BY CASE WHEN w.status='pending' THEN 0 ELSE 1 END, "
-            "w.id DESC LIMIT 100"
+            "WHERE w.status IN ('pending','processing') OR w.id IN ("
+            "SELECT recent.id FROM withdrawal_requests recent "
+            "WHERE recent.status NOT IN ('pending','processing') "
+            "ORDER BY recent.id DESC LIMIT 100) "
+            "ORDER BY CASE w.status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END, "
+            "w.id DESC"
         )).fetchall()
         awards = await (await db.execute(
             "SELECT * FROM awards ORDER BY active DESC, bonus DESC, id"
@@ -4929,18 +5319,28 @@ async def api_admin_overview(request):
             "JOIN awards a ON a.id=ma.award_id "
             "LEFT JOIN members m ON m.user_id=ma.user_id "
             "WHERE ma.revoked_at IS NULL "
-            "ORDER BY ma.id DESC LIMIT 40"
+            "ORDER BY ma.id DESC"
         )).fetchall()
     review_tasks = [dict(r) for r in review]
+    pending_dispute_tasks = [dict(r) for r in pending_disputes]
+    recent_decision_tasks = [dict(r) for r in recent_decisions]
     open_task_items = [dict(r) for r in open_tasks]
-    await _attach_task_evidence([*review_tasks, *open_task_items])
+    await _attach_task_evidence([
+        *review_tasks, *pending_dispute_tasks, *recent_decision_tasks, *open_task_items,
+    ])
     return _json({
         "ok": True,
         "pending": [dict(r) for r in pending],
         "pending_total": pending_total,
         "rejected": [dict(r) for r in rejected],
-        "review": [_task_public(r) for r in review_tasks],
+        "city_changes": [dict(r) for r in city_changes],
+        "review": [_admin_task_public(r, uid) for r in review_tasks],
         "review_total": review_total,
+        "recent_decisions": [
+            _admin_decision_public(r, uid)
+            for r in [*pending_dispute_tasks, *recent_decision_tasks]
+        ],
+        "pending_dispute_total": len(pending_dispute_tasks),
         "open_tasks": [_task_public(r) for r in open_task_items],
         "team": [{
             "user_id": r["user_id"], "name": r["full_name"], "role": r["role"],
@@ -4961,7 +5361,7 @@ async def api_admin_overview(request):
 
 async def api_admin_queue(request):
     """Пагинация и поиск двух растущих очередей скаута."""
-    _, err = await _require_admin(request)
+    admin_id, err = await _require_admin(request)
     if err is not None:
         return err
     params = request.rel_url.query
@@ -5030,7 +5430,7 @@ async def api_admin_queue(request):
             )).fetchall()
             raw_items = [dict(row) for row in rows]
             await _attach_task_evidence(raw_items)
-            items = [_task_public(row) for row in raw_items]
+            items = [_admin_task_public(row, admin_id) for row in raw_items]
         else:
             return _json({"error": "kind"}, status=400)
     next_offset = offset + len(items)
@@ -5145,6 +5545,7 @@ async def api_admin_members(request):
     params = request.rel_url.query
     query = str(params.get("q", "")).strip()[:100].lstrip("@#").casefold()
     tag = str(params.get("tag", "")).strip()[:30].lstrip("#").casefold()
+    city = _city_display(params.get("city"))
     try:
         limit = min(100, max(1, int(params.get("limit", "50"))))
     except (TypeError, ValueError):
@@ -5175,6 +5576,9 @@ async def api_admin_members(request):
     if tag:
         where.append("HAS_EXACT_TAG(tags, ?)=1")
         values.append(tag)
+    if city:
+        where.append("CITY_KEY(city)=?")
+        values.append(_city_key(city))
     where_sql = " AND ".join(where)
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
@@ -5182,6 +5586,8 @@ async def api_admin_members(request):
             "CASEFOLD", 1, lambda value: str(value or "").casefold(), deterministic=True)
         await db.create_function(
             "HAS_EXACT_TAG", 2, _has_exact_tag, deterministic=True)
+        await db.create_function(
+            "CITY_KEY", 1, _city_key, deterministic=True)
         total = int((await (await db.execute(
             f"SELECT COUNT(*) FROM members WHERE {where_sql}", values,
         )).fetchone())[0])
@@ -5208,6 +5614,106 @@ async def api_admin_members(request):
         "team": items,
         "total": total,
         "next_cursor": str(next_offset) if next_offset < total else None,
+    })
+
+
+async def api_admin_member_tags_catalog(request):
+    """Unique tags across the entire approved team, not the current page."""
+    _, err = await _require_admin(request)
+    if err is not None:
+        return err
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        rows = await (await db.execute(
+            "SELECT tags FROM members WHERE status='approved' AND tags IS NOT NULL"
+        )).fetchall()
+    catalog = {}
+    for row in rows:
+        for tag in _tags_list(row[0]):
+            key = tag.casefold()
+            item = catalog.setdefault(key, {"tag": tag, "count": 0})
+            item["count"] += 1
+    items = sorted(
+        catalog.values(), key=lambda item: (-item["count"], item["tag"].casefold()),
+    )
+    return _json({"ok": True, "items": items[:500], "total": len(items)})
+
+
+async def api_admin_member_city_decide(request):
+    """Approve or reject a participant's pending city-gate correction."""
+    admin_id, err = await _require_admin(request)
+    if err is not None:
+        return err
+    body = await _body(request)
+    user_id = _as_int(body.get("user_id"))
+    decision = str(body.get("decision") or "").strip().lower()
+    requested_at = str(body.get("requested_at") or "")
+    if user_id is None or decision not in {"approve", "reject"} or not requested_at:
+        return _json({"error": "decision"}, status=400)
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        member = await (await db.execute(
+            "SELECT full_name,city,city_change_requested,city_change_requested_at FROM members "
+            "WHERE user_id=? AND status='approved'", (user_id,),
+        )).fetchone()
+        if not member:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        requested_city = _city_display(member["city_change_requested"])
+        if not requested_city:
+            await db.rollback()
+            return _json({
+                "error": "already_decided", "message": "Запрос на смену города уже обработан.",
+            }, status=409)
+        if not hmac.compare_digest(
+            str(member["city_change_requested_at"] or ""), requested_at,
+        ):
+            await db.rollback()
+            return _json({
+                "error": "request_changed",
+                "message": "Запрос изменился после загрузки карточки. Обнови очередь и проверь новый город.",
+            }, status=409)
+        active = await (await db.execute(
+            "SELECT 1 FROM task_assignments WHERE user_id=? "
+            "AND status IN ('claimed','review') UNION ALL "
+            "SELECT 1 FROM tasks WHERE assigned_to=? AND status='open' LIMIT 1",
+            (user_id, user_id),
+        )).fetchone()
+        if decision == "approve" and active:
+            await db.rollback()
+            return _json({
+                "error": "active_assignment",
+                "message": "У участника появилось активное задание. Сначала завершите или освободите его.",
+            }, status=409)
+        previous_city = member["city"] or ""
+        if decision == "approve":
+            await db.execute(
+                "UPDATE members SET city=?,city_change_requested=NULL,"
+                "city_change_requested_at=NULL WHERE user_id=?",
+                (requested_city, user_id),
+            )
+            notification = f"✅ Город в профиле изменён: {requested_city}. Теперь задания будут подбираться для него."
+        else:
+            await db.execute(
+                "UPDATE members SET city_change_requested=NULL,"
+                "city_change_requested_at=NULL WHERE user_id=?", (user_id,),
+            )
+            notification = (
+                f"Запрос на смену города отклонён. В профиле остался город: {previous_city or 'не указан'}."
+            )
+        await _track_event_in_tx(
+            db, "city_change_decided", "backend", user_id=user_id,
+            outcome=decision,
+            dedupe_key=f"city_change_decide:{user_id}:{requested_city}:{decision}:{admin_id}",
+        )
+        await _enqueue_outbox_in_tx(
+            db, f"city_change:{user_id}:{requested_city}:{decision}", "direct",
+            {"text": notification}, recipient_id=user_id,
+        )
+        await db.commit()
+    return _json({
+        "ok": True, "user_id": user_id, "decision": decision,
+        "city": requested_city if decision == "approve" else previous_city,
     })
 
 
@@ -5347,7 +5853,7 @@ async def api_admin_task_create(request):
     title = (body.get("title") or "").strip()[:120]
     details = (body.get("details") or "").strip()[:500]
     address = (body.get("address") or "").strip()[:200]
-    city = (body.get("city") or "").strip()[:80]
+    city = _city_display(body.get("city"))
     announce = body.get("announce") is True
     if len(title) < 3:
         return _json({"error": "title", "message": "Укажи понятный заголовок задания."}, status=400)
@@ -5379,6 +5885,11 @@ async def api_admin_task_create(request):
             return _json({
                 "error": "assignee",
                 "message": "Можно назначить только одобренного участника.",
+            }, status=400)
+        if _city_key(assignee.get("city")) != _city_key(city):
+            return _json({
+                "error": "assignee_city",
+                "message": "Город участника не совпадает с городом задания.",
             }, status=400)
     repeatable = bool(body.get("repeatable"))
     if repeatable and assigned_to is not None:
@@ -5875,6 +6386,443 @@ async def api_admin_task_approve(request):
         "ok": True, "assignment_id": assignment_id,
         "status": result_status,
         "operation_id": operation_id, "idempotent": False,
+    })
+
+
+async def api_admin_task_dispute(request):
+    """Two-person, idempotent correction of an incorrectly approved task."""
+    admin_id, err = await _require_admin(request)
+    if err is not None:
+        return err
+    body = await _body(request)
+    action = str(body.get("action") or "").strip().lower()
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if action not in {"open", "decide"} or not operation_id:
+        return _json({
+            "error": "dispute_identity",
+            "message": "Нужны action и уникальный operation_id UUID.",
+        }, status=400)
+    if action == "open":
+        assignment_id = _as_int(body.get("assignment_id"))
+        reason = " ".join(str(body.get("reason") or "").split())[:300]
+        if assignment_id is None or len(reason) < 5:
+            return _json({
+                "error": "reason",
+                "message": "Опиши ошибку решения минимум пятью символами.",
+            }, status=400)
+        request_hash = _request_fingerprint({
+            "action": action, "assignment_id": assignment_id,
+            "reason": reason, "admin_id": int(admin_id),
+        })
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            replay = await (await db.execute(
+                "SELECT * FROM task_disputes WHERE open_operation_id=?",
+                (operation_id,),
+            )).fetchone()
+            if replay:
+                if replay["open_request_hash"] != request_hash:
+                    await db.rollback()
+                    return _json({"error": "operation_conflict"}, status=409)
+                await db.rollback()
+                return _json({
+                    "ok": True, "dispute_id": replay["id"],
+                    "status": replay["status"], "idempotent": True,
+                })
+            assignment = await (await db.execute(
+                "SELECT a.*,t.title,t.created_by FROM task_assignments a "
+                "JOIN tasks t ON t.id=a.task_id WHERE a.id=?", (assignment_id,),
+            )).fetchone()
+            if not assignment:
+                await db.rollback()
+                return _json({"error": "not_found"}, status=404)
+            if assignment["status"] != "done":
+                await db.rollback()
+                return _json({
+                    "error": "not_disputable",
+                    "message": "Исправить можно только уже подтверждённое выполнение.",
+                }, status=409)
+            if int(assignment["user_id"]) == int(admin_id):
+                await db.rollback()
+                return _json({
+                    "error": "self_dispute",
+                    "message": "Исполнитель не может открыть спор по собственной выплате.",
+                }, status=403)
+            existing = await (await db.execute(
+                "SELECT id,status FROM task_disputes WHERE assignment_id=?",
+                (assignment_id,),
+            )).fetchone()
+            if existing:
+                await db.rollback()
+                return _json({
+                    "error": "already_disputed", "dispute_id": existing["id"],
+                    "status": existing["status"],
+                    "message": "По этому выполнению спор уже зарегистрирован.",
+                }, status=409)
+            reward = int(assignment["reward_snapshot"] or 0)
+            credit = await (await db.execute(
+                "SELECT amount FROM bonus_ledger WHERE assignment_id=? "
+                "AND operation_id=?",
+                (assignment_id, f"task_reward:assignment:{assignment_id}"),
+            )).fetchone()
+            manual_reconciliation_reason = ""
+            if assignment["terminal_by"] is None:
+                manual_reconciliation_reason = "Не найден исходный проверяющий."
+            if reward < 0 or not credit or int(credit["amount"]) != reward:
+                manual_reconciliation_reason = "Исходная выплата не совпадает с выполнением."
+            member_balance = await (await db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (assignment["user_id"],),
+            )).fetchone()
+            reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+                "FROM task_disputes "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (assignment["user_id"],),
+            )).fetchone())[0] or 0)
+            needs_manual_reconciliation = bool(
+                not member_balance
+                or int(member_balance["bonus"] or 0) < reserved + reward
+            )
+            if needs_manual_reconciliation and not manual_reconciliation_reason:
+                manual_reconciliation_reason = "Свободный баланс ниже суммы спора."
+            admin_rows = await (await db.execute(
+                "SELECT user_id FROM members WHERE role='admin' AND status='approved'"
+            )).fetchall()
+            eligible_admins = set(ADMIN_IDS) | {int(row[0]) for row in admin_rows}
+            excluded_admins = {int(admin_id), int(assignment["user_id"])}
+            if assignment["terminal_by"] is not None:
+                excluded_admins.add(int(assignment["terminal_by"]))
+            eligible_admins.difference_update(excluded_admins)
+            if not eligible_admins:
+                await db.rollback()
+                return _json({
+                    "error": "no_independent_reviewer",
+                    "message": "Нет независимого ответственного для решения спора. Попроси исходного проверяющего открыть спор или добавь третьего ответственного.",
+                }, status=409)
+            opened_at = now_iso()
+            dispute_status = (
+                "manual_required" if manual_reconciliation_reason else "pending"
+            )
+            cursor = await db.execute(
+                "INSERT INTO task_disputes "
+                "(assignment_id,task_id,user_id,reward,reason,reconciliation_reason,"
+                "status,opened_by,"
+                "opened_at,open_operation_id,open_request_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    assignment_id, assignment["task_id"], assignment["user_id"],
+                    reward, reason, manual_reconciliation_reason or None,
+                    dispute_status, admin_id, opened_at,
+                    operation_id, request_hash,
+                ),
+            )
+            dispute_id = cursor.lastrowid
+            await _track_event_in_tx(
+                db, "task_dispute_opened", "backend",
+                user_id=assignment["user_id"], task_id=assignment["task_id"],
+                assignment_id=assignment_id, outcome=dispute_status,
+                dedupe_key=f"task_dispute_open:{operation_id}",
+            )
+            await _enqueue_admins_in_tx(
+                db, f"task_dispute:{dispute_id}:opened",
+                "⚠️ Открыт спор по подтверждённому заданию\n"
+                f"Задание: {assignment['title']}\nПричина: {reason}\n"
+                + ((manual_reconciliation_reason + " Нужна ручная сверка с Бибибайком.\n") if manual_reconciliation_reason else "")
+                + "Нужен второй ответственный в приложении.",
+            )
+            await db.commit()
+        return _json({
+            "ok": True, "dispute_id": dispute_id,
+            "status": dispute_status, "idempotent": False,
+            "manual_reconciliation": bool(manual_reconciliation_reason),
+        })
+
+    dispute_id = _as_int(body.get("dispute_id"))
+    decision = str(body.get("decision") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())[:300]
+    reconciliation_reference = str(
+        body.get("reconciliation_reference") or ""
+    ).strip()[:100]
+    if dispute_id is None or decision not in {
+        "approve", "reject", "manual_reversed", "manual_no_change",
+    }:
+        return _json({"error": "decision"}, status=400)
+    if len(note) < 3:
+        return _json({
+            "error": "note", "message": "Укажи, что проверил второй ответственный.",
+        }, status=400)
+    if decision in {"manual_reversed", "manual_no_change"} and not re.fullmatch(
+        r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9._:/-]{2,99}",
+        reconciliation_reference,
+    ):
+        return _json({
+            "error": "reconciliation_reference",
+            "message": "Укажи номер операции или обращения из Бибибайка без пробелов.",
+        }, status=400)
+    decision_hash = _request_fingerprint({
+        "action": action, "dispute_id": dispute_id, "decision": decision,
+        "note": note, "admin_id": int(admin_id),
+        "reconciliation_reference": reconciliation_reference,
+    })
+    await _expire_due_tasks()
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        replay = await (await db.execute(
+            "SELECT * FROM task_disputes WHERE decision_operation_id=?",
+            (operation_id,),
+        )).fetchone()
+        if replay:
+            if replay["decision_request_hash"] != decision_hash:
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
+            await db.rollback()
+            return _json({
+                "ok": True, "dispute_id": replay["id"],
+                "status": replay["status"], "idempotent": True,
+            })
+        dispute = await (await db.execute(
+            "SELECT d.*,a.status AS assignment_status,a.done_at,a.terminal_by,"
+            "t.title,t.repeatable,t.status AS task_status "
+            "FROM task_disputes d JOIN task_assignments a ON a.id=d.assignment_id "
+            "JOIN tasks t ON t.id=d.task_id WHERE d.id=?", (dispute_id,),
+        )).fetchone()
+        if not dispute:
+            await db.rollback()
+            return _json({"error": "not_found"}, status=404)
+        if dispute["status"] not in {"pending", "manual_required"}:
+            await db.rollback()
+            return _json({
+                "error": "already_decided", "status": dispute["status"],
+                "message": "Этот спор уже обработан.",
+            }, status=409)
+        if int(dispute["opened_by"]) == int(admin_id):
+            await db.rollback()
+            return _json({
+                "error": "two_person_rule",
+                "message": "Открывавший спор не может сам подтвердить исправление.",
+            }, status=403)
+        if int(dispute["user_id"]) == int(admin_id):
+            await db.rollback()
+            return _json({
+                "error": "self_dispute",
+                "message": "Исполнитель не может решать спор по своей выплате.",
+            }, status=403)
+        if (
+            dispute["terminal_by"] is not None
+            and int(dispute["terminal_by"]) == int(admin_id)
+        ):
+            await db.rollback()
+            return _json({
+                "error": "original_reviewer",
+                "message": "Ответственный за исходное подтверждение не может сам решать спор по нему.",
+            }, status=403)
+        decided_at = now_iso()
+        new_balance = None
+        manual_decisions = {"manual_reversed", "manual_no_change"}
+        if decision in manual_decisions and dispute["status"] != "manual_required":
+            await db.rollback()
+            return _json({"error": "not_manual_required"}, status=409)
+        if dispute["status"] == "manual_required" and decision not in manual_decisions:
+            await db.rollback()
+            return _json({
+                "error": "manual_reconciliation_required",
+                "message": (
+                    "Автоматическое сторно для этого случая заблокировано. "
+                    "Сначала сверь баланс и проводки с Бибибайком, затем закрой ручную сверку."
+                ),
+            }, status=409)
+        if decision == "manual_reversed":
+            if dispute["assignment_status"] != "done":
+                await db.rollback()
+                return _json({"error": "assignment_changed"}, status=409)
+            member = await (await db.execute(
+                "SELECT bonus,done_count FROM members WHERE user_id=?",
+                (dispute["user_id"],),
+            )).fetchone()
+            if not member or int(member["done_count"] or 0) < 1:
+                await db.rollback()
+                return _json({"error": "member_mismatch"}, status=409)
+            remaining_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+                "FROM task_disputes WHERE user_id=? "
+                "AND status IN ('pending','manual_required') AND id<>?",
+                (dispute["user_id"], dispute_id),
+            )).fetchone())[0] or 0)
+            balance = int(member["bonus"] or 0)
+            available = max(0, balance - remaining_reserved)
+            taken = min(max(0, int(dispute["reward"] or 0)), available)
+            new_balance = balance - taken
+            changed = await db.execute(
+                "UPDATE task_assignments SET status='reversed',terminal_at=?,"
+                "terminal_by=?,terminal_reason=?,review_note=?,version=version+1 "
+                "WHERE id=? AND status='done'",
+                (
+                    decided_at, admin_id, "manual_reward_reversed", note,
+                    dispute["assignment_id"],
+                ),
+            )
+            if changed.rowcount != 1:
+                await db.rollback()
+                return _json({"error": "transition_conflict"}, status=409)
+            await db.execute(
+                "UPDATE members SET bonus=?,done_count=done_count-1 WHERE user_id=?",
+                (new_balance, dispute["user_id"]),
+            )
+            await db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,task_id,assignment_id,created_by,created_at,"
+                "operation_id,balance_after) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    dispute["user_id"], -taken,
+                    f"Ручная сверка задания: {dispute['title']}", dispute["task_id"],
+                    dispute["assignment_id"], admin_id, decided_at,
+                    f"task_reward_manual_reversal:assignment:{dispute['assignment_id']}",
+                    new_balance,
+                ),
+            )
+            if not int(dispute["repeatable"] or 0) and dispute["task_status"] == "closed":
+                await db.execute(
+                    "UPDATE tasks SET status='open',version=version+1 "
+                    "WHERE id=? AND status='closed'", (dispute["task_id"],),
+                )
+        if decision == "approve":
+            if dispute["assignment_status"] != "done":
+                await db.rollback()
+                return _json({
+                    "error": "assignment_changed",
+                    "message": "Статус выполнения изменился; повтори сверку.",
+                }, status=409)
+            reward = int(dispute["reward"])
+            member = await (await db.execute(
+                "SELECT bonus,done_count FROM members WHERE user_id=?",
+                (dispute["user_id"],),
+            )).fetchone()
+            if not member or int(member["done_count"] or 0) < 1:
+                await db.rollback()
+                return _json({
+                    "error": "member_mismatch",
+                    "message": "Счётчик выполнений не совпадает; нужна ручная сверка.",
+                }, status=409)
+            if int(member["bonus"] or 0) < reward:
+                await db.rollback()
+                return _json({
+                    "error": "manual_reconciliation",
+                    "message": "Доступного баланса уже недостаточно для сторно. Нужна ручная сверка с Бибибайком.",
+                }, status=409)
+            reversal_operation = f"task_reward_reversal:assignment:{dispute['assignment_id']}"
+            reversal = await (await db.execute(
+                "SELECT id FROM bonus_ledger WHERE operation_id=?",
+                (reversal_operation,),
+            )).fetchone()
+            if reversal:
+                await db.rollback()
+                return _json({"error": "ledger_already_reversed"}, status=409)
+            new_balance = int(member["bonus"] or 0) - reward
+            remaining_reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+                "FROM task_disputes "
+                "WHERE user_id=? AND status IN ('pending','manual_required') AND id<>?",
+                (dispute["user_id"], dispute_id),
+            )).fetchone())[0] or 0)
+            if new_balance < remaining_reserved:
+                await db.rollback()
+                return _json({
+                    "error": "manual_reconciliation",
+                    "message": "Остатка недостаточно для других открытых споров. Нужна ручная сверка.",
+                }, status=409)
+            changed = await db.execute(
+                "UPDATE task_assignments SET status='reversed',terminal_at=?,"
+                "terminal_by=?,terminal_reason=?,review_note=?,version=version+1 "
+                "WHERE id=? AND status='done'",
+                (
+                    decided_at, admin_id, "reward_reversed", dispute["reason"],
+                    dispute["assignment_id"],
+                ),
+            )
+            if changed.rowcount != 1:
+                await db.rollback()
+                return _json({"error": "transition_conflict"}, status=409)
+            await db.execute(
+                "UPDATE members SET bonus=?,done_count=done_count-1 WHERE user_id=?",
+                (new_balance, dispute["user_id"]),
+            )
+            await db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,task_id,assignment_id,created_by,created_at,"
+                "operation_id,balance_after) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    dispute["user_id"], -reward,
+                    f"Сторно задания: {dispute['title']}", dispute["task_id"],
+                    dispute["assignment_id"], admin_id, decided_at,
+                    reversal_operation, new_balance,
+                ),
+            )
+            if not int(dispute["repeatable"] or 0) and dispute["task_status"] == "closed":
+                await db.execute(
+                    "UPDATE tasks SET status='open',version=version+1 "
+                    "WHERE id=? AND status='closed'", (dispute["task_id"],),
+                )
+        status_value = {
+            "approve": "approved", "reject": "rejected",
+            "manual_reversed": "manual_reversed",
+            "manual_no_change": "manual_no_change",
+        }[decision]
+        updated = await db.execute(
+            "UPDATE task_disputes SET status=?,decided_by=?,decided_at=?,"
+            "decision_note=?,decision_operation_id=?,decision_request_hash=?,"
+            "reconciliation_reference=? "
+            "WHERE id=? AND status=?",
+            (
+                status_value, admin_id, decided_at, note, operation_id,
+                decision_hash, reconciliation_reference or None,
+                dispute_id, dispute["status"],
+            ),
+        )
+        if updated.rowcount != 1:
+            await db.rollback()
+            return _json({"error": "transition_conflict"}, status=409)
+        await _track_event_in_tx(
+            db, "task_dispute_resolved", "backend", user_id=dispute["user_id"],
+            task_id=dispute["task_id"], assignment_id=dispute["assignment_id"],
+            outcome=status_value, dedupe_key=f"task_dispute_decide:{operation_id}",
+        )
+        if decision == "approve":
+            notification = (
+                "⚠️ Решение по заданию исправлено двумя ответственными.\n"
+                f"Причина: {dispute['reason']}\n"
+                f"Списано: {dispute['reward']} бибибонусов. Новый баланс: {new_balance}."
+            )
+            await _enqueue_outbox_in_tx(
+                db, f"task_dispute:{dispute_id}:participant", "direct",
+                {"text": notification, "start": None},
+                recipient_id=dispute["user_id"],
+            )
+        elif decision == "manual_reversed":
+            notification = (
+                "↩️ Ручная сверка завершена: выплата и выполнение исправлены.\n"
+                f"Итог: {note}\nВнутренний баланс: {new_balance}."
+            )
+            await _enqueue_outbox_in_tx(
+                db, f"task_dispute:{dispute_id}:participant", "direct",
+                {"text": notification, "start": None},
+                recipient_id=dispute["user_id"],
+            )
+        elif decision == "manual_no_change":
+            notification = (
+                "✅ Ручная сверка завершена: исходное решение оставлено без изменений.\n"
+                f"Итог: {note}"
+            )
+            await _enqueue_outbox_in_tx(
+                db, f"task_dispute:{dispute_id}:participant", "direct",
+                {"text": notification, "start": None},
+                recipient_id=dispute["user_id"],
+            )
+        await db.commit()
+    return _json({
+        "ok": True, "dispute_id": dispute_id, "status": status_value,
+        "balance": new_balance, "idempotent": False,
     })
 
 
@@ -6743,11 +7691,31 @@ async def api_admin_award_revoke(request):
         return err
     body = await _body(request)
     entry_id = _as_int(body.get("entry_id"))
-    if entry_id is None:
+    operation_id = _operation_uuid(body.get("operation_id"))
+    note = " ".join(str(body.get("note") or "").split())[:200]
+    if entry_id is None or not operation_id:
         return _json({"error": "bad_request"}, status=400)
+    if len(note) < 3:
+        return _json({"error": "note", "message": "Укажи причину снятия награды."}, status=400)
+    request_hash = _request_fingerprint({
+        "entry_id": entry_id, "note": note, "admin_id": int(admin_id),
+    })
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
+        replay = await (await db.execute(
+            "SELECT id,bonus,revoke_request_hash FROM member_awards "
+            "WHERE revoke_operation_id=?", (operation_id,),
+        )).fetchone()
+        if replay:
+            if replay["revoke_request_hash"] != request_hash:
+                await db.rollback()
+                return _json({"error": "operation_conflict"}, status=409)
+            await db.rollback()
+            return _json({
+                "ok": True, "taken": int(replay["bonus"] or 0),
+                "operation_id": operation_id, "idempotent": True,
+            })
         row = await (await db.execute(
             "SELECT ma.*, a.title FROM member_awards ma "
             "JOIN awards a ON a.id=ma.award_id WHERE ma.id=?",
@@ -6756,39 +7724,66 @@ async def api_admin_award_revoke(request):
         if not row:
             await db.rollback()
             return _json({"error": "not_found"}, status=404)
-        cur = await db.execute(
-            "UPDATE member_awards SET revoked_at=?, revoked_by=? "
-            "WHERE id=? AND revoked_at IS NULL",
-            (now_iso(), admin_id, entry_id),
-        )
-        if cur.rowcount != 1:
+        if row["revoked_at"] is not None:
             await db.rollback()
-            return _json({"error": "not_found"}, status=404)
+            return _json({"error": "already_revoked"}, status=409)
         take = int(row["bonus"] or 0)
         if take:
             balance_row = await (await db.execute(
                 "SELECT bonus FROM members WHERE user_id=?",
                 (row["user_id"],))).fetchone()
-            # Бонус мог быть уже потрачен — уводить баланс в минус нельзя.
-            take = min(take, int(balance_row[0]) if balance_row else 0)
+            reserved = int((await (await db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN reward>0 THEN reward ELSE 0 END),0) "
+                "FROM task_disputes "
+                "WHERE user_id=? AND status IN ('pending','manual_required')",
+                (row["user_id"],),
+            )).fetchone())[0] or 0)
+            # Частичный отзыв исказил бы аудит: награда была бы помечена снятой,
+            # хотя часть её бонуса осталась бы у участника.
+            available = max(0, (int(balance_row[0]) if balance_row else 0) - reserved)
+            if available < take:
+                await db.rollback()
+                return _json({
+                    "error": "insufficient_unreserved_balance",
+                    "message": (
+                        "Награду нельзя снять частично: доступных незарезервированных "
+                        "бонусов недостаточно. Сначала завершите спор или сверку баланса."
+                    ),
+                }, status=409)
+        stamp = now_iso()
+        cur = await db.execute(
+            "UPDATE member_awards SET revoked_at=?,revoked_by=?,revoke_note=?,"
+            "revoke_operation_id=?,revoke_request_hash=? "
+            "WHERE id=? AND revoked_at IS NULL",
+            (stamp, admin_id, note, operation_id, request_hash, entry_id),
+        )
+        if cur.rowcount != 1:
+            await db.rollback()
+            return _json({"error": "transition_conflict"}, status=409)
         if take:
+            new_balance = int(balance_row[0]) - take
             await db.execute(
-                "UPDATE members SET bonus=bonus-? WHERE user_id=?",
-                (take, row["user_id"]))
+                "UPDATE members SET bonus=? WHERE user_id=?",
+                (new_balance, row["user_id"]))
             await db.execute(
                 "INSERT INTO bonus_ledger "
-                "(user_id, amount, reason, task_id, created_by, created_at) "
-                "VALUES (?,?,?,NULL,?,?)",
+                "(user_id,amount,reason,task_id,created_by,created_at,operation_id,"
+                "balance_after) VALUES (?,?,?,NULL,?,?,?,?)",
                 (row["user_id"], -take,
-                 f"Снята награда: {row['title']}", admin_id, now_iso()),
+                 f"Снята награда: {row['title']}. {note}", admin_id, stamp,
+                 f"award_revoke:{operation_id}", new_balance),
             )
         await db.commit()
     _notify(
         row["user_id"],
         f"Награда «{row['title']}» снята ответственным."
-        + (f"\nСписано {take} бибибонусов." if take else ""),
+        + (f"\nСписано {take} бибибонусов." if take else "")
+        + f"\nПричина: {note}",
     )
-    return _json({"ok": True, "taken": take})
+    return _json({
+        "ok": True, "taken": take, "operation_id": operation_id,
+        "idempotent": False,
+    })
 
 
 async def api_admin_telegram_inbox_redrive(request):
@@ -7140,9 +8135,20 @@ async def rate_limit_middleware(request, handler):
     if not request.path.startswith("/api/") or request.method == "OPTIONS":
         return await handler(request)
     global _api_rate_requests
-    # Не используем непроверенный Authorization как ключ: иначе новый случайный
-    # заголовок создавал бы новый bucket и обходил лимит.
-    identity = f"{request.remote or 'unknown'}:{'r' if request.method == 'GET' else 'w'}"
+    # A valid Telegram signature gives every person an independent bucket even
+    # behind Caddy. Invalid/random Authorization values remain in one small
+    # proxy/IP bucket and therefore cannot bypass the limiter.
+    context = _auth_context(request)
+    if context:
+        user_id = str(int(context["user"]["id"]))
+        identity_key = hmac.new(
+            hashlib.sha256((BOT_TOKEN or "").encode("utf-8")).digest(),
+            user_id.encode("ascii"), hashlib.sha256,
+        ).hexdigest()[:24]
+        identity = f"u:{identity_key}"
+    else:
+        identity = f"ip:{request.remote or 'unknown'}"
+    identity += ":r" if request.method == "GET" else ":w"
     limit = API_WRITES_PER_MIN if request.method != "GET" else API_READS_PER_MIN
     now = time.monotonic()
     window, count = _api_rate_buckets.get(identity, (now, 0))
@@ -7178,7 +8184,9 @@ async def start_api_server():
         app.router.add_route("OPTIONS", "/{tail:.*}", _options)
         app.router.add_get("/api/state", api_state)
         app.router.add_post("/api/apply", api_apply)
+        app.router.add_post("/api/profile/city", api_profile_city)
         app.router.add_get("/api/tasks/available", api_tasks_available)
+        app.router.add_get("/api/tasks/context", api_task_context)
         app.router.add_post("/api/tasks/claim", api_task_claim)
         app.router.add_post("/api/tasks/release", api_task_release)
         app.router.add_post("/api/tasks/complete", api_task_complete)
@@ -7188,6 +8196,12 @@ async def start_api_server():
         app.router.add_get("/api/admin/overview", api_admin_overview)
         app.router.add_get("/api/admin/queue", api_admin_queue)
         app.router.add_get("/api/admin/members", api_admin_members)
+        app.router.add_get(
+            "/api/admin/member/tags", api_admin_member_tags_catalog,
+        )
+        app.router.add_post(
+            "/api/admin/member/city", api_admin_member_city_decide,
+        )
         app.router.add_post("/api/admin/decide", api_admin_decide)
         app.router.add_post("/api/admin/task/create", api_admin_task_create)
         app.router.add_post(
@@ -7200,6 +8214,7 @@ async def start_api_server():
         )
         app.router.add_post("/api/admin/task/cancel", api_admin_task_cancel)
         app.router.add_post("/api/admin/task/approve", api_admin_task_approve)
+        app.router.add_post("/api/admin/task/dispute", api_admin_task_dispute)
         app.router.add_post("/api/admin/grant", api_admin_grant)
         app.router.add_post("/api/admin/withdraw/account", api_admin_withdraw_account)
         app.router.add_post("/api/admin/withdraw/handoff", api_admin_withdraw_handoff)
@@ -8529,27 +9544,19 @@ async def _refresh_telegram_runtime():
         last_error_dt = None
         if isinstance(last_error_date, datetime):
             last_error_dt = last_error_date
-            last_error = last_error_date.isoformat()
+            if last_error_dt.tzinfo is None:
+                last_error_dt = last_error_dt.replace(tzinfo=timezone.utc)
+            last_error_dt = last_error_dt.astimezone(timezone.utc)
+            last_error = last_error_dt.isoformat()
         elif isinstance(last_error_date, (int, float)):
-            last_error_dt = datetime.fromtimestamp(last_error_date, timezone.utc)
+            last_error_dt = datetime.fromtimestamp(
+                last_error_date, timezone.utc,
+            )
             last_error = last_error_dt.isoformat()
         elif last_error_date:
             last_error = str(last_error_date)
         else:
             last_error = ""
-        configured_at = _telegram_runtime.get("configured_at") or ""
-        configured_dt = None
-        if configured_at:
-            try:
-                configured_dt = datetime.fromisoformat(configured_at)
-                if configured_dt.tzinfo is None:
-                    configured_dt = configured_dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                configured_dt = None
-        fresh_error = bool(
-            last_error_dt and configured_dt
-            and int(last_error_dt.timestamp()) >= int(configured_dt.timestamp())
-        )
         expected_updates = set(dp.resolve_used_update_types())
         actual_updates = set(getattr(info, "allowed_updates", None) or [])
         url_matches = hmac.compare_digest(str(info.url or ""), _webhook_url())
@@ -8558,14 +9565,45 @@ async def _refresh_telegram_runtime():
             == WEBHOOK_MAX_CONNECTIONS
         )
         updates_match = expected_updates.issubset(actual_updates)
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            last_received = await (await db.execute(
+                "SELECT MAX(received_at) FROM telegram_update_inbox"
+            )).fetchone()
+        def runtime_datetime(value):
+            try:
+                parsed = datetime.fromisoformat(str(value)) if value else None
+                if parsed and parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc) if parsed else None
+            except (TypeError, ValueError):
+                return None
+
+        update_candidates = [
+            runtime_datetime(last_received[0]),
+            runtime_datetime(_telegram_runtime.get("last_update_at")),
+        ]
+        last_update_dt = max(
+            (item for item in update_candidates if item is not None), default=None,
+        )
+        last_update_at = last_update_dt.isoformat() if last_update_dt else ""
+        configured_at_dt = runtime_datetime(_telegram_runtime.get("configured_at"))
+        relevant_error = bool(
+            last_error_dt
+            and (not configured_at_dt or last_error_dt >= configured_at_dt)
+        )
+        active_delivery_error = bool(
+            relevant_error and (not last_update_dt or last_update_dt <= last_error_dt)
+        )
         configured = bool(
-            url_matches and connections_match and updates_match and not fresh_error
+            url_matches and connections_match and updates_match
+            and not active_delivery_error
         )
         _telegram_runtime.update(
             receiver_ready=configured,
             webhook_configured=configured,
             pending_update_count=int(info.pending_update_count or 0),
             last_error=last_error,
+            last_update_at=last_update_at,
             checked_at=now_iso(),
         )
     except Exception:

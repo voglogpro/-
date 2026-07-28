@@ -4,8 +4,8 @@
 PostgreSQL cutover из ADR-001 и не разрешает горизонтальное масштабирование.
 Первый запуск выполняется единым stack из
 [`OWNER-LAUNCH.md`](OWNER-LAUNCH.md) и `compose.pilot.yaml`. Старые раздельные
-`compose.production.yaml`/`compose.backup.yaml` оставлены для опытного оператора,
-но не являются маршрутом владельца.
+`compose.production.yaml`/`compose.backup.yaml` не используются для production:
+они не содержат полного mount/preflight gate пилотного контура.
 
 ## Воспроизводимый образ
 
@@ -31,7 +31,7 @@ docker compose -f compose.production.yaml up -d
 Файл секретов должен принадлежать только deployment-пользователю и не лежать в
 Git/repository. После запуска `/health/ready` проверяется с `X-Health-Token`.
 Остановка любого lifecycle/outbox/inbox worker теперь завершает основной процесс,
-поэтому `restart: always` действительно восстанавливает его, а не оставляет
+поэтому `restart: unless-stopped` восстанавливает его после рестарта Docker daemon, а не оставляет
 полуживой контейнер.
 
 ## RPO backup
@@ -65,13 +65,8 @@ docker run --rm --user 0:0 --read-only --tmpfs /tmp \
 record.
 
 `BACKUP_DIR` обязан указывать на зашифрованное off-host/NFS-хранилище, а не на
-диск того же сервера. Backup service запускается тем же immutable digest:
-
-```text
-$env:BACKUP_DIR='/mnt/encrypted-bibibike-backups'
-$env:BIBITASKS_DATA_VOLUME='bibitasks_data'
-docker compose -f compose.backup.yaml up -d
-```
+диск того же сервера. Backup service запускается только внутри `compose.pilot.yaml`
+тем же immutable digest; отдельный `compose.backup.yaml` для пилота запрещён.
 
 По умолчанию backup запускается каждые 600 секунд по start-to-start cadence —
 время копирования не прибавляется к интервалу. Неудачная попытка повторяется не
@@ -120,7 +115,7 @@ gh attestation verify oci://ghcr.io/voglogpro/bibitasks@sha256:<digest> \
 python scripts/release_record.py \
   --commit <full-40-char-sha> \
   --image ghcr.io/<owner>/bibitasks@sha256:<digest> \
-  --schema-version 290 \
+  --schema-version 293 \
   --backup-manifest <backup>/manifest.json \
   --restore-report <restore>/restore-report.json \
   --preflight-report telegram-preflight.json \

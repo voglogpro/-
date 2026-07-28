@@ -24,10 +24,10 @@ from scripts.pg_harness_common import (
 class MigrationHarnessTests(unittest.TestCase):
     def test_metadata_inventory_matches_source_contract(self):
         self.assertEqual(set(metadata.tables), set(SOURCE_COLUMNS))
-        self.assertEqual(len(metadata.tables), 27)
-        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 32)
+        self.assertEqual(len(metadata.tables), 28)
+        self.assertEqual(sum(len(table.indexes) for table in metadata.tables.values()), 34)
         self.assertEqual(len(EXPECTED_SOURCE_SCHEMA_SHA256), 64)
-        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 290)
+        self.assertEqual(EXPECTED_SOURCE_USER_VERSION, 293)
 
     def test_integer_and_json_conversion_are_lossless(self):
         self.assertEqual(parse_bigint(42), 42)

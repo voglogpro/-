@@ -3,17 +3,16 @@ Description=BibiTasks controlled pilot
 Wants=network-online.target
 After=network-online.target docker.service remote-fs.target
 Requires=docker.service
-RequiresMountsFor=/mnt/bibitasks-backups
-ConditionPathExists=/mnt/bibitasks-backups/.bibitasks-offhost
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/bibitasks
-ExecStartPre=/usr/bin/test -f /mnt/bibitasks-backups/.bibitasks-offhost
-ExecStart=/usr/bin/docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml up -d
+EnvironmentFile=/etc/bibitasks/deploy.env
+ExecStartPre=/usr/bin/python3 /opt/bibitasks/scripts/pilot_host_preflight.py --deploy-env /etc/bibitasks/deploy.env --repo /opt/bibitasks --expected-commit ${BIBITASKS_RELEASE_COMMIT} --expected-image ${BIBITASKS_IMAGE}
+ExecStart=/usr/bin/docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml up -d --wait --wait-timeout 180
 ExecStop=/usr/bin/docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml stop
-TimeoutStartSec=180
+TimeoutStartSec=300
 TimeoutStopSec=90
 
 [Install]

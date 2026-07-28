@@ -74,7 +74,7 @@ SHA проверенного релиза. Каталоги секретов и 
 sudo install -d -m 0700 /etc/bibitasks
 sudo test -d /mnt/bibitasks-backups
 findmnt --target /mnt/bibitasks-backups
-sudo touch /mnt/bibitasks-backups/.bibitasks-offhost
+echo bibitasks-offhost-v1 | sudo tee /mnt/bibitasks-backups/.bibitasks-offhost >/dev/null
 sudo chmod 0400 /mnt/bibitasks-backups/.bibitasks-offhost
 ```
 
@@ -174,10 +174,13 @@ sudo chmod 0600 /etc/bibitasks/bibitasks.env
 
 ```dotenv
 BIBITASKS_IMAGE=ghcr.io/voglogpro/bibitasks@sha256:c2754fe5337b863e4a73eaf5cb35ef29b3bbc1e2e8b4e5cabb14258d02bd147d
+BIBITASKS_RELEASE_COMMIT=ef6eda5d539ba6d00deecaed83127e5b70275189
 BIBITASKS_ENV_FILE=/etc/bibitasks/bibitasks.env
 BIBITASKS_DOMAIN=tasks.example.com
 BACKUP_DIR=/mnt/bibitasks-backups
 BACKUP_SENTINEL=/mnt/bibitasks-backups/.bibitasks-offhost
+BACKUP_SENTINEL_VALUE=bibitasks-offhost-v1
+BACKUP_EXPECTED_SOURCE=backup.example.com:/exports/bibitasks
 BIBITASKS_DATA_VOLUME=bibitasks_data
 ```
 
@@ -193,6 +196,10 @@ docker compose --env-file /etc/bibitasks/deploy.env \
   -f compose.pilot.yaml config --quiet
 docker compose --env-file /etc/bibitasks/deploy.env \
   -f compose.pilot.yaml pull
+sudo python3 scripts/pilot_host_preflight.py \
+  --deploy-env /etc/bibitasks/deploy.env --repo /opt/bibitasks \
+  --expected-commit "$RELEASE_SHA" --expected-image "$BIBITASKS_IMAGE" \
+  > "$EVIDENCE_DIR/host-preflight.json"
 sudo install -m 0644 deploy/bibitasks-pilot.service.example \
   /etc/systemd/system/bibitasks-pilot.service
 sudo systemctl daemon-reload

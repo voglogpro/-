@@ -2650,6 +2650,451 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             main.DB_PATH = original_path
         self.assertEqual(version, main.SQLITE_SCHEMA_VERSION + 1)
 
+    async def test_city_normalization_allows_legacy_task_claim(self):
+        worker_id = 910_000_001
+        await main.upsert_member(
+            worker_id, full_name="Участник", city="Краснодар",
+            status="approved", role="helper",
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,created_at,budget_cap) "
+                "VALUES ('fix_zone','Парковка','г. Краснодар','Адрес',80,'open',?,80)",
+                (main.now_iso(),),
+            ).lastrowid
+            db.commit()
+        original_worker = main._require_worker
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        main._require_worker = allow_worker
+        try:
+            response = await main.api_task_claim(DummyRequest({"task_id": task_id}))
+        finally:
+            main._require_worker = original_worker
+        self.assertEqual(response.status, 200)
+        self.assertEqual(main._city_key("город Орёл"), main._city_key("ОРЕЛ"))
+
+    async def test_admin_tag_catalog_scans_beyond_first_page(self):
+        for index in range(51):
+            await main.upsert_member(
+                911_000_000 + index, full_name=f"Участник {index}",
+                status="approved", role="helper",
+            )
+        with sqlite3.connect(main.DB_PATH) as db:
+            db.execute(
+                "UPDATE members SET tags='далёкий-тег' WHERE user_id=?",
+                (911_000_050,),
+            )
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return 911_999_999, None
+
+        main._require_admin = allow_admin
+        try:
+            response = await main.api_admin_member_tags_catalog(DummyRequest({}))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual(response.status, 200)
+        items = response_json(response)["items"]
+        self.assertIn({"tag": "далёкий-тег", "count": 1}, items)
+
+    async def test_city_change_is_pending_until_admin_approves(self):
+        worker_id, admin_id = 911_500_001, 911_500_002
+        await main.upsert_member(
+            worker_id, full_name="Участник", city="Краснодар",
+            status="approved", role="helper",
+        )
+        original_auth, original_is_admin = main._auth_user, main.is_admin
+        original_require_admin = main._require_admin
+
+        async def auth_worker(_request):
+            return {"id": worker_id}
+
+        async def not_admin(_uid):
+            return False
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._auth_user = auth_worker
+        main.is_admin = not_admin
+        main._require_admin = allow_admin
+        try:
+            requested = await main.api_profile_city(DummyRequest({"city": "Орёл"}))
+            requested_data = response_json(requested)
+            with sqlite3.connect(main.DB_PATH) as db:
+                before = db.execute(
+                    "SELECT city,city_change_requested FROM members WHERE user_id=?",
+                    (worker_id,),
+                ).fetchone()
+            stale = await main.api_admin_member_city_decide(DummyRequest({
+                "user_id": worker_id, "decision": "approve",
+                "requested_at": "2026-01-01T00:00:00+00:00",
+            }))
+            cancelled = await main.api_profile_city(DummyRequest({
+                "action": "cancel", "requested_at": requested_data["requested_at"],
+            }))
+            requested_again = await main.api_profile_city(DummyRequest({"city": "Орёл"}))
+            approved = await main.api_admin_member_city_decide(DummyRequest({
+                "user_id": worker_id, "decision": "approve",
+                "requested_at": response_json(requested_again)["requested_at"],
+            }))
+        finally:
+            main._auth_user = original_auth
+            main.is_admin = original_is_admin
+            main._require_admin = original_require_admin
+        self.assertEqual(
+            (requested.status, stale.status, cancelled.status, requested_again.status, approved.status),
+            (200, 409, 200, 200, 200),
+        )
+        self.assertTrue(response_json(requested)["pending"])
+        self.assertEqual(before, ("Краснодар", "Орёл"))
+        with sqlite3.connect(main.DB_PATH) as db:
+            after = db.execute(
+                "SELECT city,city_change_requested FROM members WHERE user_id=?",
+                (worker_id,),
+            ).fetchone()
+        self.assertEqual(after, ("Орёл", None))
+
+    async def test_task_dispute_requires_second_admin_and_reverses_exactly_once(self):
+        worker_id, opener_id, reviewer_id, decider_id = (
+            912_000_001, 912_000_002, 912_000_003, 912_000_004,
+        )
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", city="Краснодар",
+            status="approved", role="helper", bonus=100, done_count=1,
+        )
+        for admin_id in (opener_id, reviewer_id, decider_id):
+            await main.upsert_member(
+                admin_id, full_name="Ответственный", status="approved", role="admin",
+            )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,repeatable,created_by,created_at) "
+                "VALUES ('fix_zone','Ошибочное решение','Краснодар','Адрес',100,'closed',0,999,?)",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,terminal_by) "
+                "VALUES (?,?,'done',?,?,100,?)",
+                (task_id, worker_id, main.now_iso(), main.now_iso(), reviewer_id),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,task_id,assignment_id,created_by,created_at,"
+                "operation_id,balance_after) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    worker_id, 100, "Задание", task_id, assignment_id, 999,
+                    main.now_iso(), f"task_reward:assignment:{assignment_id}", 100,
+                ),
+            )
+            db.commit()
+        original_admin, original_worker = main._require_admin, main._require_worker
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        async def allow_worker(_request):
+            return worker_id, None
+
+        main._require_admin = allow_request_admin
+        open_operation = str(uuid.uuid4())
+        decide_operation = str(uuid.uuid4())
+        try:
+            opened = await main.api_admin_task_dispute(DummyRequest({
+                "action": "open", "assignment_id": assignment_id,
+                "reason": "Начисление подтверждено ошибочно",
+                "operation_id": open_operation,
+            }, opener_id))
+            dispute_id = response_json(opened)["dispute_id"]
+            main._require_worker = allow_worker
+            blocked_withdrawal = await main.api_withdraw_request(DummyRequest({
+                "amount": main.WITHDRAW_MIN, "account_ref": "bike-account-1",
+                "operation_id": str(uuid.uuid4()),
+            }))
+            denied = await main.api_admin_task_dispute(DummyRequest({
+                "action": "decide", "dispute_id": dispute_id,
+                "decision": "approve", "note": "Проверено тем же ответственным",
+                "operation_id": str(uuid.uuid4()),
+            }, opener_id))
+            reviewer_denied = await main.api_admin_task_dispute(DummyRequest({
+                "action": "decide", "dispute_id": dispute_id,
+                "decision": "approve", "note": "Исходный проверяющий подтверждает себя",
+                "operation_id": str(uuid.uuid4()),
+            }, reviewer_id))
+            decision_body = {
+                "action": "decide", "dispute_id": dispute_id,
+                "decision": "approve", "note": "Проверены фото и исходное решение",
+                "operation_id": decide_operation,
+            }
+            decided = await main.api_admin_task_dispute(
+                DummyRequest(decision_body, decider_id)
+            )
+            replay = await main.api_admin_task_dispute(
+                DummyRequest(decision_body, decider_id)
+            )
+        finally:
+            main._require_admin = original_admin
+            main._require_worker = original_worker
+        self.assertEqual(
+            (
+                opened.status, blocked_withdrawal.status, denied.status,
+                reviewer_denied.status, decided.status, replay.status,
+            ),
+            (200, 409, 403, 403, 200, 200),
+        )
+        self.assertTrue(response_json(replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            assignment_status = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+            member_state = db.execute(
+                "SELECT bonus,done_count FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()
+            task_status = db.execute(
+                "SELECT status FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()[0]
+            reversals = db.execute(
+                "SELECT amount,balance_after FROM bonus_ledger "
+                "WHERE operation_id=?",
+                (f"task_reward_reversal:assignment:{assignment_id}",),
+            ).fetchall()
+        self.assertEqual(assignment_status, "reversed")
+        self.assertEqual(member_state, (0, 0))
+        self.assertEqual(task_status, "open")
+        self.assertEqual(reversals, [(-100, 0)])
+
+    async def test_dispute_with_spent_reward_requires_audited_manual_reconciliation(self):
+        worker_id, opener_id, reviewer_id, decider_id = (
+            912_100_001, 912_100_002, 912_100_003, 912_100_004,
+        )
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", city="Краснодар",
+            status="approved", role="helper", bonus=25, done_count=1,
+        )
+        for admin_id in (opener_id, reviewer_id, decider_id):
+            await main.upsert_member(
+                admin_id, full_name="Ответственный", status="approved", role="admin",
+            )
+        with sqlite3.connect(main.DB_PATH) as db:
+            task_id = db.execute(
+                "INSERT INTO tasks "
+                "(type,title,city,address,reward,status,repeatable,created_by,created_at) "
+                "VALUES ('fix_zone','Ручная сверка','Краснодар','Адрес',100,'closed',0,999,?)",
+                (main.now_iso(),),
+            ).lastrowid
+            assignment_id = db.execute(
+                "INSERT INTO task_assignments "
+                "(task_id,user_id,status,claimed_at,done_at,reward_snapshot,terminal_by) "
+                "VALUES (?,?,'done',?,?,100,?)",
+                (task_id, worker_id, main.now_iso(), main.now_iso(), reviewer_id),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO bonus_ledger "
+                "(user_id,amount,reason,task_id,assignment_id,created_by,created_at,"
+                "operation_id,balance_after) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    worker_id, 100, "Задание", task_id, assignment_id, 999,
+                    main.now_iso(), f"task_reward:assignment:{assignment_id}", 100,
+                ),
+            )
+            db.commit()
+        original_admin = main._require_admin
+
+        async def allow_request_admin(request):
+            return request.uid, None
+
+        main._require_admin = allow_request_admin
+        try:
+            opened = await main.api_admin_task_dispute(DummyRequest({
+                "action": "open", "assignment_id": assignment_id,
+                "reason": "Нужна сверка потраченной выплаты",
+                "operation_id": str(uuid.uuid4()),
+            }, opener_id))
+            dispute_id = response_json(opened)["dispute_id"]
+            automatic = await main.api_admin_task_dispute(DummyRequest({
+                "action": "decide", "dispute_id": dispute_id,
+                "decision": "approve", "note": "Попытка автоматического сторно",
+                "operation_id": str(uuid.uuid4()),
+            }, decider_id))
+            resolved = await main.api_admin_task_dispute(DummyRequest({
+                "action": "decide", "dispute_id": dispute_id,
+                "decision": "manual_reversed",
+                "note": "Сверено с Бибибайком, обращение BB-142",
+                "reconciliation_reference": "BB-142",
+                "operation_id": str(uuid.uuid4()),
+            }, decider_id))
+        finally:
+            main._require_admin = original_admin
+        self.assertEqual((opened.status, automatic.status, resolved.status), (200, 409, 200))
+        self.assertEqual(response_json(opened)["status"], "manual_required")
+        with sqlite3.connect(main.DB_PATH) as db:
+            dispute = db.execute(
+                "SELECT status,reconciliation_reason,decision_note,reconciliation_reference "
+                "FROM task_disputes WHERE id=?",
+                (dispute_id,),
+            ).fetchone()
+            state = db.execute(
+                "SELECT status FROM task_assignments WHERE id=?", (assignment_id,),
+            ).fetchone()[0]
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+        self.assertEqual(dispute[0], "manual_reversed")
+        self.assertIn("баланс", dispute[1].lower())
+        self.assertIn("BB-142", dispute[2])
+        self.assertEqual(dispute[3], "BB-142")
+        self.assertEqual((state, balance), ("reversed", 0))
+
+    async def test_award_revoke_is_all_or_nothing_when_bonus_was_spent(self):
+        worker_id, admin_id = 912_200_001, 912_200_002
+        await main.upsert_member(
+            worker_id, full_name="Исполнитель", status="approved",
+            role="helper", bonus=5,
+        )
+        with sqlite3.connect(main.DB_PATH) as db:
+            award_id = db.execute(
+                "INSERT INTO awards "
+                "(code,emoji,title,description,bonus,repeatable,active,created_by,created_at) "
+                "VALUES ('audit_award','🏅','Проверка','Тест',10,0,1,?,?)",
+                (admin_id, main.now_iso()),
+            ).lastrowid
+            entry_id = db.execute(
+                "INSERT INTO member_awards "
+                "(user_id,award_id,slot,bonus,note,granted_by,granted_at) "
+                "VALUES (?,?,0,10,'Тест',?,?)",
+                (worker_id, award_id, admin_id, main.now_iso()),
+            ).lastrowid
+            db.execute(
+                "INSERT INTO task_disputes "
+                "(assignment_id,task_id,user_id,reward,reason,status,opened_by,opened_at,"
+                "open_operation_id,open_request_hash) "
+                "VALUES (999991,999991,?,-100,'Повреждённый snapshot','manual_required',?,?,?,?)",
+                (worker_id, admin_id, main.now_iso(), str(uuid.uuid4()), "legacy-negative"),
+            )
+            db.commit()
+        original_admin, original_notify = main._require_admin, main._notify
+
+        async def allow_admin(_request):
+            return admin_id, None
+
+        main._require_admin = allow_admin
+        main._notify = lambda *_args, **_kwargs: None
+        operation_id = str(uuid.uuid4())
+        body = {
+            "entry_id": entry_id, "note": "Выдано ошибочно",
+            "operation_id": operation_id,
+        }
+        try:
+            response = await main.api_admin_award_revoke(DummyRequest(body))
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute("UPDATE members SET bonus=10 WHERE user_id=?", (worker_id,))
+                db.commit()
+            success = await main.api_admin_award_revoke(DummyRequest(body))
+            replay = await main.api_admin_award_revoke(DummyRequest(body))
+        finally:
+            main._require_admin = original_admin
+            main._notify = original_notify
+        self.assertEqual((response.status, success.status, replay.status), (409, 200, 200))
+        self.assertTrue(response_json(replay)["idempotent"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            revoked_at = db.execute(
+                "SELECT revoked_at FROM member_awards WHERE id=?", (entry_id,),
+            ).fetchone()[0]
+            balance = db.execute(
+                "SELECT bonus FROM members WHERE user_id=?", (worker_id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(revoked_at)
+        self.assertEqual(balance, 0)
+
+    async def test_rate_limit_uses_independent_valid_telegram_user_buckets(self):
+        class RateRequest(dict):
+            path = "/api/state"
+            method = "GET"
+            remote = "127.0.0.1"
+
+        async def handler(_request):
+            return main._json({"ok": True})
+
+        original_limit = main.API_READS_PER_MIN
+        original_buckets = main._api_rate_buckets
+        original_requests = main._api_rate_requests
+        main.API_READS_PER_MIN = 1
+        main._api_rate_buckets = {}
+        main._api_rate_requests = 0
+        try:
+            first = RateRequest(bibitasks_auth_context={"user": {"id": 1}})
+            second = RateRequest(bibitasks_auth_context={"user": {"id": 2}})
+            self.assertEqual((await main.rate_limit_middleware(first, handler)).status, 200)
+            self.assertEqual((await main.rate_limit_middleware(first, handler)).status, 429)
+            self.assertEqual((await main.rate_limit_middleware(second, handler)).status, 200)
+        finally:
+            main.API_READS_PER_MIN = original_limit
+            main._api_rate_buckets = original_buckets
+            main._api_rate_requests = original_requests
+
+    async def test_historical_webhook_error_does_not_latch_readiness(self):
+        original_mode = main.TELEGRAM_UPDATE_MODE
+        original_base = main.PUBLIC_BASE_URL
+        original_path = main.WEBHOOK_PATH
+        original_connections = main.WEBHOOK_MAX_CONNECTIONS
+        original_runtime = dict(main._telegram_runtime)
+        original_method = main.bot.get_webhook_info
+        main.TELEGRAM_UPDATE_MODE = "webhook"
+        main.PUBLIC_BASE_URL = "https://tasks.example"
+        main.WEBHOOK_PATH = "/telegram/webhook/test"
+        main.WEBHOOK_MAX_CONNECTIONS = 8
+        main._telegram_runtime["last_update_at"] = main.now_iso()
+
+        webhook_state = {"last_error_date": 1_700_000_000}
+
+        async def webhook_info():
+            return SimpleNamespace(
+                url=main._webhook_url(), max_connections=8,
+                allowed_updates=list(main.dp.resolve_used_update_types()),
+                pending_update_count=0,
+                last_error_date=webhook_state["last_error_date"],
+            )
+
+        main.bot.get_webhook_info = webhook_info
+        try:
+            await main._refresh_telegram_runtime()
+            self.assertTrue(main._telegram_runtime["receiver_ready"])
+            self.assertTrue(main._telegram_runtime["last_error"])
+            webhook_state["last_error_date"] = int(time.time()) + 60
+            await main._refresh_telegram_runtime()
+            self.assertFalse(main._telegram_runtime["receiver_ready"])
+            t0 = main.datetime.now(main.timezone.utc) - main.timedelta(minutes=2)
+            t1 = main.datetime.now(main.timezone.utc) - main.timedelta(minutes=1)
+            t2 = main.datetime.now(main.timezone.utc)
+            with sqlite3.connect(main.DB_PATH) as db:
+                db.execute(
+                    "INSERT INTO telegram_update_inbox "
+                    "(update_id,payload_json,payload_sha256,status,attempts,available_at,received_at) "
+                    "VALUES (99001,'encrypted','hash','processed',1,?,?)",
+                    (t0.isoformat(), t0.isoformat()),
+                )
+                db.commit()
+            webhook_state["last_error_date"] = int(t1.timestamp())
+            main._telegram_runtime["last_update_at"] = t2.isoformat()
+            await main._refresh_telegram_runtime()
+            self.assertTrue(main._telegram_runtime["receiver_ready"])
+        finally:
+            main.bot.get_webhook_info = original_method
+            main.TELEGRAM_UPDATE_MODE = original_mode
+            main.PUBLIC_BASE_URL = original_base
+            main.WEBHOOK_PATH = original_path
+            main.WEBHOOK_MAX_CONNECTIONS = original_connections
+            main._telegram_runtime.clear()
+            main._telegram_runtime.update(original_runtime)
+
 
 if __name__ == "__main__":
     unittest.main()
