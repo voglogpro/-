@@ -702,8 +702,8 @@ select.tinput{appearance:none;background-image:
     <div class="card">
       <div class="eyebrow"><b></b>Пригласить друга</div>
       <p class="sub" style="margin-bottom:13px" id="pRefRule">Друг заходит по твоей
-        ссылке и вступает в сообщество — прогресс сразу +1. Награда за ступень
-        приходит в тот же момент.</p>
+        ссылке, вступает в сообщество и подаёт заявку. После одобрения заявки
+        прогресс увеличится на 1, а награда за достигнутую ступень начислится сразу.</p>
       <button class="btn btn-dark" id="pRef">📨 Поделиться ссылкой</button>
     </div>
 
@@ -1399,7 +1399,7 @@ async function load(){
     : me.done_count + ' ' + plural(me.done_count,'задание','задания','заданий');
   renderReferral(STATE.referral || {count:0, milestones:[]});
   $('pRefRule').textContent = (STATE.referral_gate && STATE.referral_gate.required)
-    ? 'Друг заходит по твоей ссылке и вступает в сообщество — прогресс сразу +1. Награда за ступень приходит в тот же момент.'
+    ? 'Друг заходит по твоей ссылке, вступает в сообщество и проходит одобрение — тогда прогресс +1 и приходит награда за ступень.'
     : 'Друг заходит по твоей ссылке и проходит одобрение в команду. Награда за ступень приходит сразу.';
   renderAwardShelf();
 
@@ -1854,9 +1854,8 @@ $('apSend').onclick = ()=>{
 };
 
 $('pRef').onclick = ()=>{
-  const u = STATE && STATE.bot_username;
-  if(!u){ toast('Ссылка появится, когда на хостинге задан BOT_USERNAME'); return; }
-  const link = STATE.referral_url || ('https://t.me/'+u+'?start=ref_'+STATE.me.user_id);
+  const link = STATE && STATE.referral_url;
+  if(!link){ toast('Безопасная ссылка пока недоступна. Обнови приложение позже.'); return; }
   const text = 'Помогаю Бибибайку и получаю бибибонусы на бесплатные поездки. Присоединяйся 🚲⚡';
   const url = 'https://t.me/share/url?url='+encodeURIComponent(link)+
               '&text='+encodeURIComponent(text);
@@ -2151,7 +2150,8 @@ async function loadAdmin(){
     const withdrawalActions=w=>{
       if(w.status==='pending') return '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Провести перевод</button><button class="mini warn" data-wno="'+w.id+'">Отклонить</button></div>';
       if(w.status!=='processing') return '';
-      if(w.can_continue) return '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Продолжить перевод</button><button class="mini warn" data-wno="'+w.id+'">Отклонить</button>'+
+      if(w.can_continue) return '<div class="acts"><button class="btn btn-volt sm" data-wok="'+w.id+'">Продолжить перевод</button>'+
+        (w.can_reject?'<button class="mini warn" data-wno="'+w.id+'">Отклонить</button>':'')+
         (w.can_release?'<button class="mini" data-whandoff="'+w.id+'" data-waction="release">Передать смене</button>':'')+'</div>';
       if(w.can_takeover) return '<div class="acts"><button class="mini" data-whandoff="'+w.id+'" data-waction="takeover" aria-describedby="lease-'+w.id+'">Забрать заявку</button></div>';
       return '<div class="acts"><button class="mini" type="button" aria-describedby="lease-'+w.id+'" disabled>Забрать после тайм-аута</button></div>';
@@ -2581,9 +2581,18 @@ function setWizardStep(step){
   $('ntStepLabel').textContent='шаг '+TASK_WIZARD_STEP+' из 3';
   $('ntBack').classList.toggle('hidden',TASK_WIZARD_STEP===1);
   $('ntCreate').textContent=TASK_WIZARD_STEP===3?'Проверить задание':'Продолжить';
+  refreshTaskSlotMinimum();
   clearInvalid(['ntTitle','ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd','ntReward','ntBudgetCap'],'ntError');
   window.scrollTo(0,0);
 }
+function refreshTaskSlotMinimum(){
+  const soon=new Date(Date.now()+60000);
+  soon.setSeconds(0,0);
+  const local=new Date(soon.getTime()-soon.getTimezoneOffset()*60000).toISOString().slice(0,16);
+  const start=$('ntSlotStart').value||'';
+  $('ntSlotEnd').min=start&&start>local?start:local;
+}
+$('ntSlotStart').addEventListener('change',refreshTaskSlotMinimum);
 function collectTaskBody(){
   const mode = $('ntMode').value;
   const maxParticipants=mode==='all'
@@ -2622,6 +2631,7 @@ function taskValidation(body,step){
     return {field:body.slot_start?'ntSlotEnd':'ntSlotStart',message:'Укажи и начало, и конец срока.'};
   }
   if(body.slot_start&&new Date(body.slot_end)<=new Date(body.slot_start)) return {field:'ntSlotEnd',message:'Конец срока должен быть позже начала.'};
+  if(body.slot_end&&new Date(body.slot_end)<=new Date()) return {field:'ntSlotEnd',message:'Конец задания должен быть в будущем.'};
   if(step>=3&&body.reward<=0) return {field:'ntReward',message:'Укажи награду больше нуля.'};
   if(step>=3&&body.budget_cap<body.reward*body.max_participants) return {field:'ntBudgetCap',message:'Лимит бюджета меньше возможной суммы наград.'};
   return null;
@@ -2646,7 +2656,11 @@ $('ntBack').onclick=()=>setWizardStep(TASK_WIZARD_STEP-1);
 $('ntCreate').onclick=()=>{
   clearInvalid(['ntTitle','ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd','ntReward','ntBudgetCap'],'ntError');
   const body=collectTaskBody(), error=taskValidation(body,TASK_WIZARD_STEP);
-  if(error){ reportInvalid(error.field,error.message,'ntError'); buzz('no'); return; }
+  if(error){
+    if(['ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd'].includes(error.field)
+      && TASK_WIZARD_STEP!==2) setWizardStep(2);
+    reportInvalid(error.field,error.message,'ntError'); buzz('no'); return;
+  }
   if(TASK_WIZARD_STEP<3){ setWizardStep(TASK_WIZARD_STEP+1); return; }
   openTaskPreview(body);
 };

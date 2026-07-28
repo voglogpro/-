@@ -79,9 +79,9 @@ def _clean_username(raw):
     return value.lstrip("@").split("/")[0]
 
 
-# Ник бота для реферальных ссылок: https://t.me/<BOT_USERNAME>?start=ref_<id>
-# ВНИМАНИЕ: bbbikefan — это ГРУППА, а не бот. Диплинк ?start=ref_<id>
-# понимают только боты, поэтому реферальные ссылки идут на BbGalterbot.
+# Ник бота для непрозрачных реферальных ссылок: https://t.me/<BOT_USERNAME>?start=rf_<token>
+# ВНИМАНИЕ: bbbikefan — это ГРУППА, а не бот. Диплинки понимают только боты,
+# поэтому реферальные ссылки идут на BbGalterbot и никогда не содержат Telegram ID.
 BOT_USERNAME = _clean_username(os.getenv("BOT_USERNAME", "BbGalterbot"))
 
 # Канал или группа, подписка на которую засчитывает реферала.
@@ -98,12 +98,19 @@ TOPIC_NEWS = _as_int_env("TOPIC_NEWS", 1)          # новости
 TOPIC_CHAT = _as_int_env("TOPIC_CHAT", 3)          # беседа: за неё капает опыт
 TOPIC_WORK = _as_int_env("TOPIC_WORK", 4)          # работа: сюда инструкция
 TOPIC_FRANCHISE = _as_int_env("TOPIC_FRANCHISE", 43)  # франшиза: только одобренные
+TOPIC_CONFIG_EXPLICIT = {
+    name: bool(str(os.getenv(name, "")).strip())
+    for name in ("TOPIC_NEWS", "TOPIC_CHAT", "TOPIC_WORK", "TOPIC_FRANCHISE")
+}
 
 # Приватная рабочая supergroup. Точные адреса и фотографии заданий никогда не
 # публикуются в публичный community chat.
 OPS_GROUP_USERNAME = _clean_username(os.getenv("OPS_GROUP_USERNAME", ""))
 OPS_GROUP_ID = _as_int_env("OPS_GROUP_ID")
 OPS_TOPIC_TASKS = _as_int_env("OPS_TOPIC_TASKS", 1)
+TOPIC_CONFIG_EXPLICIT["OPS_TOPIC_TASKS"] = bool(
+    str(os.getenv("OPS_TOPIC_TASKS", "")).strip()
+)
 
 # ── Опыт за общение ───────────────────────────────────────────
 # Сколько опыта равно одному выполненному заданию при расчёте уровня.
@@ -319,9 +326,20 @@ def _validate_update_receiver_config():
         raise RuntimeError("Private OPS group must differ from the public community")
     if len(ADMIN_IDS) < 2:
         raise RuntimeError("Webhook production mode requires at least two ADMIN_IDS")
+    topics = (TOPIC_NEWS, TOPIC_CHAT, TOPIC_WORK, TOPIC_FRANCHISE, OPS_TOPIC_TASKS)
+    if not all(TOPIC_CONFIG_EXPLICIT.values()) or any(
+        not isinstance(value, int) or value <= 0 for value in topics
+    ):
+        raise RuntimeError("Webhook production mode requires explicit positive topic IDs")
+    if len(set(topics[:4])) != 4:
+        raise RuntimeError("Public Telegram topic IDs must be distinct")
     parsed = urlparse(PUBLIC_BASE_URL)
+    try:
+        public_port = parsed.port
+    except ValueError:
+        public_port = -1
     if (
-        parsed.scheme != "https" or not parsed.netloc
+        parsed.scheme != "https" or not parsed.netloc or public_port not in (None, 443)
         or parsed.username or parsed.password
         or parsed.path not in ("", "/") or parsed.query or parsed.fragment
     ):
@@ -516,9 +534,10 @@ TASK_TEMPLATES = [
         "title": "Поправить парковку байков",
         "type": "fix_zone",
         "task_title": "Поправить парковку байков",
-        "details": "Аккуратно выровнять байки, освободить проход и отправить результат в чат.",
+        "details": "Аккуратно выровнять байки, освободить проход и приложить фотоотчёт в задании.",
         "reward": 80,
         "mode": "open",
+        "evidence_policy": "after_required",
     },
     {
         "key": "parking_photo",
@@ -528,6 +547,7 @@ TASK_TEMPLATES = [
         "details": "Проверить состояние парковки и отправить понятное фото результата.",
         "reward": 50,
         "mode": "all",
+        "evidence_policy": "after_required",
     },
     {
         "key": "relocate",
@@ -1819,7 +1839,7 @@ def now_iso():
 
 
 ANALYTICS_EVENTS = {
-    "group_member_joined", "bot_started", "referral_bound",
+    "group_member_joined", "bot_started", "referral_bound", "referral_link_invalid",
     "miniapp_authenticated", "application_submitted", "application_decided",
     "task_catalog_served", "task_created", "task_published",
     "task_announcement_retried", "task_claimed",
@@ -1842,7 +1862,7 @@ def _analytics_dedupe(value):
 ANALYTICS_SOURCES = {"group", "bot", "miniapp", "backend"}
 ANALYTICS_PROPERTIES = {
     "entrypoint", "task_type", "evidence_policy", "repeatable",
-    "photo_count_bucket", "available_count_bucket", "decision",
+    "photo_count_bucket", "available_count_bucket", "decision", "referral_format",
 }
 
 
@@ -1989,6 +2009,13 @@ def _tags_list(value):
         if len(result) >= 12:
             break
     return result
+
+
+def _has_exact_tag(value, expected):
+    expected = str(expected or "").strip().lstrip("#").casefold()
+    return bool(expected) and expected in {
+        item.casefold() for item in _tags_list(value)
+    }
 
 
 def _operation_uuid(value):
@@ -3362,7 +3389,7 @@ async def api_state(request):
         await _bind_referral_token(uid, start_param)
         m = await get_member(uid)
     entrypoint = "task" if start_param.startswith("task_") else (
-        "referral" if start_param.startswith(("rf_", "ref_")) else "direct"
+        "referral" if start_param.startswith("rf_") else "direct"
     )
     await _track_event_best_effort(
         "miniapp_authenticated", "miniapp", user_id=uid,
@@ -4634,6 +4661,10 @@ def _withdrawal_public(item, viewer_id=None):
             ),
             "can_release": item.get("status") == "processing" and owned_by_viewer,
             "can_takeover": lease_state == "expired" and not owned_by_viewer,
+            "can_reject": (
+                item.get("status") == "pending"
+                or (item.get("status") == "processing" and owned_by_viewer)
+            ),
         })
     return item
 
@@ -5142,13 +5173,15 @@ async def api_admin_members(request):
         )
         values.extend([needle] * 6)
     if tag:
-        where.append("CASEFOLD(tags) LIKE ?")
-        values.append(f"%{tag}%")
+        where.append("HAS_EXACT_TAG(tags, ?)=1")
+        values.append(tag)
     where_sql = " AND ".join(where)
     async with aiosqlite.connect(DB_PATH, timeout=15) as db:
         db.row_factory = aiosqlite.Row
         await db.create_function(
             "CASEFOLD", 1, lambda value: str(value or "").casefold(), deterministic=True)
+        await db.create_function(
+            "HAS_EXACT_TAG", 2, _has_exact_tag, deterministic=True)
         total = int((await (await db.execute(
             f"SELECT COUNT(*) FROM members WHERE {where_sql}", values,
         )).fetchone())[0])
@@ -5447,6 +5480,14 @@ async def api_admin_task_create(request):
                 "operation_id": operation_id, "idempotent": True,
                 "announcement_status": delivery[0] if delivery else "not_requested",
             })
+    # Time-dependent validation applies only to a new command. A committed
+    # operation must remain replayable after its deadline when the first HTTP
+    # response was lost.
+    if slot_end and datetime.fromisoformat(slot_end) <= datetime.now(timezone.utc):
+        return _json({
+            "error": "slot_expired",
+            "message": "Окончание задания должно быть в будущем.",
+        }, status=400)
     if photo_data:
         try:
             brief_image = await _save_image(
@@ -7261,10 +7302,24 @@ def _subscribe_kb():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _welcome_kb():
+    """Два очевидных маршрута первого входа: Mini App и сообщество."""
+    rows = []
+    app_url = _app_url()
+    if app_url:
+        rows.append([InlineKeyboardButton(text="🚲 Открыть задания", url=app_url)])
+    community_url = _required_chat_url()
+    if community_url:
+        rows.append([InlineKeyboardButton(
+            text="📣 Вступить в сообщество", url=community_url,
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
 SUBSCRIBE_PROMPT = (
     "Ты пришёл по ссылке друга 👋\n\n"
-    "Вступи в сообщество Бибибайка — и другу засчитается приглашение, "
-    "а ты первым увидишь новые задания и акции.\n\n"
+    "Вступи в сообщество Бибибайка и подай заявку. После её одобрения другу "
+    "засчитается приглашение, а ты увидишь новые задания и акции.\n\n"
     "Подписался? Жми кнопку ниже, я проверю."
 )
 
@@ -7299,7 +7354,7 @@ async def _handle_referral_gate(uid, send):
 
 @dp.message(CommandStart(deep_link=True))
 async def start_ref(message: Message, command=None):
-    """Старт по новой opaque-ссылке rf_<token> или старой ref_<id>."""
+    """Старт только по непрозрачной ссылке rf_<token>."""
     uid = message.from_user.id
     await _track_event_best_effort(
         "bot_started", "bot", user_id=uid,
@@ -7311,55 +7366,31 @@ async def start_ref(message: Message, command=None):
         payload = (command.args or "") if command else ""
     except Exception:
         payload = ""
-    ref_id = None
-    referral_token = None
-    if payload.startswith("rf_") and len(payload) <= 64:
-        token = payload[3:]
-        if token and all(char.isalnum() or char in "_-" for char in token):
-            referral_token = token
-            async with aiosqlite.connect(DB_PATH, timeout=15) as db:
-                row = await (await db.execute(
-                    "SELECT referrer_id FROM referral_tokens "
-                    "WHERE token=? AND expires_at>?",
-                    (token, now_iso()),
-                )).fetchone()
-            if row:
-                ref_id = int(row[0])
-    elif payload.startswith("ref_") and payload[4:].isdigit():
-        # Совместимость со ссылками, опубликованными до v2.5.
-        ref_id = int(payload[4:])
     m = await get_member(uid)
     if not m:
         await upsert_member(
             uid,
             full_name=(message.from_user.full_name or ""),
             username=(message.from_user.username or ""))
-    if ref_id and ref_id != uid:
-        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            if referral_token:
-                token_row = await (await db.execute(
-                    "SELECT referrer_id FROM referral_tokens "
-                    "WHERE token=? AND expires_at>?",
-                    (referral_token, now_iso()),
-                )).fetchone()
-                ref_id = int(token_row[0]) if token_row else None
-            referrer = await (await db.execute(
-                "SELECT 1 FROM members WHERE user_id=?", (ref_id,)
-            )).fetchone() if ref_id and ref_id != uid else None
-            if referrer:
-                bound = await db.execute(
-                    "UPDATE members SET referred_by=? "
-                    "WHERE user_id=? AND referred_by IS NULL",
-                    (ref_id, uid),
-                )
-                if bound.rowcount == 1:
-                    await _track_event_in_tx(
-                        db, "referral_bound", "backend", user_id=uid,
-                        dedupe_key=f"referral_bound:{uid}",
-                    )
-            await db.commit()
+    bound = await _bind_referral_token(uid, payload)
+    member_after_bind = await get_member(uid)
     await _greet(message)
+    if (
+        not bound
+        and (payload.startswith("rf_") or payload.startswith("ref_"))
+        and not (member_after_bind and member_after_bind["referred_by"])
+    ):
+        await _track_event_best_effort(
+            "referral_link_invalid", "bot", user_id=uid,
+            properties={
+                "referral_format": "legacy" if payload.startswith("ref_") else "opaque"
+            },
+            dedupe_key=f"referral_invalid:{uid}:{message.message_id}",
+        )
+        await message.answer(
+            "Эта ссылка-приглашение устарела или недействительна. "
+            "Попроси друга открыть приложение и отправить тебе новую ссылку."
+        )
     await _handle_referral_gate(
         uid,
         lambda text, kb=None: message.answer(text, reply_markup=kb),
@@ -7416,7 +7447,7 @@ async def start_plain(message: Message):
 
 async def _greet(message: Message):
     m = await get_member(message.from_user.id)
-    kb = _open_app_kb()
+    kb = _welcome_kb()
     if m and m["status"] == "approved":
         await message.answer(ALREADY_APPROVED, reply_markup=kb, parse_mode="HTML")
     else:

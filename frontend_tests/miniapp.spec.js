@@ -311,6 +311,13 @@ test('скаут открывает доставленное OPS-сообщен�
         processing_by: 778, processing_name: 'Кассир смены',
         lease_state: 'expired', lease_remaining_seconds: 0,
         can_continue: false, can_release: false, can_takeover: true,
+      }, {
+        id: 74, user_id: 504, full_name: 'Получатель смены', amount: 1000,
+        status: 'processing', created_at: '2026-07-28T00:00:00+00:00',
+        processing_by: null, processing_name: '',
+        lease_state: 'unassigned', lease_remaining_seconds: 0,
+        can_continue: true, can_release: false, can_takeover: false,
+        can_reject: false,
       }],
     },
   });
@@ -334,6 +341,38 @@ test('скаут открывает доставленное OPS-сообщен�
   const expired = page.locator('#adWithdrawals .task').filter({ hasText: 'Получатель два' });
   await expect(expired).toContainText('Срок Кассир смены истёк');
   await expect(expired.getByRole('button', { name: 'Забрать заявку' })).toBeEnabled();
+
+  const unassigned = page.locator('#adWithdrawals .task').filter({ hasText: 'Получатель смены' });
+  await expect(unassigned.getByRole('button', { name: 'Продолжить перевод' })).toBeEnabled();
+  await expect(unassigned.getByRole('button', { name: 'Отклонить' })).toHaveCount(0);
+});
+
+test('мастер не разрешает опубликовать задание с прошедшим окончанием', async ({ page }) => {
+  await openMiniApp(page, { initialState: state({ is_admin: true }) });
+  await page.locator('#nav [data-tab="tab-admin"]').click();
+  await page.locator('[data-asub="adSubCreate"]').click();
+  await page.evaluate(() => {
+    const local = ms => {
+      const value = new Date(Date.now() + ms);
+      return new Date(value.getTime() - value.getTimezoneOffset() * 60000)
+        .toISOString().slice(0, 16);
+    };
+    document.getElementById('ntTitle').value = 'Поправить парковку';
+    document.getElementById('ntCity').value = 'Краснодар';
+    document.getElementById('ntAddr').value = 'ул. Красная, 1';
+    document.getElementById('ntSlotStart').value = local(-7200000);
+    document.getElementById('ntSlotEnd').value = local(-3600000);
+    document.getElementById('ntReward').value = '80';
+    document.getElementById('ntBudgetCap').value = '80';
+    setWizardStep(3);
+  });
+  await page.locator('#ntCreate').click();
+
+  await expect(page.locator('.wizard-step[data-wstep="2"]')).toBeVisible();
+  await expect(page.locator('#ntSlotEnd')).toBeFocused();
+  await expect(page.locator('#ntSlotEnd')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#ntError')).toHaveText('Конец задания должен быть в будущем.');
+  await expect(page.locator('#ntSlotEnd')).toHaveAttribute('min', /T/);
 });
 
 test('статус публикации OPS обновляется лёгким запросом и даёт ссылку', async ({ page }) => {

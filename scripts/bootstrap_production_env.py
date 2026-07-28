@@ -16,6 +16,14 @@ from cryptography.fernet import Fernet
 
 TOKEN_RE = re.compile(r"^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$")
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+DEFAULT_BOT_DESCRIPTION = (
+    "Выполняйте задания Бибибайка в своём городе, прикладывайте фото результата "
+    "и получайте бибибонусы на поездки. 1 бибибонус заменяет 1 ₽, минута стоит 8,5 ₽."
+)
+DEFAULT_BOT_SHORT_DESCRIPTION = (
+    "Задания Бибибайка: помогайте городу и получайте бибибонусы на поездки."
+)
+DEFAULT_BOT_MENU_TEXT = "Открыть задания"
 
 
 @dataclass(frozen=True)
@@ -24,16 +32,16 @@ class BootstrapConfig:
     group_id: int
     ops_group_id: int
     admin_ids: tuple[int, ...]
+    webapp_shortname: str
+    topic_news: int
+    topic_chat: int
+    topic_work: int
+    topic_franchise: int
+    ops_topic_tasks: int
     bot_username: str = "BbGalterbot"
     group_username: str = "bbbikefan"
-    webapp_shortname: str = "bibibike"
     expected_bot_name: str = "Бибибайк"
     expected_group_title: str = "Бибибайк"
-    topic_news: int = 1
-    topic_chat: int = 3
-    topic_work: int = 4
-    topic_franchise: int = 43
-    ops_topic_tasks: int = 1
     withdraw_contact: str = "KiriLegenda"
 
 
@@ -44,8 +52,12 @@ def _clean_username(value):
 def validate_config(config: BootstrapConfig, bot_token: str):
     errors = []
     parsed = urlparse(config.public_base_url.strip())
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
     if (
-        parsed.scheme != "https" or not parsed.netloc
+        parsed.scheme != "https" or not parsed.netloc or port not in (None, 443)
         or parsed.username or parsed.password
         or parsed.path not in ("", "/") or parsed.query or parsed.fragment
     ):
@@ -108,8 +120,13 @@ def build_environment(config: BootstrapConfig, bot_token: str):
         "BOT_TOKEN": bot_token.strip(),
         "BOT_USERNAME": bot_username,
         "WEBAPP_SHORTNAME": config.webapp_shortname,
+        "MINI_APP_URL": f"{origin}/",
+        "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "PREFLIGHT_EXPECTED_BOT_NAME": config.expected_bot_name,
         "PREFLIGHT_EXPECTED_GROUP_TITLE": config.expected_group_title,
+        "BOT_PROFILE_DESCRIPTION": DEFAULT_BOT_DESCRIPTION,
+        "BOT_PROFILE_SHORT_DESCRIPTION": DEFAULT_BOT_SHORT_DESCRIPTION,
+        "BOT_MENU_TEXT": DEFAULT_BOT_MENU_TEXT,
         "REQUIRED_CHAT": f"@{group_username}",
         "REQUIRED_CHAT_URL": f"https://t.me/{group_username}",
         "GROUP_USERNAME": group_username,
@@ -205,6 +222,12 @@ def main():
     parser.add_argument("--group-id", type=_supergroup_id, required=True)
     parser.add_argument("--ops-group-id", type=_supergroup_id, required=True)
     parser.add_argument("--admin-id", type=_positive_id, action="append", required=True)
+    parser.add_argument("--webapp-shortname", required=True)
+    parser.add_argument("--topic-news", type=_positive_id, required=True)
+    parser.add_argument("--topic-chat", type=_positive_id, required=True)
+    parser.add_argument("--topic-work", type=_positive_id, required=True)
+    parser.add_argument("--topic-franchise", type=_positive_id, required=True)
+    parser.add_argument("--ops-topic-tasks", type=_positive_id, required=True)
     parser.add_argument("--bot-username", default="BbGalterbot")
     parser.add_argument("--group-username", default="bbbikefan")
     parser.add_argument("--token-env", default="BOT_TOKEN")
@@ -215,6 +238,12 @@ def main():
         group_id=args.group_id,
         ops_group_id=args.ops_group_id,
         admin_ids=tuple(args.admin_id),
+        webapp_shortname=args.webapp_shortname,
+        topic_news=args.topic_news,
+        topic_chat=args.topic_chat,
+        topic_work=args.topic_work,
+        topic_franchise=args.topic_franchise,
+        ops_topic_tasks=args.ops_topic_tasks,
         bot_username=args.bot_username,
         group_username=args.group_username,
     )

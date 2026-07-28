@@ -97,6 +97,7 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
                 })
 
         with closing(sqlite3.connect(database_copy)) as snapshot:
+            schema_version = int(snapshot.execute("PRAGMA user_version").fetchone()[0])
             has_media_table = snapshot.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_objects'"
             ).fetchone()
@@ -179,6 +180,7 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
                 "bytes": database_copy.stat().st_size,
                 "sha256": sha256(database_copy),
                 "integrity_check": "ok",
+                "schema_version": schema_version,
             },
             "media": media,
             "media_objects": media_objects,

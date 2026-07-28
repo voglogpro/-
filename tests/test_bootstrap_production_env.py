@@ -20,6 +20,12 @@ class BootstrapProductionEnvTests(unittest.TestCase):
             group_id=-1001111111111,
             ops_group_id=-1002222222222,
             admin_ids=(101, 202),
+            webapp_shortname="bibibike",
+            topic_news=11,
+            topic_chat=12,
+            topic_work=13,
+            topic_franchise=14,
+            ops_topic_tasks=21,
         )
 
     def test_generated_production_secrets_are_independent_and_complete(self):
@@ -34,6 +40,8 @@ class BootstrapProductionEnvTests(unittest.TestCase):
         self.assertEqual(values["BIBITASKS_ENVIRONMENT"], "production")
         self.assertEqual(values["TELEGRAM_UPDATE_MODE"], "webhook")
         self.assertEqual(values["DATA_DIR"], "/app/data")
+        self.assertEqual(values["MINI_APP_URL"], "https://tasks.example.test/")
+        self.assertEqual(values["TOPIC_WORK"], "13")
         self.assertEqual(values["ADMIN_IDS"], "101,202")
         self.assertNotIn(token, "\n".join(values[name] for name in secret_names))
         repo_root = Path(__file__).resolve().parents[1]
@@ -70,6 +78,14 @@ class BootstrapProductionEnvTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
             with self.assertRaises(FileExistsError):
                 write_environment(target, values, repository_root=repository)
+
+    def test_nonstandard_https_port_is_rejected(self):
+        token = "123456:" + "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMN"
+        config = BootstrapConfig(
+            **{**self.config().__dict__, "public_base_url": "https://tasks.example.test:9443"}
+        )
+        with self.assertRaisesRegex(ValueError, "HTTPS origin"):
+            build_environment(config, token)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,13 @@ except ImportError:  # pragma: no cover - production lock includes python-dotenv
 
 
 ApiCall = Callable[[str, dict[str, object] | None], dict[str, object]]
+BOT_COMMANDS = [
+    {"command": "start", "description": "Начать работу"},
+    {"command": "tasks", "description": "Открыть задания"},
+    {"command": "profile", "description": "Профиль и бибибонусы"},
+    {"command": "balance", "description": "Баланс и минуты поездки"},
+    {"command": "help", "description": "Инструкция и команды"},
+]
 
 
 @dataclass(frozen=True)
@@ -71,13 +78,36 @@ def _username(value):
 
 def _origin(value):
     parsed = urllib.parse.urlparse(str(value or "").strip())
-    if parsed.scheme != "https" or not parsed.netloc:
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or not parsed.netloc or port not in (None, 443):
         return ""
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return ""
     if parsed.path not in ("", "/"):
         return ""
     return f"https://{parsed.netloc}".rstrip("/")
+
+
+def _truthy(value):
+    return str(value or "").strip().casefold() in {"1", "true", "yes"}
+
+
+def _canonical_app_url(value):
+    parsed = urllib.parse.urlparse(str(value or "").strip())
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https" or not parsed.netloc or port not in (None, 443)
+        or parsed.username or parsed.password or parsed.query or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
+        return ""
+    return f"https://{parsed.netloc}/"
 
 
 def run_preflight(env=None, api_call: ApiCall | None = None):
@@ -94,9 +124,20 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     ops_group_id = _integer(env, "OPS_GROUP_ID")
     update_mode = str(env.get("TELEGRAM_UPDATE_MODE", "")).strip().casefold()
     public_origin = _origin(env.get("PUBLIC_BASE_URL"))
+    mini_app_url = _canonical_app_url(env.get("MINI_APP_URL"))
+    webapp_shortname = str(env.get("WEBAPP_SHORTNAME", "")).strip()
+    require_main_mini_app = _truthy(env.get("PREFLIGHT_REQUIRE_MAIN_MINI_APP"))
     route_id = str(env.get("WEBHOOK_ROUTE_ID", "")).strip()
+    topic_names = (
+        "TOPIC_NEWS", "TOPIC_CHAT", "TOPIC_WORK", "TOPIC_FRANCHISE",
+        "OPS_TOPIC_TASKS",
+    )
+    topic_ids = {name: _integer(env, name) for name in topic_names}
     expected_bot_name = str(env.get("PREFLIGHT_EXPECTED_BOT_NAME", "Бибибайк")).strip()
     expected_group_title = str(env.get("PREFLIGHT_EXPECTED_GROUP_TITLE", "Бибибайк")).strip()
+    expected_description = str(env.get("BOT_PROFILE_DESCRIPTION", "")).strip()
+    expected_short_description = str(env.get("BOT_PROFILE_SHORT_DESCRIPTION", "")).strip()
+    expected_menu_text = str(env.get("BOT_MENU_TEXT", "")).strip()
 
     add("BOT_TOKEN", bool(token and ":" in token), "configured", "missing or malformed")
     add("BOT_USERNAME", bool(bot_username), "configured", "missing")
@@ -104,7 +145,23 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     add("OPS_GROUP_ID", bool(ops_group_id and ops_group_id < 0), "numeric private OPS ID configured", "must be a negative numeric chat ID")
     add("chat separation", bool(group_id and ops_group_id and group_id != ops_group_id), "public and OPS chats differ", "public and OPS chats must differ")
     add("PUBLIC_BASE_URL", bool(public_origin), "HTTPS origin configured", "must be an HTTPS origin without path/query")
+    add("MINI_APP_URL", bool(mini_app_url and mini_app_url == public_origin + "/"), "matches deployment root", "must be the HTTPS deployment root")
+    add("WEBAPP_SHORTNAME", bool(webapp_shortname), "configured", "missing")
+    add("bot profile copy", bool(expected_description and expected_short_description and expected_menu_text), "configured", "description, short description or menu text is missing")
+    add(
+        "topic IDs",
+        all(value is not None and value > 0 for value in topic_ids.values())
+        and len({topic_ids[name] for name in topic_names[:4]}) == 4,
+        "all topic IDs are explicit and public topics differ",
+        "all topic IDs must be positive and public topic IDs must differ",
+    )
     add("update mode", update_mode in {"webhook", "polling"}, update_mode or "configured", "must be webhook or polling")
+    add(
+        "main Mini App policy",
+        update_mode != "webhook" or require_main_mini_app,
+        "required for webhook production",
+        "PREFLIGHT_REQUIRE_MAIN_MINI_APP must be true in webhook production",
+    )
     if any(item.status == "fail" for item in checks):
         return _report(checks)
 
@@ -124,14 +181,47 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
     actual_username = _username(me.get("username"))
     add("bot username", actual_username == bot_username, f"@{actual_username}", f"expected @{bot_username}, got @{actual_username or 'unknown'}")
     add("bot group access", bool(me.get("can_join_groups")), "bot can join groups", "BotFather forbids group access")
+    if update_mode == "webhook" or require_main_mini_app:
+        add(
+            "main Mini App",
+            bool(me.get("has_main_web_app")),
+            "BotFather reports a Main Mini App",
+            "BotFather does not report a Main Mini App",
+        )
 
     bot_name = invoke("getMyName")
     actual_name = str((bot_name or {}).get("name", "")).strip()
     add(
         "bot brand name",
-        expected_bot_name.casefold() in actual_name.casefold(),
+        actual_name == expected_bot_name,
         actual_name,
-        f"expected name containing {expected_bot_name!r}, got {actual_name!r}",
+        f"expected exact name {expected_bot_name!r}, got {actual_name!r}",
+    )
+    description = invoke("getMyDescription")
+    actual_description = str((description or {}).get("description", "")).strip()
+    add(
+        "bot description", actual_description == expected_description,
+        "matches release copy", "missing or differs from release copy",
+    )
+    short_description = invoke("getMyShortDescription")
+    actual_short_description = str(
+        (short_description or {}).get("short_description", "")
+    ).strip()
+    add(
+        "bot short description", actual_short_description == expected_short_description,
+        "matches release copy", "missing or differs from release copy",
+    )
+    commands = invoke("getMyCommands")
+    actual_commands = [
+        {
+            "command": str(item.get("command", "")),
+            "description": str(item.get("description", "")),
+        }
+        for item in (commands or {}).get("value", []) if isinstance(item, dict)
+    ]
+    add(
+        "bot commands", actual_commands == BOT_COMMANDS,
+        "exact release commands configured", "commands or descriptions differ from release copy",
     )
 
     public_chat = invoke("getChat", {"chat_id": group_id})
@@ -171,10 +261,15 @@ def run_preflight(env=None, api_call: ApiCall | None = None):
 
     menu = invoke("getChatMenuButton")
     if menu and menu.get("type") == "web_app":
-        menu_url = str((menu.get("web_app") or {}).get("url", ""))
-        add("menu Mini App URL", menu_url.startswith(public_origin + "/") or menu_url == public_origin, "menu button points to deployment origin", "menu button points to another origin")
+        menu_url = _canonical_app_url((menu.get("web_app") or {}).get("url", ""))
+        menu_text = str(menu.get("text", "")).strip()
+        add("menu Mini App URL", menu_url == mini_app_url and menu_text == expected_menu_text, "menu button points to the exact Mini App URL", "menu button text or URL differs from release config")
     else:
-        checks.append(Check("menu Mini App", "warn", "default menu button is not a web_app; verify named Mini App manually in BotFather"))
+        checks.append(Check(
+            "menu Mini App",
+            "fail" if update_mode == "webhook" else "warn",
+            "default menu button is not a web_app",
+        ))
 
     return _report(checks)
 

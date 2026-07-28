@@ -19,6 +19,15 @@ Telegram, `task_id`, `assignment_id`, OPS message link, `withdrawal_id`, вне�
 
 ## 1. Read-only production preflight
 
+Сначала выполните dry-run публичной поверхности. Если он показывает изменения,
+сверьте username и примените их с двумя явными флагами:
+
+```bash
+python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env
+python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env \
+  --apply --confirm-bot @BbGalterbot
+```
+
 ```bash
 python scripts/telegram_preflight.py --env-file /etc/bibitasks/bibitasks.env \
   > telegram-preflight.json
@@ -34,6 +43,11 @@ PASS:
 - OPS — private forum supergroup без публичного username;
 - в `ADMIN_IDS` минимум два действующих скаута;
 - menu button ведёт на production HTTPS origin.
+- имя бота точно «Бибибайк», а аватар — зелёный персонаж из `logo.jpg`, без
+  старого «BibiПомощник» и букв «ББ»;
+- `getMe` подтверждает Main Mini App, а named-ссылка
+  `https://t.me/BbGalterbot/bibibike` открывается отдельно;
+- каждый topic ID взят из реальной темы, а не из примера или старой группы.
 
 Любой `fail`, readiness `503`, публичная OPS или один скаут — NO-GO.
 

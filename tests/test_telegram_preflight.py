@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from scripts.telegram_preflight import run_preflight
+from scripts.telegram_preflight import BOT_COMMANDS, run_preflight
 
 
 def base_env():
@@ -12,18 +12,38 @@ def base_env():
         "GROUP_USERNAME": "bbbikefan",
         "OPS_GROUP_ID": "-1002222222222",
         "PUBLIC_BASE_URL": "https://tasks.example.test",
+        "MINI_APP_URL": "https://tasks.example.test/",
+        "WEBAPP_SHORTNAME": "bibibike",
+        "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "TELEGRAM_UPDATE_MODE": "webhook",
         "WEBHOOK_ROUTE_ID": "route_" + "x" * 40,
         "PREFLIGHT_EXPECTED_BOT_NAME": "Бибибайк",
         "PREFLIGHT_EXPECTED_GROUP_TITLE": "Бибибайк",
+        "BOT_PROFILE_DESCRIPTION": "Полное описание",
+        "BOT_PROFILE_SHORT_DESCRIPTION": "Короткое описание",
+        "BOT_MENU_TEXT": "Открыть задания",
+        "TOPIC_NEWS": "11",
+        "TOPIC_CHAT": "12",
+        "TOPIC_WORK": "13",
+        "TOPIC_FRANCHISE": "14",
+        "OPS_TOPIC_TASKS": "21",
     }
 
 
 def good_api(method, params=None):
     if method == "getMe":
-        return {"id": 777, "username": "BbGalterbot", "can_join_groups": True}
+        return {
+            "id": 777, "username": "BbGalterbot", "can_join_groups": True,
+            "has_main_web_app": True,
+        }
     if method == "getMyName":
         return {"name": "Бибибайк"}
+    if method == "getMyDescription":
+        return {"description": "Полное описание"}
+    if method == "getMyShortDescription":
+        return {"short_description": "Короткое описание"}
+    if method == "getMyCommands":
+        return {"value": list(BOT_COMMANDS)}
     if method == "getChat":
         if params["chat_id"] == -1001111111111:
             return {"type": "supergroup", "is_forum": True, "username": "bbbikefan", "title": "Бибибайк · Команда"}
@@ -38,7 +58,10 @@ def good_api(method, params=None):
             "pending_update_count": 0,
         }
     if method == "getChatMenuButton":
-        return {"type": "web_app", "web_app": {"url": "https://tasks.example.test/"}}
+        return {
+            "type": "web_app", "text": "Открыть задания",
+            "web_app": {"url": "https://tasks.example.test/"},
+        }
     raise AssertionError(method)
 
 
@@ -85,6 +108,47 @@ class TelegramPreflightTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertFalse(called)
         self.assertGreaterEqual(report["summary"]["fail"], 5)
+
+    def test_production_requires_exact_menu_and_supported_https_port(self):
+        def missing_menu(method, params=None):
+            if method == "getChatMenuButton":
+                return {"type": "default"}
+            return good_api(method, params)
+
+        report = run_preflight(base_env(), missing_menu)
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "menu Mini App",
+            {item["name"] for item in report["checks"] if item["status"] == "fail"},
+        )
+
+        env = {**base_env(), "PUBLIC_BASE_URL": "https://tasks.example.test:9443"}
+        report = run_preflight(env, good_api)
+        self.assertFalse(report["ok"])
+
+    def test_production_cannot_disable_main_app_or_accept_stale_profile(self):
+        disabled = {**base_env(), "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "false"}
+        report = run_preflight(disabled, good_api)
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "main Mini App policy",
+            {item["name"] for item in report["checks"] if item["status"] == "fail"},
+        )
+
+        def stale_surface(method, params=None):
+            value = good_api(method, params)
+            if method == "getMyName":
+                return {"name": "X Бибибайк X"}
+            if method == "getMyCommands":
+                return {"value": list(BOT_COMMANDS) + [
+                    {"command": "legacy", "description": "Старая команда"},
+                ]}
+            return value
+
+        report = run_preflight(base_env(), stale_surface)
+        failed = {item["name"] for item in report["checks"] if item["status"] == "fail"}
+        self.assertIn("bot brand name", failed)
+        self.assertIn("bot commands", failed)
 
 
 if __name__ == "__main__":

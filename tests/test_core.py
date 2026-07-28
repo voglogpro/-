@@ -70,6 +70,8 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             "WEBHOOK_PATH", "WEBHOOK_SECRET", "WEBHOOK_MAX_CONNECTIONS",
             "ADMIN_IDS",
             "OPS_GROUP_ID", "OPS_GROUP_USERNAME", "GROUP_ID", "GROUP_USERNAME",
+            "TOPIC_CONFIG_EXPLICIT", "TOPIC_NEWS", "TOPIC_CHAT", "TOPIC_WORK",
+            "TOPIC_FRANCHISE", "OPS_TOPIC_TASKS",
         )
         original = {name: getattr(main, name) for name in names}
         try:
@@ -84,7 +86,19 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             main.OPS_GROUP_USERNAME = ""
             main.GROUP_ID = -1009000000002
             main.GROUP_USERNAME = "bbbikefan"
+            main.TOPIC_CONFIG_EXPLICIT = {
+                "TOPIC_NEWS": True, "TOPIC_CHAT": True, "TOPIC_WORK": True,
+                "TOPIC_FRANCHISE": True, "OPS_TOPIC_TASKS": True,
+            }
+            (
+                main.TOPIC_NEWS, main.TOPIC_CHAT, main.TOPIC_WORK,
+                main.TOPIC_FRANCHISE, main.OPS_TOPIC_TASKS,
+            ) = (11, 12, 13, 14, 21)
             main._validate_update_receiver_config()
+            main.TOPIC_CHAT = main.TOPIC_NEWS
+            with self.assertRaisesRegex(RuntimeError, "topic IDs must be distinct"):
+                main._validate_update_receiver_config()
+            main.TOPIC_CHAT = 12
             main.GROUP_ID = main.OPS_GROUP_ID
             with self.assertRaisesRegex(RuntimeError, "must differ"):
                 main._validate_update_receiver_config()
@@ -93,6 +107,9 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTPS origin"):
                 main._validate_update_receiver_config()
             main.PUBLIC_BASE_URL = "https://user:pass@tasks.example"
+            with self.assertRaisesRegex(RuntimeError, "HTTPS origin"):
+                main._validate_update_receiver_config()
+            main.PUBLIC_BASE_URL = "https://tasks.example:9443"
             with self.assertRaisesRegex(RuntimeError, "HTTPS origin"):
                 main._validate_update_receiver_config()
             main.PUBLIC_BASE_URL = "https://tasks.example"
@@ -1320,6 +1337,16 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(owner)
         self.assertEqual(events, 2)
 
+        released_public = main._withdrawal_public({
+            "id": request_id,
+            "status": "processing",
+            "processing_by": None,
+            "processing_at": None,
+        }, viewer_id=next_admin)
+        self.assertEqual(released_public["lease_state"], "unassigned")
+        self.assertTrue(released_public["can_continue"])
+        self.assertFalse(released_public["can_reject"])
+
     async def test_invalid_withdrawal_lease_timestamp_is_expired_and_audited(self):
         worker_id, owner_id, takeover_id = 901_110_001, 901_110_002, 901_110_003
         for uid, role in ((worker_id, "helper"), (owner_id, "admin"), (takeover_id, "admin")):
@@ -1410,6 +1437,71 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_data["next_cursor"], "50")
         self.assertEqual((len(found_data["items"]), found_data["total"]), (1, 1))
 
+    async def test_admin_member_tag_filter_matches_whole_tag_only(self):
+        original_admin = main._require_admin
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        try:
+            await main.upsert_member(
+                902_100_001, full_name="Водитель", status="approved",
+                role="helper", tags="авто, парковки",
+            )
+            await main.upsert_member(
+                902_100_002, full_name="Фотограф", status="approved",
+                role="helper", tags="то, фото",
+            )
+            response = await main.api_admin_members(SimpleNamespace(
+                rel_url=SimpleNamespace(query={"tag": "то", "limit": "50"})
+            ))
+        finally:
+            main._require_admin = original_admin
+        data = response_json(response)
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["items"][0]["name"], "Фотограф")
+
+    async def test_pilot_templates_and_first_entry_links_are_unambiguous(self):
+        parking = next(item for item in main.TASK_TEMPLATES if item["key"] == "parking")
+        self.assertEqual(parking["evidence_policy"], "after_required")
+        self.assertIn("фотоотчёт в задании", parking["details"])
+        self.assertNotIn("в чат", parking["details"])
+        keyboard = main._welcome_kb()
+        urls = [button.url for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("https://t.me/BbGalterbot/bibibike", urls)
+        self.assertIn("https://t.me/bbbikefan", urls)
+        self.assertFalse(await main._bind_referral_token(902_100_003, "ref_902100001"))
+
+    async def test_invalid_or_legacy_referral_link_is_explained(self):
+        class FakeMessage:
+            message_id = 701
+            chat = SimpleNamespace(id=902_100_004, type="private")
+            from_user = SimpleNamespace(
+                id=902_100_004, full_name="Новый участник", username="new_helper",
+            )
+
+            def __init__(self):
+                self.answers = []
+
+            async def answer(self, text, **_kwargs):
+                self.answers.append(text)
+
+        message = FakeMessage()
+        await main.start_ref(message, SimpleNamespace(args="ref_902100001"))
+        self.assertTrue(any("устарела или недействительна" in text for text in message.answers))
+        member = await main.get_member(message.from_user.id)
+        self.assertIsNone(member["referred_by"])
+        with sqlite3.connect(main.DB_PATH) as db:
+            event = db.execute(
+                "SELECT e.properties_json FROM product_events e "
+                "JOIN analytics_subjects s ON s.subject_id=e.subject_id "
+                "WHERE e.event_name='referral_link_invalid' AND s.user_id=?",
+                (message.from_user.id,),
+            ).fetchone()
+        self.assertIsNotNone(event)
+        self.assertEqual(json.loads(event[0])["referral_format"], "legacy")
+
     async def test_task_create_retry_returns_one_task(self):
         original = main._require_admin
 
@@ -1431,10 +1523,20 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             "budget_cap": 80,
             "repeatable": False,
             "announce": False,
+            "slot_start": (main.datetime.now(main.timezone.utc) + main.timedelta(hours=1)).isoformat(),
+            "slot_end": (main.datetime.now(main.timezone.utc) + main.timedelta(days=1)).isoformat(),
         }
         try:
             first = await main.api_admin_task_create(DummyRequest(body))
-            second = await main.api_admin_task_create(DummyRequest(body))
+            real_datetime = main.datetime
+
+            class AfterDeadline(real_datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return real_datetime.now(tz) + main.timedelta(days=2)
+
+            with patch.object(main, "datetime", AfterDeadline):
+                second = await main.api_admin_task_create(DummyRequest(body))
         finally:
             main._require_admin = original
         first_data, second_data = response_json(first), response_json(second)
@@ -1456,6 +1558,36 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             main._require_admin = original
         self.assertEqual(conflict_response.status, 409)
+
+    async def test_task_with_expired_deadline_is_rejected_before_publish(self):
+        original = main._require_admin
+
+        async def allow_admin(_request):
+            return 42, None
+
+        main._require_admin = allow_admin
+        past_end = main.datetime.now(main.timezone.utc) - main.timedelta(minutes=1)
+        body = {
+            "operation_id": str(uuid.uuid4()),
+            "type": "fix_zone",
+            "title": "Просроченная парковка",
+            "city": "Краснодар",
+            "address": "ул. Красная, 1",
+            "reward": 80,
+            "evidence_policy": "after_required",
+            "repeatable": False,
+            "announce": True,
+            "slot_start": (past_end - main.timedelta(hours=1)).isoformat(),
+            "slot_end": past_end.isoformat(),
+        }
+        try:
+            response = await main.api_admin_task_create(DummyRequest(body))
+        finally:
+            main._require_admin = original
+        self.assertEqual(response.status, 400)
+        self.assertEqual(response_json(response)["error"], "slot_expired")
+        with sqlite3.connect(main.DB_PATH) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
 
     async def test_photo_report_is_linked_to_claimed_task(self):
         uid = 900_000_003

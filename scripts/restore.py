@@ -131,6 +131,15 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
         with closing(sqlite3.connect(database_target)) as db:
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeError("Restored database failed integrity_check")
+            restored_schema_version = int(
+                db.execute("PRAGMA user_version").fetchone()[0]
+            )
+        expected_schema_version = database_meta.get("schema_version")
+        if (
+            expected_schema_version is not None
+            and restored_schema_version != int(expected_schema_version)
+        ):
+            raise RuntimeError("Restored database schema version differs from manifest")
 
         for item in manifest.get("media") or []:
             source = _verified_file(
@@ -202,6 +211,7 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
             "restored_at": datetime.now(timezone.utc).isoformat(),
             "source_manifest_sha256": sha256(manifest_path),
             "database_sha256_after_restore": sha256(database_target),
+            "schema_version": restored_schema_version,
             "s3_versions_rewritten": len(restored_versions),
             "integrity_check": "ok",
         }

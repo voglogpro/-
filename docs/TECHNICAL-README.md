@@ -37,18 +37,39 @@ python scripts/bootstrap_production_env.py \
   --public-base-url https://tasks.example.com \
   --group-id -1000000000001 \
   --ops-group-id -1000000000002 \
-  --admin-id 111111111 --admin-id 222222222
+  --admin-id 111111111 --admin-id 222222222 \
+  --webapp-shortname bibibike \
+  --topic-news 11 --topic-chat 12 --topic-work 13 \
+  --topic-franchise 14 --ops-topic-tasks 21
 unset BOT_TOKEN
 ```
 
 Генератор запрещает путь внутри Git, не перезаписывает существующий файл,
 создаёт независимые webhook/media/encryption secrets и выставляет режим `0600`
-на Linux. После настройки реального Telegram выполните read-only проверку,
+на Linux. ID тем намеренно не имеют значений по умолчанию: возьмите реальные
+`message_thread_id` из созданных Telegram-тем. HTTPS origin разрешён только на
+стандартном порту 443. После настройки реального Telegram выполните read-only проверку,
 которая не отправляет и не удаляет сообщения:
 
 ```bash
+python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env
+# Просмотрите JSON-план. Только для подтверждённого @BbGalterbot:
+python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env \
+  --apply --confirm-bot @BbGalterbot
+# Одноразово поставить проверенный JPG из репозитория как аватар бота:
+python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env \
+  --apply --confirm-bot @BbGalterbot --avatar-file logo.jpg
 python scripts/telegram_preflight.py --env-file /etc/bibitasks/bibitasks.env
 ```
+
+Surface setup идемпотентно приводит к release-конфигурации имя, полное и короткое
+описание, команды и default menu button. По умолчанию это dry-run; он не меняет
+webhook, группы, темы, сообщения, named Mini App или аватар. Явный
+`--avatar-file` использует официальный `setMyProfilePhoto`, затем несколько раз
+сверяет профиль. Одинаковый `file_unique_id` после подтверждённого API-ответа не
+считается ошибкой: это может быть тот же файл или задержка видимости, поэтому
+команду не нужно повторять. Named/Main Mini App настраивается в BotFather; live
+acceptance сверяет итог в Telegram-клиенте.
 
 Нулевой exit code означает, что обязательные проверки имени бота, групп,
 прав, forum mode, webhook и Mini App menu button прошли. Затем выполните
