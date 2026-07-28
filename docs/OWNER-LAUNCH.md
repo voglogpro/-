@@ -54,6 +54,15 @@ backup-процесс используют общий Docker volume; запус�
 | `OPS_TOPIC_TASKS` | `message_thread_id` темы «Задания OPS» | ☐ |
 | `ADMIN_IDS` | Telegram user ID S1 и S2 | ☐ |
 
+Ещё до получения токена можно проверить публично видимый маршрут. Команда
+ничего не меняет и завершается ошибкой при старом названии или описании.
+Публичный `Open App` не доказывает регистрацию named Mini App — это отдельный
+BotFather/live-client gate:
+
+```bash
+python scripts/telegram_public_surface_audit.py --env-file .env.example
+```
+
 ## 2. Подготовка VPS
 
 Разработчик устанавливает Docker Engine и Compose plugin по актуальной
@@ -262,10 +271,16 @@ queues равны нулю, receiver и encryption readiness равны `true`.
 
 ```bash
 docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_public_surface_audit.py \
+  > "$EVIDENCE_DIR/telegram-public-surface-before.json"
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
   run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py
 docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
   run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py \
   --apply --confirm-bot @BbGalterbot --avatar-file logo.jpg
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_public_surface_audit.py \
+  > "$EVIDENCE_DIR/telegram-public-surface-after.json"
 ```
 
 Автоматический setup меняет профиль, команды и кнопку меню, но не создаёт Main

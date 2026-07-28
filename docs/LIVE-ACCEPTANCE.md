@@ -1,4 +1,4 @@
-# Live acceptance БибиЗадачи v2.9
+# Live acceptance БибиЗадачи v2.10
 
 Этот gate выполняется после зелёного CI и HTTPS-деплоя. Он проверяет не макеты,
 а реальную связку Telegram-бота, публичной группы, приватной OPS-группы и Mini App.
@@ -31,6 +31,9 @@ Telegram, `task_id`, `assignment_id`, OPS message link, `withdrawal_id`, вне�
 
 ```bash
 docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
+  run --rm --no-deps bibitasks python scripts/telegram_public_surface_audit.py \
+  > "$EVIDENCE_DIR/telegram-public-surface.json"
+docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
   run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py
 docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
   run --rm --no-deps bibitasks python scripts/telegram_surface_setup.py \
@@ -51,6 +54,9 @@ docker compose --env-file /etc/bibitasks/deploy.env -f compose.pilot.yaml \
 
 PASS:
 
+- public-surface audit возвращает exit code `0` и подтверждает точные публичные
+  название/описание группы и имя бота; предупреждение о named Mini App ожидаемо,
+  потому что его регистрацию доказывают только BotFather и реальные клиенты;
 - preflight возвращает exit code `0`, а JSON содержит `"ok": true`;
 - readiness отвечает `200`, critical workers живы, dead-очереди пусты;
 - `GROUP_ID` и `OPS_GROUP_ID` различаются;

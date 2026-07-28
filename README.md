@@ -270,10 +270,10 @@ Telegram-бот @BbGalterbot
 
 ### Тесты
 
-**265 автоматических проверок** в локальном прогоне: 255 PASS и 10 ожидаемых
+**271 автоматическая проверка** в локальном прогоне: 261 PASS и 10 ожидаемых
 environment-specific SKIP (POSIX/Docker/PostgreSQL интеграции выполняет CI):
 
-- **218** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
+- **224** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
 - **7** — точность PostgreSQL migration harness
 - **40** — интерфейс Mini App в Playwright
 
@@ -287,7 +287,9 @@ Production требует не только `BOT_TOKEN`, но и отдельн�
 в [`docs/PILOT-OPERATIONS.md`](docs/PILOT-OPERATIONS.md). Настоящие значения
 никогда не коммитятся.
 
-Перед live-приёмкой выполните `python scripts/telegram_preflight.py`, затем
+Перед live-приёмкой выполните без токена
+`python scripts/telegram_public_surface_audit.py --env-file .env.example`, затем
+production `python scripts/telegram_preflight.py` и
 пройдите [`docs/LIVE-ACCEPTANCE.md`](docs/LIVE-ACCEPTANCE.md).
 
 **Права бота в группе.** Три вещи, без которых часть механик молча

@@ -58,6 +58,9 @@ unset BOT_TOKEN
 которая не отправляет и не удаляет сообщения:
 
 ```bash
+# Без BOT_TOKEN: проверяет то, что уже видит новый пользователь на t.me.
+python scripts/telegram_public_surface_audit.py \
+  --env-file /etc/bibitasks/bibitasks.env
 python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env
 # Просмотрите JSON-план. Только для подтверждённого @BbGalterbot:
 python scripts/telegram_surface_setup.py --env-file /etc/bibitasks/bibitasks.env \
@@ -76,6 +79,12 @@ webhook, группы, темы, сообщения, named Mini App или ав�
 считается ошибкой: это может быть тот же файл или задержка видимости, поэтому
 команду не нужно повторять. Named/Main Mini App настраивается в BotFather; live
 acceptance сверяет итог в Telegram-клиенте.
+
+Public-surface audit не меняет Telegram и не использует токен. Он проверяет
+публичные preview-страницы группы и бота. Telegram сериализует в `Open App` даже
+несуществующий `appname`, поэтому этот сигнал остаётся предупреждением и не
+доказывает регистрацию/target URL named Mini App. Права, webhook, Main Mini App,
+named Mini App и backend проверяются Bot API, BotFather и реальными клиентами.
 
 Нулевой exit code означает, что обязательные проверки имени бота, групп,
 прав, forum mode, webhook и Mini App menu button прошли. Затем выполните
