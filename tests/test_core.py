@@ -1217,6 +1217,33 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
             for name, value in original.items():
                 setattr(main, name, value)
 
+    async def test_production_rejects_polling_before_receiver_bypass(self):
+        original_mode = main.TELEGRAM_UPDATE_MODE
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        try:
+            main.TELEGRAM_UPDATE_MODE = "polling"
+            main.BIBITASKS_ENVIRONMENT = "production"
+            with self.assertRaisesRegex(
+                RuntimeError, "Production requires TELEGRAM_UPDATE_MODE=webhook",
+            ):
+                main._validate_update_receiver_config()
+        finally:
+            main.TELEGRAM_UPDATE_MODE = original_mode
+            main.BIBITASKS_ENVIRONMENT = original_environment
+
+    async def test_nonproduction_keeps_polling_receiver_available(self):
+        original_mode = main.TELEGRAM_UPDATE_MODE
+        original_environment = main.BIBITASKS_ENVIRONMENT
+        try:
+            main.TELEGRAM_UPDATE_MODE = "polling"
+            for environment in ("development", "test", "staging"):
+                with self.subTest(environment=environment):
+                    main.BIBITASKS_ENVIRONMENT = environment
+                    main._validate_update_receiver_config()
+        finally:
+            main.TELEGRAM_UPDATE_MODE = original_mode
+            main.BIBITASKS_ENVIRONMENT = original_environment
+
     async def test_bot_identity_must_match_configured_username(self):
         original = main.BOT_USERNAME
         try:
@@ -1315,7 +1342,8 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_staging_retry_is_accelerated_but_production_override_fails_closed(self):
         names = (
-            "BIBITASKS_ENVIRONMENT", "TELEGRAM_RETRY_BASE_SECONDS",
+            "BIBITASKS_ENVIRONMENT", "TELEGRAM_UPDATE_MODE",
+            "TELEGRAM_RETRY_BASE_SECONDS",
             "TELEGRAM_RETRY_MAX_SECONDS", "TELEGRAM_RETRY_MAX_ATTEMPTS",
         )
         original = {name: getattr(main, name) for name in names}
@@ -1329,6 +1357,7 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
                 [1, 2, 4, 4],
             )
             main.BIBITASKS_ENVIRONMENT = "production"
+            main.TELEGRAM_UPDATE_MODE = "webhook"
             with self.assertRaisesRegex(RuntimeError, "forbidden in production"):
                 main._validate_update_receiver_config()
         finally:
@@ -2338,8 +2367,8 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         data_dir = Path(main.DB_PATH).parent
         output_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_backups")
         restore_dir = TEST_ROOT / (self.id().rsplit(".", 1)[-1] + "_restored")
-        backup_dir = create_backup(data_dir, output_dir)
-        restored = restore_backup(backup_dir, restore_dir)
+        backup_dir = create_backup(data_dir, output_dir, allow_plaintext_dev=True)
+        restored = restore_backup(backup_dir, restore_dir, allow_plaintext_dev=True)
         with sqlite3.connect(restored / "bibitasks.db") as db:
             row = db.execute(
                 "SELECT object_key,sha256,state FROM media_objects WHERE id=?",
@@ -2418,8 +2447,10 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
                 bucket, key = kwargs["Bucket"], kwargs["Key"]
                 version = f"new-v{self.sequence}"
                 self.sequence += 1
+                body = kwargs["Body"]
+                content = body.read() if hasattr(body, "read") else bytes(body)
                 self.objects[(bucket, key, version)] = {
-                    "content": bytes(kwargs["Body"]),
+                    "content": content,
                     "metadata": dict(kwargs.get("Metadata") or {}),
                 }
                 self.latest[(bucket, key)] = version
@@ -2467,9 +2498,15 @@ class CoreSafetyTests(unittest.IsolatedAsyncioTestCase):
         }), patch.dict(
             os.environ, env, clear=False,
         ):
-            backup_dir = create_backup(Path(main.DB_PATH).parent, output_dir)
+            backup_dir = create_backup(
+                Path(main.DB_PATH).parent, output_dir, allow_plaintext_dev=True,
+                allow_s3_dev=True,
+            )
             os.environ["S3_BUCKET"] = "target-bucket"
-            restored = restore_backup(backup_dir, restore_dir)
+            restored = restore_backup(
+                backup_dir, restore_dir, allow_plaintext_dev=True,
+                allow_s3_dev=True,
+            )
         with sqlite3.connect(restored / "bibitasks.db") as db:
             version_id = db.execute(
                 "SELECT version_id FROM media_objects WHERE id=?", (media_id,),

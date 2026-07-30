@@ -39,6 +39,7 @@ services:
 
   backup:
     image: "${BIBITASKS_IMAGE:?Use the same immutable image digest as the app}"
+    user: "0:0"
     command: ["python", "scripts/deployment_guard.py", "python", "scripts/backup_scheduler.py"]
     restart: "unless-stopped"
     environment:
@@ -49,6 +50,9 @@ services:
       BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-600}"
       BACKUP_RPO_SECONDS: "${BACKUP_RPO_SECONDS:-900}"
       BACKUP_MAX_CONSECUTIVE_FAILURES: "3"
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      BACKUP_ENCRYPTION_KEY_VERSION: "${BACKUP_ENCRYPTION_KEY_VERSION:?Set the backup key version}"
+      BACKUP_PLAINTEXT_TMP_DIR: /run/bibitasks-backup-plaintext
     volumes:
       - bibitasks_data:/app/data:ro
       - backup_status:/run/bibitasks-backup
@@ -64,14 +68,19 @@ services:
         bind:
           create_host_path: false
     network_mode: none
+    secrets:
+      - backup_encryption_key
     read_only: true
     tmpfs:
       - /tmp:size=8m,mode=1777
+      - /run/bibitasks-backup-plaintext:size=512m,mode=0700,noexec,nosuid,nodev
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 64
-    mem_limit: 384m
+    mem_limit: 768m
     cpus: 0.75
+    ulimits:
+      core: 0
     healthcheck:
       test: ["CMD", "python", "scripts/backup_scheduler.py", "--check"]
       interval: 60s
@@ -180,6 +189,8 @@ volumes:
   monitor_state:
 
 secrets:
+  backup_encryption_key:
+    file: "${BACKUP_ENCRYPTION_KEY_FILE:?Point to a root-owned 0600 backup key file}"
   monitor_alert_bot_token:
     file: "${MONITOR_ALERT_BOT_TOKEN_FILE:?Point to a root-owned 0600 Telegram bot token file}"
   monitor_health_token:

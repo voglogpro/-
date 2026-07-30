@@ -22,6 +22,11 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+try:
+    from .backup_crypto import KEY_VERSION_RE, load_backup_key
+except ImportError:
+    from backup_crypto import KEY_VERSION_RE, load_backup_key
+
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_RE = re.compile(
@@ -38,6 +43,8 @@ REQUIRED_DEPLOY_KEYS = (
     "BACKUP_SENTINEL",
     "BACKUP_SENTINEL_VALUE",
     "BACKUP_EXPECTED_SOURCE",
+    "BACKUP_ENCRYPTION_KEY_FILE",
+    "BACKUP_ENCRYPTION_KEY_VERSION",
     "BIBITASKS_DATA_VOLUME",
     "MONITOR_ALERT_BOT_TOKEN_FILE",
     "MONITOR_HEALTH_TOKEN_FILE",
@@ -255,6 +262,41 @@ def run_preflight(
         )
         add("production env permissions", secure, detail, detail)
 
+    backup_key_path = Path(env["BACKUP_ENCRYPTION_KEY_FILE"])
+    backup_key_version = env["BACKUP_ENCRYPTION_KEY_VERSION"]
+    key_path_ok = backup_key_path.is_absolute()
+    add(
+        "backup encryption key path", key_path_ok,
+        "absolute private key path configured",
+        "BACKUP_ENCRYPTION_KEY_FILE must be absolute",
+    )
+    key_version_ok = bool(KEY_VERSION_RE.fullmatch(backup_key_version))
+    add(
+        "backup encryption key version", key_version_ok,
+        "canonical key version configured",
+        "BACKUP_ENCRYPTION_KEY_VERSION is invalid",
+    )
+    if key_path_ok:
+        secure, detail = _file_security(
+            backup_key_path, secret=True, expected_uid=expected_owner_uid,
+        )
+        add("backup encryption key permissions", secure, detail, detail)
+        key_contract_ok = False
+        if secure and key_version_ok:
+            try:
+                load_backup_key(
+                    backup_key_path, expected_version=backup_key_version,
+                    expected_uid=expected_owner_uid,
+                )
+                key_contract_ok = True
+            except (OSError, ValueError, PermissionError):
+                pass
+        add(
+            "backup encryption key contract", key_contract_ok,
+            "versioned 256-bit backup key verified",
+            "backup key contract/owner/version could not be verified",
+        )
+
     for key, check_name in (
         ("MONITOR_ALERT_BOT_TOKEN_FILE", "monitor alert token permissions"),
         ("MONITOR_HEALTH_TOKEN_FILE", "monitor health token permissions"),
@@ -400,15 +442,70 @@ def run_preflight(
         "local release image", image_ok,
         "approved image is present locally", "pull and verify the approved immutable image first",
     )
-    compose_ok = repo.is_dir() and _command_ok(
-        probe,
-        ["docker", "compose", "--env-file", str(deploy_path),
-         "-f", "compose.pilot.yaml", "config", "--quiet"],
-        cwd=repo,
-    )
+    compose_payload = None
+    if repo.is_dir():
+        try:
+            compose_result = probe.command(
+                ["docker", "compose", "--env-file", str(deploy_path),
+                 "-f", "compose.pilot.yaml", "config", "--format", "json"],
+                cwd=repo,
+            )
+            if compose_result.returncode == 0:
+                compose_payload = json.loads(compose_result.stdout)
+        except (OSError, subprocess.SubprocessError, TimeoutError,
+                json.JSONDecodeError, TypeError):
+            compose_payload = None
+    compose_ok = isinstance(compose_payload, dict)
     add(
         "Compose render", compose_ok,
         "pilot manifest renders with approved env", "pilot manifest failed strict rendering",
+    )
+    backup_contract_ok = False
+    if compose_ok:
+        backup_service = ((compose_payload.get("services") or {}).get("backup") or {})
+        environment = backup_service.get("environment") or {}
+        if isinstance(environment, list):
+            environment = dict(
+                item.split("=", 1) for item in environment
+                if isinstance(item, str) and "=" in item
+            )
+        tmpfs = backup_service.get("tmpfs") or []
+        secrets = backup_service.get("secrets") or []
+        secret_targets = {
+            (item.get("target") or item.get("source")) if isinstance(item, dict) else item
+            for item in secrets
+        }
+        backup_contract_ok = (
+            backup_service.get("user") in {"0:0", "0"}
+            and environment.get("BACKUP_ENCRYPTION_KEY_FILE")
+                == "/run/secrets/backup_encryption_key"
+            and environment.get("BACKUP_ENCRYPTION_KEY_VERSION") == backup_key_version
+            and environment.get("BACKUP_PLAINTEXT_TMP_DIR")
+                == "/run/bibitasks-backup-plaintext"
+            and any(
+                str(item).split(":", 1)[0] == "/run/bibitasks-backup-plaintext"
+                for item in tmpfs
+            )
+            and "backup_encryption_key" in secret_targets
+            and backup_service.get("network_mode") == "none"
+            and backup_service.get("read_only") is True
+            and (backup_service.get("ulimits") or {}).get("core")
+                in (0, {"soft": 0, "hard": 0})
+        )
+    add(
+        "backup encryption runtime", backup_contract_ok,
+        "root key mount and memory-only plaintext scratch are rendered",
+        "Compose does not prove encrypted backup with dedicated tmpfs scratch",
+    )
+    try:
+        swap_result = probe.command(["swapon", "--show", "--noheadings", "--raw"])
+        no_swap = swap_result.returncode == 0 and not swap_result.stdout.strip()
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        no_swap = False
+    add(
+        "plaintext scratch swap safety", no_swap,
+        "host has no active swap for tmpfs plaintext pages",
+        "disable swap before using tmpfs plaintext scratch",
     )
 
     if _is_https_domain(domain):

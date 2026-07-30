@@ -106,6 +106,10 @@ class RecoveryKeyCanaryTests(unittest.TestCase):
 
 class RecoveryKeyBackupBindingTests(unittest.TestCase):
     def setUp(self):
+        self.environment = patch.dict(
+            os.environ, {"BIBITASKS_ENVIRONMENT": "test"}, clear=False,
+        )
+        self.environment.start()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.data = self.root / "data"
@@ -134,11 +138,12 @@ class RecoveryKeyBackupBindingTests(unittest.TestCase):
             """)
 
     def tearDown(self):
+        self.environment.stop()
         self.temporary.cleanup()
 
     def test_backup_manifest_and_restore_bind_exact_canary_and_counts(self):
         original = self.canary.read_bytes()
-        backup = create_backup(self.data, self.backups)
+        backup = create_backup(self.data, self.backups, allow_plaintext_dev=True)
         manifest = json.loads((backup / "manifest.json").read_text("utf-8"))
         self.assertEqual(manifest["recovery_key_canary"], {
             "path": CANARY_FILENAME,
@@ -151,7 +156,9 @@ class RecoveryKeyBackupBindingTests(unittest.TestCase):
         self.assertEqual(database["withdrawal_ciphertext_count"], 1)
         self.assertEqual(database["withdrawal_active_null_count"], 0)
 
-        restored = restore_backup(backup, self.root / "restored")
+        restored = restore_backup(
+            backup, self.root / "restored", allow_plaintext_dev=True,
+        )
         self.assertEqual((restored / CANARY_FILENAME).read_bytes(), original)
         report = json.loads((restored / "restore-report.json").read_text("utf-8"))
         self.assertEqual(report["recovery_key_canary"], {
@@ -162,12 +169,12 @@ class RecoveryKeyBackupBindingTests(unittest.TestCase):
         original = self.canary.read_bytes()
         self.canary.unlink()
         with self.assertRaises(FileNotFoundError):
-            create_backup(self.data, self.backups)
+            create_backup(self.data, self.backups, allow_plaintext_dev=True)
         self.canary.write_text("{}\n", encoding="ascii")
         if os.name != "nt":
             self.canary.chmod(0o600)
         with self.assertRaises(ValueError):
-            create_backup(self.data, self.backups)
+            create_backup(self.data, self.backups, allow_plaintext_dev=True)
 
         self.canary.unlink()
         self.canary.write_bytes(original)
@@ -179,14 +186,16 @@ class RecoveryKeyBackupBindingTests(unittest.TestCase):
             )
             db.commit()
         with self.assertRaisesRegex(RuntimeError, "missing ciphertext"):
-            create_backup(self.data, self.backups)
+            create_backup(self.data, self.backups, allow_plaintext_dev=True)
 
     def test_restore_rejects_canary_bytes_not_bound_to_manifest(self):
-        backup = create_backup(self.data, self.backups)
+        backup = create_backup(self.data, self.backups, allow_plaintext_dev=True)
         canary = backup / CANARY_FILENAME
         canary.write_bytes(canary.read_bytes() + b" ")
         with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
-            restore_backup(backup, self.root / "restored")
+            restore_backup(
+                backup, self.root / "restored", allow_plaintext_dev=True,
+            )
 
 
 class ExistingDataEnrollmentTests(unittest.TestCase):

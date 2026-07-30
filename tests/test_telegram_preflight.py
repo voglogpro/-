@@ -21,6 +21,7 @@ def base_env():
         "PREFLIGHT_REQUIRE_MAIN_MINI_APP": "true",
         "JOIN_REQUEST_ADMISSION_ENABLED": "true",
         "JOIN_REQUEST_INVITE_URL": "https://t.me/+abcdefghijklmnopQRSTUV",
+        "BIBITASKS_ENVIRONMENT": "production",
         "TELEGRAM_UPDATE_MODE": "webhook",
         "WEBHOOK_ROUTE_ID": "route_" + "x" * 40,
         "PREFLIGHT_EXPECTED_BOT_NAME": "БибиЗадачи · Бибибайк",
@@ -65,9 +66,14 @@ def good_api(method, params=None):
         if params["chat_id"] == -1001111111111:
             return {
                 "status": "administrator", "can_delete_messages": True,
-                "can_invite_users": True,
+                "can_invite_users": True, "can_pin_messages": True,
+                "can_manage_topics": True, "is_anonymous": False,
             }
-        return {"status": "member"}
+        return {
+            "status": "administrator", "can_delete_messages": True,
+            "can_invite_users": True, "can_pin_messages": True,
+            "can_manage_topics": True, "is_anonymous": False,
+        }
     if method == "getWebhookInfo":
         return {
             "url": "https://tasks.example.test/telegram/webhook/route_" + "x" * 40,
@@ -168,6 +174,101 @@ class TelegramPreflightTests(unittest.TestCase):
                         if item["status"] == "fail"
                     },
                 )
+
+    def test_production_requires_webhook_before_any_telegram_call(self):
+        called = False
+
+        def should_not_call(_method, _params=None):
+            nonlocal called
+            called = True
+            return {}
+
+        report = run_preflight(
+            {**base_env(), "TELEGRAM_UPDATE_MODE": "polling"},
+            should_not_call,
+        )
+        self.assertFalse(report["ok"])
+        self.assertFalse(called)
+        self.assertIn(
+            "update mode",
+            {item["name"] for item in report["checks"] if item["status"] == "fail"},
+        )
+
+        staging = {
+            **base_env(),
+            "BIBITASKS_ENVIRONMENT": "staging",
+            "TELEGRAM_UPDATE_MODE": "polling",
+        }
+        staging_report = run_preflight(staging, good_api, good_privacy)
+        self.assertTrue(staging_report["ok"])
+        self.assertEqual(staging_report["summary"]["warn"], 1)
+
+    def test_group_admin_identity_and_declared_permissions_are_required(self):
+        variants = (
+            (-1001111111111, "is_anonymous", True, "public bot identity"),
+            (-1001111111111, "can_delete_messages", False, "public delete permission"),
+            (-1001111111111, "can_invite_users", False, "public invite permission"),
+            (-1001111111111, "can_pin_messages", False, "public pin permission"),
+            (-1001111111111, "can_manage_topics", False, "public topic permission"),
+            (-1002222222222, "status", "member", "OPS bot admin"),
+            (-1002222222222, "is_anonymous", True, "OPS bot identity"),
+            (-1002222222222, "can_delete_messages", False, "OPS delete permission"),
+            (-1002222222222, "can_invite_users", False, "OPS invite permission"),
+            (-1002222222222, "can_pin_messages", False, "OPS pin permission"),
+            (-1002222222222, "can_manage_topics", False, "OPS topic permission"),
+        )
+        for chat_id, field, value, expected_check in variants:
+            with self.subTest(chat_id=chat_id, field=field):
+                def broken(method, params=None):
+                    result = good_api(method, params)
+                    if method == "getChatMember" and params["chat_id"] == chat_id:
+                        return {**result, field: value}
+                    return result
+
+                report = run_preflight(base_env(), broken, good_privacy)
+                self.assertFalse(report["ok"])
+                failed = {
+                    item["name"] for item in report["checks"]
+                    if item["status"] == "fail"
+                }
+                self.assertIn(expected_check, failed)
+
+    def test_topic_delivery_preflight_is_read_only_and_redacted(self):
+        calls = []
+
+        def recording(method, params=None):
+            calls.append((method, params))
+            return good_api(method, params)
+
+        report = run_preflight(base_env(), recording, good_privacy)
+        self.assertTrue(report["ok"])
+        self.assertTrue({
+            "public topic delivery preconditions",
+            "OPS topic delivery preconditions",
+        }.issubset({
+            item["name"] for item in report["checks"]
+            if item["status"] == "pass"
+        }))
+        self.assertTrue(all(method.startswith("get") for method, _ in calls))
+        self.assertFalse({
+            "sendMessage", "sendPhoto", "deleteMessage", "pinChatMessage",
+        }.intersection({method for method, _ in calls}))
+
+        env = {
+            **base_env(),
+            "WEBHOOK_SECRET": "webhook_secret_that_must_not_escape_123456",
+        }
+
+        def leaking(_method, _params=None):
+            raise RuntimeError(
+                "failed with " + env["WEBHOOK_SECRET"] + " and "
+                + env["JOIN_REQUEST_INVITE_URL"]
+            )
+
+        failed = json.dumps(run_preflight(env, leaking), ensure_ascii=False)
+        self.assertNotIn(env["WEBHOOK_SECRET"], failed)
+        self.assertNotIn(env["JOIN_REQUEST_INVITE_URL"], failed)
+        self.assertIn("[redacted]", failed)
 
     def test_public_ops_or_brand_mismatch_fails(self):
         def mismatched(method, params=None):

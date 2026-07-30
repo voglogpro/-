@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -10,6 +11,9 @@ from types import SimpleNamespace
 from cryptography.fernet import Fernet
 
 from scripts import sqlite_volume_rollback as rollback
+from scripts.backup_crypto import (
+    BACKUP_FORMAT, ENCRYPTION_METHOD, PAYLOAD_NAME, encryption_aad, key_document,
+)
 from scripts.recovery_key_canary import ensure_recovery_key_canary
 from scripts.release_candidate import canonical_sha256
 from scripts.release_record import LEGACY_BUILD_VERSION, LEGACY_COMMIT_SHA, LEGACY_IMAGE
@@ -175,26 +179,71 @@ class SQLiteVolumeRollbackTests(unittest.TestCase):
             }],
             "media_objects": [],
         }
+        protected = "1" * 64
+        aad = encryption_aad("pilot-2026-07", protected)
+        ciphertext = b"authenticated-ciphertext-fixture"
+        (self.backup / PAYLOAD_NAME).write_bytes(ciphertext)
+        manifest["encryption"] = {
+            "format": BACKUP_FORMAT,
+            "method": ENCRYPTION_METHOD,
+            "key_version": "pilot-2026-07",
+            "nonce_b64": base64.urlsafe_b64encode(b"n" * 12).decode("ascii"),
+            "tag_b64": base64.urlsafe_b64encode(b"t" * 16).decode("ascii"),
+            "protected_manifest_sha256": protected,
+            "aad_sha256": hashlib.sha256(aad).hexdigest(),
+            "ciphertext": {
+                "path": PAYLOAD_NAME, "bytes": len(ciphertext),
+                "sha256": hashlib.sha256(ciphertext).hexdigest(),
+            },
+        }
         self.manifest_path = self.backup / "manifest.json"
         self.manifest_path.write_text(json.dumps(manifest), "utf-8")
         self.manifest_hash = hashlib.sha256(self.manifest_path.read_bytes()).hexdigest()
-        record = {
-            "record_version": 2,
-            "commit": TARGET_COMMIT,
-            "image": TARGET_IMAGE,
-            "schema_version": 293,
-            "backup": {
-                "id": self.backup.name,
-                "manifest_sha256": self.manifest_hash,
-                "database_sha256": self.database_hash,
+        software = {
+            "commit": TARGET_COMMIT, "image": TARGET_IMAGE,
+            "schema_version": 293, "application_version": "v2.9.1",
+        }
+        deployment = {
+            "telegram_bot_id": 123456, "telegram_group_id": -1001234567890,
+            "miniapp_origin": "https://tasks.example.com",
+            "health_origin": "https://health.example.com",
+        }
+        backup_binding = {
+            "id": self.backup.name, "manifest_sha256": self.manifest_hash,
+            "database": {
+                "sha256": self.database_hash, "bytes": 42,
+                "telegram_ciphertext_count": 0, "telegram_active_null_count": 0,
+                "withdrawal_ciphertext_count": 0, "withdrawal_active_null_count": 0,
             },
-            "approvals": ["S1", "S2"],
-            "readiness": {"version": LEGACY_BUILD_VERSION},
+            "recovery_key_canary": {"sha256": self.canary_hash,
+                                     "bytes": canary.stat().st_size},
+            "local_media": {"count": 1, "bytes": len(media_content)},
+        }
+        software_hash = canonical_sha256(software)
+        record = {
+            "candidate_version": 1, **software, "deployment": deployment,
+            "backup": backup_binding,
+            "image_attestation": {
+                "verified_output_sha256": "a" * 64,
+                "predicate_type": "https://slsa.dev/provenance/v1",
+                "repository": "voglogpro/-",
+                "signer_workflow": "github.com/voglogpro/-/.github/workflows/release.yml",
+            },
+            "software_subject_sha256": software_hash,
+            "promotion_subject_sha256": canonical_sha256({
+                "software_subject_sha256": software_hash,
+                "deployment": deployment, "backup": backup_binding,
+            }),
+            "deployment_authorized": False,
         }
         self.record = self.root / "release-record.json"
         self.record.write_text(json.dumps(record), "utf-8")
         self.record_hash = hashlib.sha256(self.record.read_bytes()).hexdigest()
         self.deploy = self.root / "deploy.env"
+        self.backup_key = self.root / "backup-encryption.key"
+        self.backup_key.write_bytes(key_document(b"k" * 32, "pilot-2026-07"))
+        if os.name != "nt":
+            self.backup_key.chmod(0o600)
         self.deploy.write_text("\n".join([
             f"BIBITASKS_IMAGE={CURRENT_IMAGE}",
             f"BIBITASKS_RELEASE_COMMIT={CURRENT_COMMIT}",
@@ -204,6 +253,8 @@ class SQLiteVolumeRollbackTests(unittest.TestCase):
             "BACKUP_SENTINEL=/mnt/backups/.sentinel",
             "BACKUP_SENTINEL_VALUE=test-sentinel",
             "BACKUP_EXPECTED_SOURCE=backup.example:/bibitasks",
+            f"BACKUP_ENCRYPTION_KEY_FILE={self.backup_key}",
+            "BACKUP_ENCRYPTION_KEY_VERSION=pilot-2026-07",
             f"BIBITASKS_DATA_VOLUME={CURRENT_VOLUME}",
             "MONITOR_ALERT_BOT_TOKEN_FILE=/etc/bibitasks/monitor-bot-token",
             "MONITOR_HEALTH_TOKEN_FILE=/etc/bibitasks/monitor-health-token",
@@ -262,6 +313,38 @@ class SQLiteVolumeRollbackTests(unittest.TestCase):
         self.assertIn("--cap-add CHOWN", " ".join(promotion))
         self.assertNotIn("DAC_OVERRIDE", " ".join(promotion))
         self.assertNotIn("FOWNER", " ".join(promotion))
+
+    def test_rotated_backup_requires_explicit_retained_versioned_key(self):
+        rotated = self.root / "backup-encryption-rotated.key"
+        rotated.write_bytes(key_document(b"r" * 32, "pilot-2026-08"))
+        if os.name != "nt":
+            rotated.chmod(0o600)
+        deploy_text = self.deploy.read_text("utf-8").replace(
+            f"BACKUP_ENCRYPTION_KEY_FILE={self.backup_key}",
+            f"BACKUP_ENCRYPTION_KEY_FILE={rotated}",
+        ).replace(
+            "BACKUP_ENCRYPTION_KEY_VERSION=pilot-2026-07",
+            "BACKUP_ENCRYPTION_KEY_VERSION=pilot-2026-08",
+        )
+        self.deploy.write_text(deploy_text, "utf-8")
+        if os.name != "nt":
+            self.deploy.chmod(0o600)
+        runner = FakeRunner(self.manifest_hash, self.database_hash, self.canary_hash)
+        plan = self.make_plan(runner)
+        self.assertEqual(plan["target"]["backup_key_version"], "pilot-2026-07")
+        with self.assertRaisesRegex(ValueError, "older key version"):
+            rollback.apply_plan(
+                plan_file=self.plan, confirmation=plan["apply_confirmation"],
+                stage_report=self.stage, runner=runner, now=self.now,
+                lock_file=self.lock,
+            )
+        self.assertNotIn(TARGET_VOLUME, runner.volumes)
+        report = rollback.apply_plan(
+            plan_file=self.plan, confirmation=plan["apply_confirmation"],
+            stage_report=self.stage, runner=runner, now=self.now,
+            lock_file=self.lock, backup_key_file=self.backup_key,
+        )
+        self.assertTrue(report["ready_for_point_in_time_recovery_review"])
 
     def test_candidate_subjects_propagate_through_plan_stage_and_verify(self):
         manifest = json.loads(self.manifest_path.read_text("utf-8"))
@@ -335,22 +418,28 @@ class SQLiteVolumeRollbackTests(unittest.TestCase):
         self.assertEqual(verified["candidate_sha256"], self.record_hash)
         self.assertEqual(verified["target"]["software_subject_sha256"], software_hash)
 
-    def test_v2_legacy_reader_is_restricted_to_v291(self):
-        record = json.loads(self.record.read_text("utf-8"))
-        record["readiness"]["version"] = "v2.9.0"
+    def test_v2_legacy_reader_is_removed_even_for_v291(self):
+        record = {
+            "record_version": 2, "commit": TARGET_COMMIT, "image": TARGET_IMAGE,
+            "schema_version": 293,
+            "backup": {"id": self.backup.name,
+                       "manifest_sha256": self.manifest_hash,
+                       "database_sha256": self.database_hash},
+            "approvals": ["S1", "S2"],
+            "readiness": {"version": LEGACY_BUILD_VERSION},
+        }
         self.record.write_text(json.dumps(record), "utf-8")
         self.record_hash = hashlib.sha256(self.record.read_bytes()).hexdigest()
         runner = FakeRunner(self.manifest_hash, self.database_hash, self.canary_hash)
-        with self.assertRaisesRegex(ValueError, "restricted"):
+        with self.assertRaisesRegex(ValueError, "legacy release records are unsupported"):
             self.make_plan(runner)
 
-    def test_v2_legacy_reader_requires_exact_verified_subject(self):
-        record = json.loads(self.record.read_text("utf-8"))
-        record["commit"] = "b" * 40
+    def test_unknown_release_artifact_is_rejected(self):
+        record = {"record_version": 99}
         self.record.write_text(json.dumps(record), "utf-8")
         self.record_hash = hashlib.sha256(self.record.read_bytes()).hexdigest()
         runner = FakeRunner(self.manifest_hash, self.database_hash, self.canary_hash)
-        with self.assertRaisesRegex(ValueError, "exact verified v2.9.1"):
+        with self.assertRaisesRegex(ValueError, "legacy release records are unsupported"):
             self.make_plan(runner)
 
     def test_wrong_confirmation_and_modified_record_fail_before_volume_create(self):

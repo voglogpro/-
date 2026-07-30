@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,8 +22,64 @@ from pathlib import Path
 from dotenv import load_dotenv
 try:
     from .recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+    from .backup_crypto import (
+        cleanup_private_tree, decrypt_directory, load_backup_key,
+        require_explicit_dev_environment, require_memory_backed_temp,
+    )
 except ImportError:  # direct ``python scripts/restore.py`` execution
     from recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+    from backup_crypto import (
+        cleanup_private_tree, decrypt_directory, load_backup_key,
+        require_explicit_dev_environment, require_memory_backed_temp,
+    )
+
+
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_CIPHERTEXT_BYTES = 16 * 1024 * 1024 * 1024
+
+
+def _read_manifest(path: Path) -> dict:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise FileNotFoundError("Backup manifest not found") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size > MAX_MANIFEST_BYTES
+        ):
+            raise ValueError("Backup manifest is unexpectedly large or unsafe")
+        chunks = []
+        remaining = MAX_MANIFEST_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise ValueError("Backup manifest changed while being read")
+        raw = b"".join(chunks)
+        if len(raw) > MAX_MANIFEST_BYTES:
+            raise ValueError("Backup manifest is unexpectedly large")
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Backup manifest is invalid") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise ValueError("Backup manifest must be a JSON object")
+    return value
 
 
 def _load_environment(env_file: Path | None) -> None:
@@ -44,11 +101,22 @@ def sha256(path: Path) -> str:
 
 def _verified_file(root: Path, relative_value: str, expected_size: int, digest: str) -> Path:
     relative = Path(relative_value)
-    if relative.is_absolute() or ".." in relative.parts:
+    if (
+        not relative_value or relative.is_absolute() or ".." in relative.parts
+        or "\\" in relative_value
+    ):
         raise ValueError("Backup manifest contains an unsafe path")
-    source = (root / relative).resolve()
-    if not source.is_relative_to(root) or not source.is_file() or source.is_symlink():
+    candidate = root.joinpath(*relative.parts)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"Backup file is missing or unsafe: {relative.as_posix()}")
+    source = candidate.resolve()
+    if not source.is_relative_to(root) or not source.is_file():
         raise ValueError(f"Backup file is missing or unsafe: {relative.as_posix()}")
+    if source.stat().st_nlink != 1:
+        raise ValueError(f"Backup file has multiple hard links: {relative.as_posix()}")
     if source.stat().st_size != int(expected_size) or sha256(source) != str(digest):
         raise RuntimeError(f"Backup checksum mismatch: {relative.as_posix()}")
     return source
@@ -130,7 +198,12 @@ def _s3_client_and_settings():
     return client, bucket, prefix, sse
 
 
-def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
+def _restore_plaintext_backup(
+    backup_dir: Path, restore_dir: Path, *,
+    source_manifest_sha256: str | None = None,
+    encryption_report: dict | None = None,
+    allow_s3_dev: bool = False,
+) -> Path:
     backup_dir = backup_dir.resolve()
     restore_dir = restore_dir.resolve()
     if not backup_dir.is_dir() or backup_dir.is_symlink():
@@ -143,7 +216,7 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
     manifest_path = backup_dir / "manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise FileNotFoundError("Backup manifest not found")
-    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest = _read_manifest(manifest_path)
     database_meta = manifest.get("database") or {}
     database_source = _verified_file(
         backup_dir, database_meta.get("path", ""),
@@ -221,6 +294,8 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
         ]
         restored_versions = {}
         if ready_s3:
+            if not allow_s3_dev:
+                raise RuntimeError("S3 restore is disabled outside explicit dev tests")
             client, bucket, prefix, sse = _s3_client_and_settings()
             for item in ready_s3:
                 source = _verified_file(
@@ -238,12 +313,12 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
                         raise
                 else:
                     raise RuntimeError(f"S3 restore target already exists: {item['id']}")
-                content = source.read_bytes()
-                response = client.put_object(
-                    Bucket=bucket, Key=key, Body=content,
-                    ContentType="image/jpeg", Metadata={"sha256": item["sha256"]},
-                    ServerSideEncryption=sse,
-                ) or {}
+                with source.open("rb") as content:
+                    response = client.put_object(
+                        Bucket=bucket, Key=key, Body=content,
+                        ContentType="image/jpeg", Metadata={"sha256": item["sha256"]},
+                        ServerSideEncryption=sse,
+                    ) or {}
                 version_id = response.get("VersionId")
                 uploaded.append((client, bucket, key, version_id))
                 head_request = {"Bucket": bucket, "Key": key}
@@ -272,7 +347,7 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
 
         report = {
             "restored_at": datetime.now(timezone.utc).isoformat(),
-            "source_manifest_sha256": sha256(manifest_path),
+            "source_manifest_sha256": source_manifest_sha256 or sha256(manifest_path),
             "database_sha256_after_restore": sha256(database_target),
             "schema_version": restored_schema_version,
             "s3_versions_rewritten": len(restored_versions),
@@ -282,6 +357,8 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
                 "ok": True,
             },
         }
+        if encryption_report is not None:
+            report["encryption"] = encryption_report
         (staging / "restore-report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
@@ -296,7 +373,142 @@ def restore_backup(backup_dir: Path, restore_dir: Path) -> Path:
                 client.delete_object(**request)
             except Exception:
                 pass
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            cleanup_private_tree(staging, restore_dir.parent, "restore staging")
+        except Exception as cleanup_error:
+            raise RuntimeError("restore failed and staging cleanup was incomplete") from cleanup_error
+        raise
+
+
+def _expected_bundle_files(manifest: dict) -> set[str]:
+    expected = {"manifest.json"}
+    database = manifest.get("database") or {}
+    canary = manifest.get("recovery_key_canary") or {}
+    for value in (database.get("path"), canary.get("path")):
+        if isinstance(value, str):
+            expected.add(value)
+    for item in manifest.get("media") or []:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            expected.add(item["path"])
+    for item in manifest.get("media_objects") or []:
+        if isinstance(item, dict) and isinstance(item.get("backup_path"), str):
+            expected.add(item["backup_path"])
+    return expected
+
+
+def restore_backup(
+    backup_dir: Path, restore_dir: Path, *, encryption_key_file: Path | None = None,
+    plaintext_tmp_dir: Path | None = None, allow_plaintext_dev: bool = False,
+    allow_unverified_temp_dev: bool = False, allow_s3_dev: bool = False,
+) -> Path:
+    """Restore authenticated ciphertext, or explicit legacy dev/test plaintext."""
+    if allow_plaintext_dev:
+        require_explicit_dev_environment("plaintext restore compatibility")
+    if allow_unverified_temp_dev:
+        require_explicit_dev_environment("unverified plaintext scratch")
+    if allow_s3_dev:
+        require_explicit_dev_environment("S3 restore compatibility")
+    raw_backup_dir = backup_dir.expanduser()
+    if raw_backup_dir.is_symlink():
+        raise ValueError("Backup directory is missing or unsafe")
+    backup_dir = raw_backup_dir.resolve()
+    restore_dir = restore_dir.expanduser().resolve()
+    if not backup_dir.is_dir() or backup_dir.is_symlink():
+        raise ValueError("Backup directory is missing or unsafe")
+    manifest_path = backup_dir / "manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise FileNotFoundError("Backup manifest not found")
+    outer_manifest = _read_manifest(manifest_path)
+    encryption = outer_manifest.get("encryption")
+    if encryption is None:
+        if not allow_plaintext_dev:
+            raise RuntimeError(
+                "plaintext backup restore requires explicit non-production dev/test mode"
+            )
+        return _restore_plaintext_backup(
+            backup_dir, restore_dir, allow_s3_dev=allow_s3_dev,
+        )
+    if allow_plaintext_dev:
+        raise ValueError("encrypted and plaintext restore modes are mutually exclusive")
+    if encryption_key_file is None:
+        raise RuntimeError("backup decryption key file is required")
+    if not isinstance(encryption, dict):
+        raise ValueError("Backup encryption contract is invalid")
+    ciphertext_meta = encryption.get("ciphertext") or {}
+    ciphertext_bytes = ciphertext_meta.get("bytes")
+    if (
+        type(ciphertext_bytes) is not int or ciphertext_bytes <= 0
+        or ciphertext_bytes > MAX_CIPHERTEXT_BYTES
+    ):
+        raise ValueError("Encrypted backup ciphertext size is invalid")
+    ciphertext = _verified_file(
+        backup_dir, ciphertext_meta.get("path", ""),
+        ciphertext_meta.get("bytes", -1), ciphertext_meta.get("sha256", ""),
+    )
+    key, key_version = load_backup_key(
+        encryption_key_file, expected_version=encryption.get("key_version"),
+    )
+    if plaintext_tmp_dir is None:
+        raise RuntimeError("memory-backed plaintext scratch directory is required")
+    if allow_unverified_temp_dev:
+        scratch_root = plaintext_tmp_dir.expanduser().resolve()
+        if not scratch_root.is_dir() or scratch_root.is_symlink():
+            raise ValueError("dev plaintext scratch directory is unsafe")
+    else:
+        scratch_root = require_memory_backed_temp(plaintext_tmp_dir)
+    decrypted = scratch_root / f"bibitasks-restore-{uuid.uuid4().hex}"
+    restore_published = False
+    try:
+        decrypt_directory(ciphertext, decrypted, key=key, encryption=encryption)
+        inner_manifest_path = decrypted / "manifest.json"
+        if not inner_manifest_path.is_file() or inner_manifest_path.is_symlink():
+            raise ValueError("encrypted backup payload lacks its protected manifest")
+        protected_digest = sha256(inner_manifest_path)
+        if protected_digest != encryption.get("protected_manifest_sha256"):
+            raise RuntimeError("encrypted backup protected manifest mismatch")
+        try:
+            inner_manifest = _read_manifest(inner_manifest_path)
+        except (OSError, ValueError) as exc:
+            raise ValueError("encrypted backup protected manifest is invalid") from exc
+        outer_core = dict(outer_manifest)
+        outer_core.pop("encryption", None)
+        if inner_manifest != outer_core:
+            raise RuntimeError("encrypted backup outer manifest is not authenticated")
+        actual_files = {
+            item.relative_to(decrypted).as_posix()
+            for item in decrypted.rglob("*") if item.is_file()
+        }
+        if actual_files != _expected_bundle_files(inner_manifest):
+            raise ValueError("encrypted backup payload has unexpected or missing files")
+        result = _restore_plaintext_backup(
+            decrypted, restore_dir,
+            source_manifest_sha256=sha256(manifest_path),
+            encryption_report={
+                "method": encryption.get("method"),
+                "key_version": key_version,
+                "ciphertext_sha256": ciphertext_meta.get("sha256"),
+                "authenticated": True,
+            },
+            allow_s3_dev=allow_s3_dev,
+        )
+        restore_published = True
+        cleanup_private_tree(decrypted, scratch_root, "decrypted backup scratch")
+        return result
+    except Exception:
+        cleanup_failures = []
+        for path, parent, label in (
+            (decrypted, scratch_root, "decrypted backup scratch"),
+            (restore_dir, restore_dir.parent, "published restore")
+            if restore_published else (None, None, None),
+        ):
+            if path is None:
+                continue
+            try:
+                cleanup_private_tree(path, parent, label)
+            except Exception as cleanup_error:
+                cleanup_failures.append(cleanup_error)
+        if cleanup_failures:
+            raise RuntimeError("restore failed and secure cleanup was incomplete") from cleanup_failures[0]
         raise
 
 
@@ -308,12 +520,34 @@ def main() -> None:
         "--env-file", type=Path,
         help="Optional explicit .env file; existing process variables win",
     )
+    parser.add_argument("--encryption-key-file", type=Path)
+    parser.add_argument("--plaintext-tmp-dir", type=Path)
+    parser.add_argument("--allow-plaintext-dev", action="store_true")
+    parser.add_argument("--allow-s3-dev", action="store_true")
     args = parser.parse_args()
     if args.env_file:
         if not args.env_file.is_file():
             parser.error(f"Environment file not found: {args.env_file}")
     _load_environment(args.env_file)
-    restored = restore_backup(args.backup_dir, args.restore_dir)
+    key_file_value = args.encryption_key_file or (
+        Path(os.environ["BACKUP_ENCRYPTION_KEY_FILE"])
+        if os.environ.get("BACKUP_ENCRYPTION_KEY_FILE") else None
+    )
+    if args.allow_plaintext_dev and (
+        os.environ.get("BIBITASKS_ENVIRONMENT", "").strip().lower()
+        in {"production", "pilot"}
+    ):
+        parser.error("--allow-plaintext-dev is forbidden in production/pilot")
+    restored = restore_backup(
+        args.backup_dir, args.restore_dir,
+        encryption_key_file=key_file_value,
+        plaintext_tmp_dir=args.plaintext_tmp_dir or (
+            Path(os.environ["BACKUP_PLAINTEXT_TMP_DIR"])
+            if os.environ.get("BACKUP_PLAINTEXT_TMP_DIR") else None
+        ),
+        allow_plaintext_dev=args.allow_plaintext_dev,
+        allow_s3_dev=args.allow_s3_dev,
+    )
     print(restored)
 
 

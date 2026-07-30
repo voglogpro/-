@@ -243,7 +243,7 @@ Telegram-бот @BbGalterbot
 | База пилота | SQLite в режиме WAL, один экземпляр приложения |
 | Контур роста | строгий SQLite → PostgreSQL migration/reconciliation harness |
 | Фронтенд | один HTML-файл: чистый JS и CSS, без сборки и зависимостей |
-| Доставка | Docker, HTTPS reverse proxy, webhook/polling, GitHub Actions |
+| Доставка | Docker, HTTPS reverse proxy, production webhook (polling только для staging/development/test), GitHub Actions |
 | Репозиторий | `github.com/voglogpro/-` |
 
 Основная логика остаётся в `main.py` и `index.html`; инфраструктура, миграции,
@@ -266,7 +266,7 @@ Telegram-бот @BbGalterbot
 - Приватная OPS-группа отделена от публичного сообщества: адреса и фотографии
   заданий не публикуются наружу
 - Зашифрованные Telegram inbox и платёжные реквизиты, durable outbox, audit trail
-- Резервное копирование, restore rehearsal и immutable release images
+- Резервное копирование с [AES-256-GCM и versioned key](docs/BACKUP-ENCRYPTION.md), restore rehearsal и immutable release images
 - Двухфазный [release candidate / final gate](docs/RELEASE-GATE-V3.md) связывает
   commit, image, schema, deployment IDs, backup, recovery и live evidence.
   Финальный gate намеренно остаётся `NO-GO` и не создаёт разрешение на выпуск,

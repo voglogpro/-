@@ -215,7 +215,9 @@ docker run --rm --user 0:0 -e BOT_TOKEN \
   --topic-news 11 --topic-chat 12 --topic-work 13 \
   --topic-franchise 14 --ops-topic-tasks 21
 unset BOT_TOKEN MONITOR_ALERT_BOT_TOKEN JOIN_REQUEST_INVITE_URL
+# До chmod создайте ключ строго по docs/BACKUP-ENCRYPTION.md; не печатайте key bytes.
 sudo chmod 0600 /etc/bibitasks/bibitasks.env \
+  /etc/bibitasks/backup-encryption.key \
   /etc/bibitasks/monitor-alert-bot-token \
   /etc/bibitasks/monitor-health-token
 ```
@@ -231,6 +233,8 @@ BACKUP_DIR=/mnt/bibitasks-backups
 BACKUP_SENTINEL=/mnt/bibitasks-backups/.bibitasks-offhost
 BACKUP_SENTINEL_VALUE=bibitasks-offhost-v1
 BACKUP_EXPECTED_SOURCE=backup.example.com:/exports/bibitasks
+BACKUP_ENCRYPTION_KEY_FILE=/etc/bibitasks/backup-encryption.key
+BACKUP_ENCRYPTION_KEY_VERSION=pilot-2026-07
 BIBITASKS_DATA_VOLUME=bibitasks_data
 MONITOR_ALERT_BOT_TOKEN_FILE=/etc/bibitasks/monitor-alert-bot-token
 MONITOR_HEALTH_TOKEN_FILE=/etc/bibitasks/monitor-health-token

@@ -1,8 +1,11 @@
 """Read-only Telegram acceptance checks for a BibiTasks pilot deployment.
 
 The script never sends or edits messages. It only calls Telegram get* methods
-and prints a redacted JSON report. Exit code is zero only when every required
-check passes; warnings are allowed.
+and prints a redacted JSON report. Topic delivery is checked through configured
+IDs, forum state and bot permissions; Telegram does not expose a read-only
+``getForumTopic`` method, so the preflight deliberately does not publish a
+probe message. Exit code is zero only when every required check passes;
+warnings are allowed.
 """
 
 from __future__ import annotations
@@ -103,6 +106,25 @@ def _origin(value):
 
 def _truthy(value):
     return str(value or "").strip().casefold() in {"1", "true", "yes"}
+
+
+def _redact_detail(value, secrets):
+    """Redact configured credentials even when a transport echoes them."""
+    detail = str(value)
+    candidates = {
+        str(secret).strip() for secret in secrets
+        if str(secret or "").strip()
+    }
+    for secret in sorted(candidates, key=len, reverse=True):
+        detail = detail.replace(secret, "[redacted]")
+        encoded = urllib.parse.quote(secret, safe="")
+        if encoded != secret:
+            detail = detail.replace(encoded, "[redacted]")
+    return re.sub(
+        r"(?<![A-Za-z0-9_-])\d{5,}:[A-Za-z0-9_-]{20,}",
+        "[redacted]",
+        detail,
+    )
 
 
 def _canonical_app_url(value):
@@ -207,6 +229,9 @@ def run_preflight(
     group_username = _username(env.get("GROUP_USERNAME"))
     group_id = _integer(env, "GROUP_ID")
     ops_group_id = _integer(env, "OPS_GROUP_ID")
+    environment = str(
+        env.get("BIBITASKS_ENVIRONMENT", "production")
+    ).strip().casefold()
     update_mode = str(env.get("TELEGRAM_UPDATE_MODE", "")).strip().casefold()
     public_origin = _origin(env.get("PUBLIC_BASE_URL"))
     mini_app_url = _canonical_app_url(env.get("MINI_APP_URL"))
@@ -237,6 +262,13 @@ def run_preflight(
         str(env.get("PRIVACY_CONTROLLER_NAME", "")).split()
     )
     privacy_contact = " ".join(str(env.get("PRIVACY_CONTACT", "")).split())
+    redaction_secrets = {
+        env.get(name, "") for name in (
+            "BOT_TOKEN", "TOKEN", "TELEGRAM_BOT_TOKEN", "API_TOKEN",
+            "WEBHOOK_SECRET", "WEBHOOK_ROUTE_ID", "JOIN_REQUEST_INVITE_URL",
+            "HEALTH_TOKEN",
+        )
+    }
 
     add("BOT_TOKEN", bool(token and ":" in token), "configured", "missing or malformed")
     add("BOT_USERNAME", bool(bot_username), "configured", "missing")
@@ -284,7 +316,20 @@ def run_preflight(
         "all topic IDs are explicit and public topics differ",
         "all topic IDs must be positive and public topic IDs must differ",
     )
-    add("update mode", update_mode in {"webhook", "polling"}, update_mode or "configured", "must be webhook or polling")
+    add(
+        "environment",
+        environment in {"production", "staging", "development", "test"},
+        environment or "configured",
+        "must be production, staging, development or test",
+    )
+    add(
+        "update mode",
+        update_mode == "webhook" if environment == "production"
+        else update_mode in {"webhook", "polling"},
+        update_mode or "configured",
+        "production requires TELEGRAM_UPDATE_MODE=webhook"
+        if environment == "production" else "must be webhook or polling",
+    )
     add(
         "main Mini App policy",
         update_mode != "webhook" or require_main_mini_app,
@@ -325,7 +370,10 @@ def run_preflight(
         except Exception as exc:
             checks.append(Check(
                 "privacy policy HTTP", "fail",
-                f"probe failed: {type(exc).__name__}: {str(exc)[:140]}",
+                _redact_detail(
+                    f"probe failed: {type(exc).__name__}: {str(exc)}",
+                    redaction_secrets,
+                )[:220],
             ))
 
     call = api_call or (lambda method, params=None: telegram_call(token, method, params))
@@ -334,7 +382,10 @@ def run_preflight(
         try:
             return call(method, params)
         except Exception as exc:  # report is intentionally redacted
-            checks.append(Check(method, "fail", str(exc).replace(token, "[redacted]")[:220]))
+            checks.append(Check(
+                method, "fail",
+                _redact_detail(exc, redaction_secrets)[:220],
+            ))
             return None
 
     me = invoke("getMe")
@@ -420,16 +471,96 @@ def run_preflight(
     public_member = invoke("getChatMember", {"chat_id": group_id, "user_id": bot_id})
     if public_member:
         add("public bot admin", public_member.get("status") == "administrator", "administrator", f"status is {public_member.get('status')!r}")
+        add(
+            "public bot identity",
+            public_member.get("is_anonymous") is False,
+            "non-anonymous administrator",
+            "bot administrator must have is_anonymous=false",
+        )
         add("public delete permission", bool(public_member.get("can_delete_messages")), "can delete service/moderated messages", "can_delete_messages is missing")
         add(
             "public invite permission", bool(public_member.get("can_invite_users")),
             "can receive and decide join requests",
             "can_invite_users is missing",
         )
+        add(
+            "public pin permission", bool(public_member.get("can_pin_messages")),
+            "can maintain the approved pinned entry point",
+            "can_pin_messages is missing",
+        )
+        add(
+            "public topic permission", bool(public_member.get("can_manage_topics")),
+            "can maintain configured forum topics",
+            "can_manage_topics is missing",
+        )
     ops_member = invoke("getChatMember", {"chat_id": ops_group_id, "user_id": bot_id})
     if ops_member:
-        active = ops_member.get("status") in {"member", "administrator", "creator"}
-        add("OPS bot membership", active, str(ops_member.get("status")), f"status is {ops_member.get('status')!r}")
+        add(
+            "OPS bot admin", ops_member.get("status") == "administrator",
+            "administrator", f"status is {ops_member.get('status')!r}",
+        )
+        add(
+            "OPS bot identity", ops_member.get("is_anonymous") is False,
+            "non-anonymous administrator",
+            "bot administrator must have is_anonymous=false",
+        )
+        for label, field, good, bad in (
+            (
+                "OPS delete permission", "can_delete_messages",
+                "can remove obsolete operational posts",
+                "can_delete_messages is missing",
+            ),
+            (
+                "OPS invite permission", "can_invite_users",
+                "can manage controlled OPS membership",
+                "can_invite_users is missing",
+            ),
+            (
+                "OPS pin permission", "can_pin_messages",
+                "can maintain pinned operating instructions",
+                "can_pin_messages is missing",
+            ),
+            (
+                "OPS topic permission", "can_manage_topics",
+                "can maintain the task forum topic",
+                "can_manage_topics is missing",
+            ),
+        ):
+            add(label, bool(ops_member.get(field)), good, bad)
+
+    public_topic_ids = [topic_ids[name] for name in topic_names[:4]]
+    public_delivery_ready = bool(
+        public_chat and public_chat.get("is_forum")
+        and public_member and public_member.get("status") == "administrator"
+        and public_member.get("is_anonymous") is False
+        and all(public_member.get(field) for field in (
+            "can_delete_messages", "can_invite_users", "can_pin_messages",
+            "can_manage_topics",
+        ))
+        and all(value is not None and value > 0 for value in public_topic_ids)
+        and len(set(public_topic_ids)) == len(public_topic_ids)
+    )
+    add(
+        "public topic delivery preconditions", public_delivery_ready,
+        "read-only preconditions for all configured public topics verified; no message published",
+        "forum, topic IDs, administrator identity or required permissions are incomplete",
+    )
+    ops_delivery_ready = bool(
+        ops_chat and ops_chat.get("is_forum")
+        and ops_member and ops_member.get("status") == "administrator"
+        and ops_member.get("is_anonymous") is False
+        and all(ops_member.get(field) for field in (
+            "can_delete_messages", "can_invite_users", "can_pin_messages",
+            "can_manage_topics",
+        ))
+        and topic_ids["OPS_TOPIC_TASKS"] is not None
+        and topic_ids["OPS_TOPIC_TASKS"] > 0
+    )
+    add(
+        "OPS topic delivery preconditions", ops_delivery_ready,
+        "read-only preconditions for the configured OPS topic verified; no message published",
+        "forum, OPS topic ID, administrator identity or required permissions are incomplete",
+    )
 
     if update_mode == "webhook":
         expected_webhook = f"{public_origin}/telegram/webhook/{route_id}"

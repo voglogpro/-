@@ -17,6 +17,7 @@ never mounted by ``apply`` and remains available for roll-forward/recovery.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import AbstractContextManager
 from functools import wraps
 import hashlib
@@ -31,21 +32,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
+    from .backup_crypto import (
+        BACKUP_FORMAT, ENCRYPTION_METHOD, KEY_VERSION_RE, PAYLOAD_NAME,
+        encryption_aad, load_backup_key,
+    )
     from .pilot_host_preflight import IMAGE_RE, COMMIT_RE, VOLUME_RE, parse_deploy_env
     from .recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
     from .release_candidate import validate_candidate
-    from .release_record import (
-        LEGACY_BUILD_VERSION, LEGACY_COMMIT_SHA, LEGACY_IMAGE,
-        LEGACY_SCHEMA_VERSION,
-    )
 except ImportError:  # pragma: no cover - direct script execution
+    from backup_crypto import (
+        BACKUP_FORMAT, ENCRYPTION_METHOD, KEY_VERSION_RE, PAYLOAD_NAME,
+        encryption_aad, load_backup_key,
+    )
     from pilot_host_preflight import IMAGE_RE, COMMIT_RE, VOLUME_RE, parse_deploy_env
     from recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
     from release_candidate import validate_candidate
-    from release_record import (
-        LEGACY_BUILD_VERSION, LEGACY_COMMIT_SHA, LEGACY_IMAGE,
-        LEGACY_SCHEMA_VERSION,
-    )
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -288,45 +289,10 @@ def _validate_record(record: dict, expected_hash: str) -> dict:
             "manifest_sha256": str(backup["manifest_sha256"]),
             "database_sha256": str(backup["database"]["sha256"]),
         }
-    commit = str(record.get("commit") or "").strip().lower()
-    image = str(record.get("image") or "").strip().lower()
-    backup = record.get("backup") or {}
-    approvals = record.get("approvals") or []
-    if record.get("record_version") != 2:
-        raise ValueError("target release artifact version is unsupported")
-    if not COMMIT_RE.fullmatch(commit):
-        raise ValueError("target release record has an invalid commit")
-    if not IMAGE_RE.fullmatch(image):
-        raise ValueError("target release record has a mutable or invalid image")
-    if (
-        commit != LEGACY_COMMIT_SHA or image != LEGACY_IMAGE
-        or record.get("schema_version") != LEGACY_SCHEMA_VERSION
-    ):
-        raise ValueError("legacy rollback is restricted to the exact verified v2.9.1 subject")
-    if (
-        len(approvals) != 2 or not all(str(item).strip() for item in approvals)
-        or str(approvals[0]).strip().casefold() == str(approvals[1]).strip().casefold()
-    ):
-        raise ValueError("target release record lacks two distinct approvals")
-    readiness_version = str((record.get("readiness") or {}).get("version") or "")
-    if readiness_version != LEGACY_BUILD_VERSION:
-        raise ValueError("legacy v2 rollback is restricted to already released v2.9.1")
-    if not SHA256_RE.fullmatch(str(backup.get("manifest_sha256") or "")):
-        raise ValueError("target release record lacks a manifest digest")
-    if not SHA256_RE.fullmatch(str(backup.get("database_sha256") or "")):
-        raise ValueError("target release record lacks a database digest")
-    if not str(backup.get("id") or "").strip():
-        raise ValueError("target release record lacks a backup ID")
-    return {
-        "artifact_type": "legacy_release_record_v2",
-        "application_version": "v2.9.1",
-        "commit": commit,
-        "image": image,
-        "schema_version": int(record["schema_version"]),
-        "backup_id": str(backup["id"]).strip(),
-        "manifest_sha256": str(backup["manifest_sha256"]).lower(),
-        "database_sha256": str(backup["database_sha256"]).lower(),
-    }
+    raise ValueError(
+        "legacy release records are unsupported; create a new candidate bound "
+        "to an authenticated encrypted backup"
+    )
 
 
 def _validate_backup(backup_dir: Path, target: dict) -> tuple[Path, Path, dict]:
@@ -365,15 +331,52 @@ def _validate_backup(backup_dir: Path, target: dict) -> tuple[Path, Path, dict]:
         or not SHA256_RE.fullmatch(str(canary.get("sha256") or ""))
     ):
         raise ValueError("backup manifest lacks a valid recovery-key canary")
-    canary_path = root / CANARY_FILENAME
-    if (
-        not canary_path.is_file() or canary_path.is_symlink()
-        or canary_path.stat().st_nlink != 1
-        or canary_path.stat().st_size != canary["bytes"]
-        or sha256(canary_path) != canary["sha256"]
-    ):
-        raise ValueError("backup recovery-key canary differs from manifest")
-    validate_canary_bytes(canary_path.read_bytes())
+    encryption = manifest.get("encryption")
+    if encryption is not None:
+        if not isinstance(encryption, dict):
+            raise ValueError("backup encryption contract is invalid")
+        ciphertext = encryption.get("ciphertext") or {}
+        if (
+            encryption.get("format") != BACKUP_FORMAT
+            or encryption.get("method") != ENCRYPTION_METHOD
+            or not KEY_VERSION_RE.fullmatch(str(encryption.get("key_version") or ""))
+            or not SHA256_RE.fullmatch(
+                str(encryption.get("protected_manifest_sha256") or "")
+            )
+            or not SHA256_RE.fullmatch(str(encryption.get("aad_sha256") or ""))
+            or ciphertext.get("path") != PAYLOAD_NAME
+            or type(ciphertext.get("bytes")) is not int
+            or ciphertext["bytes"] <= 0
+            or not SHA256_RE.fullmatch(str(ciphertext.get("sha256") or ""))
+        ):
+            raise ValueError("backup encryption contract is invalid")
+        try:
+            nonce = base64.b64decode(
+                encryption.get("nonce_b64", ""), altchars=b"-_", validate=True,
+            )
+            tag = base64.b64decode(
+                encryption.get("tag_b64", ""), altchars=b"-_", validate=True,
+            )
+        except (ValueError, TypeError):
+            raise ValueError("backup encryption contract is invalid") from None
+        aad = encryption_aad(
+            encryption["key_version"], encryption["protected_manifest_sha256"],
+        )
+        if (
+            len(nonce) != 12 or len(tag) != 16
+            or hashlib.sha256(aad).hexdigest() != encryption["aad_sha256"]
+        ):
+            raise ValueError("backup encryption contract is invalid")
+        payload = root / PAYLOAD_NAME
+        if (
+            not payload.is_file() or payload.is_symlink()
+            or payload.stat().st_nlink != 1
+            or payload.stat().st_size != ciphertext["bytes"]
+            or sha256(payload) != ciphertext["sha256"]
+        ):
+            raise ValueError("encrypted backup payload differs from manifest")
+    else:
+        raise ValueError("production rollback requires an encrypted backup")
     ready_s3 = [
         item for item in (manifest.get("media_objects") or [])
         if item.get("backend") == "s3" and item.get("state") == "ready"
@@ -499,6 +502,7 @@ def build_plan(
         raise ValueError("rollback target must differ from the current release")
     backup_root, manifest_path, manifest = _validate_backup(backup_dir, target)
     target["canary_sha256"] = manifest["recovery_key_canary"]["sha256"]
+    target["backup_key_version"] = manifest["encryption"]["key_version"]
     _validate_target_commit(runner, repo, target["commit"])
     _inspect_volume(runner, current_volume, required=True)
     uid, gid = _inspect_image(runner, target["image"], target["commit"], pull=True)
@@ -594,6 +598,8 @@ def _revalidate_plan(plan: dict, runner, *, require_current=True) -> tuple[Path 
     _, _, manifest = _validate_backup(Path(plan["target"]["backup_dir"]), target)
     if manifest["recovery_key_canary"]["sha256"] != plan["target"].get("canary_sha256"):
         raise ValueError("target recovery-key canary differs from rollback plan")
+    if manifest["encryption"]["key_version"] != plan["target"].get("backup_key_version"):
+        raise ValueError("target backup key version differs from rollback plan")
     if require_current:
         _inspect_volume(runner, plan["current"]["volume"], required=True)
     uid, gid = _inspect_image(
@@ -704,6 +710,7 @@ def _common_docker_run() -> list[str]:
     return [
         "docker", "run", "--rm", "--network", "none", "--read-only",
         "--tmpfs", "/tmp:size=64m,mode=1777", "--cap-drop", "ALL",
+        "--ulimit", "core=0:0",
         "--security-opt", "no-new-privileges:true",
     ]
 
@@ -764,7 +771,7 @@ def _revalidate_staged_volume(plan: dict, stage: dict, runner) -> dict:
 @host_locked
 def apply_plan(
     *, plan_file: Path, confirmation: str, stage_report: Path,
-    runner=None, now=None,
+    runner=None, now=None, backup_key_file: Path | None = None,
 ) -> dict:
     runner = runner or Runner()
     plan_path, plan = _load_plan(plan_file, now=now)
@@ -773,6 +780,29 @@ def apply_plan(
     stage_target = _preflight_new_output(stage_report, "stage report")
     _revalidate_plan(plan, runner)
     target = plan["target"]
+    _, deploy_values = parse_deploy_env(Path(plan["deploy_env"]))
+    configured_key = Path(deploy_values["BACKUP_ENCRYPTION_KEY_FILE"])
+    if backup_key_file is None and (
+        deploy_values["BACKUP_ENCRYPTION_KEY_VERSION"]
+        != target["backup_key_version"]
+    ):
+        raise ValueError(
+            "encrypted backup uses an older key version; provide --backup-key-file"
+        )
+    backup_key_source = _secure_regular(
+        backup_key_file or configured_key,
+        "backup encryption key", private=True,
+    )
+    load_backup_key(
+        backup_key_source, expected_version=target["backup_key_version"],
+    )
+    if "," in str(backup_key_source):
+        raise ValueError("backup encryption key path must not contain a comma")
+    _, _, active_manifest = _validate_backup(
+        Path(target["backup_dir"]), target,
+    )
+    if active_manifest["encryption"]["key_version"] != target["backup_key_version"]:
+        raise ValueError("backup key version differs from encrypted manifest")
     volume = target["volume"]
     if _inspect_volume(runner, volume, required=False) is not None:
         raise FileExistsError("target volume already exists; plan cannot be replayed")
@@ -794,12 +824,20 @@ def apply_plan(
     mounts = [
         "--mount", f"type=bind,src={target['backup_dir']},dst=/backup,readonly",
         "--mount", f"type=volume,src={volume},dst=/target",
+        "--mount", (
+            f"type=bind,src={backup_key_source},"
+            "dst=/run/secrets/backup_encryption_key,readonly"
+        ),
     ]
     _run(
         runner,
-        [*common, "--user", "0:0", *mounts, target["image"], "python",
+        [*common, "--tmpfs",
+         "/run/bibitasks-backup-plaintext:size=512m,mode=0700,noexec,nosuid,nodev",
+         "--user", "0:0", *mounts, target["image"], "python",
          "scripts/restore.py", "--backup-dir", "/backup", "--restore-dir",
-         "/target/restored"],
+         "/target/restored", "--encryption-key-file",
+         "/run/secrets/backup_encryption_key", "--plaintext-tmp-dir",
+         "/run/bibitasks-backup-plaintext"],
         timeout=1800, label="isolated backup restore",
     )
     raw_report = _run(
@@ -1006,6 +1044,10 @@ def main() -> None:
     apply_parser.add_argument("--confirm", required=True)
     apply_parser.add_argument("--stage-report", type=Path, required=True)
     apply_parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK_FILE)
+    apply_parser.add_argument(
+        "--backup-key-file", type=Path,
+        help="Explicit retained key file for the manifest key_version",
+    )
 
     verify_parser = subparsers.add_parser("verify-stage")
     verify_parser.add_argument("--plan", type=Path, required=True)
@@ -1027,6 +1069,7 @@ def main() -> None:
         value = apply_plan(
             plan_file=args.plan, confirmation=args.confirm,
             stage_report=args.stage_report, lock_file=args.lock_file,
+            backup_key_file=args.backup_key_file,
         )
     else:
         value = verify_stage(

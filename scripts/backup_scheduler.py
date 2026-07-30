@@ -51,6 +51,15 @@ def run() -> None:
     interval = max(60, int(os.environ.get("BACKUP_INTERVAL_SECONDS", "600")))
     retry_interval = min(60, max(15, interval // 4))
     max_failures = max(1, int(os.environ.get("BACKUP_MAX_CONSECUTIVE_FAILURES", "3")))
+    key_file_value = (os.environ.get("BACKUP_ENCRYPTION_KEY_FILE", "") or "").strip()
+    key_version = (os.environ.get("BACKUP_ENCRYPTION_KEY_VERSION", "") or "").strip()
+    plaintext_tmp_value = (os.environ.get("BACKUP_PLAINTEXT_TMP_DIR", "") or "").strip()
+    if not key_file_value or not key_version or not plaintext_tmp_value:
+        raise RuntimeError(
+            "versioned backup encryption and memory-backed scratch are required"
+        )
+    key_file = Path(key_file_value)
+    plaintext_tmp_dir = Path(plaintext_tmp_value)
     failures = 0
     last_success_at = None
     while True:
@@ -58,7 +67,10 @@ def run() -> None:
         attempted_at = utc_now().isoformat()
         succeeded = False
         try:
-            destination = create_backup(data_dir, output_dir)
+            destination = create_backup(
+                data_dir, output_dir, encryption_key_file=key_file,
+                key_version=key_version, plaintext_tmp_dir=plaintext_tmp_dir,
+            )
             last_success_at = utc_now().isoformat()
             failures = 0
             succeeded = True

@@ -1,5 +1,10 @@
 # Restore rehearsal и point-in-time staging SQLite-пилота
 
+> Важно: legacy release record v2 и plaintext backup больше не принимаются.
+> Создайте новый `release-candidate` v1, связанный с AES-256-GCM backup. Для
+> backup старой версии ключа передайте `apply --backup-key-file` с retained
+> root-owned `0600` key file, чья `key_version` точно совпадает с manifest.
+
 Этот сценарий восстанавливает утверждённую SQLite-копию в **новый Docker named
 volume**. Текущий volume не монтируется на запись, не очищается и не удаляется.
 Это **не команда production-активации**. Она подготавливает и проверяет

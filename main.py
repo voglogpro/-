@@ -437,6 +437,14 @@ def _validate_update_receiver_config():
         raise RuntimeError(
             "BIBITASKS_ENVIRONMENT must be production, staging, development or test"
         )
+    if (
+        BIBITASKS_ENVIRONMENT == "production"
+        and TELEGRAM_UPDATE_MODE != "webhook"
+    ):
+        raise RuntimeError(
+            "Production requires TELEGRAM_UPDATE_MODE=webhook; polling is "
+            "allowed only in staging, development or test"
+        )
     if PILOT_LOAD_TEST_ENABLED and BIBITASKS_ENVIRONMENT != "staging":
         raise RuntimeError(
             "PILOT_LOAD_TEST_ENABLED is allowed only in staging"

@@ -61,6 +61,7 @@ class ReliabilityP1Tests(unittest.IsolatedAsyncioTestCase):
         with patch.multiple(
             main,
             BIBITASKS_ENVIRONMENT="production",
+            TELEGRAM_UPDATE_MODE="webhook",
             PRIVACY_URL_RAW="",
             PRIVACY_URL=None,
         ):

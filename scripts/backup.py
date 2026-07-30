@@ -1,10 +1,11 @@
-"""Create a consistent SQLite backup with media and a checksum manifest.
+"""Create an authenticated encrypted SQLite/media backup.
 
 Run while the single-instance pilot is online:
     python scripts/backup.py --data-dir data --output-dir backups
 
-The output directory must live off-host in production. This script never deletes
-old backups; retention is controlled by the backup destination.
+Production/pilot use is fail-closed without a versioned key file. Plaintext
+output exists only behind the explicit ``--allow-plaintext-dev`` compatibility
+flag. This script never deletes old backups; retention belongs to the target.
 """
 
 from __future__ import annotations
@@ -17,15 +18,26 @@ import os
 import shutil
 import sqlite3
 import stat
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+MAX_MANIFEST_BYTES = 1024 * 1024
+
 from dotenv import load_dotenv
 try:
     from .recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+    from .backup_crypto import (
+        PAYLOAD_NAME, cleanup_private_tree, encrypt_directory, load_backup_key,
+        require_explicit_dev_environment, require_memory_backed_temp, sha256_bytes,
+    )
 except ImportError:  # direct ``python scripts/backup.py`` execution
     from recovery_key_canary import CANARY_FILENAME, validate_canary_bytes
+    from backup_crypto import (
+        PAYLOAD_NAME, cleanup_private_tree, encrypt_directory, load_backup_key,
+        require_explicit_dev_environment, require_memory_backed_temp, sha256_bytes,
+    )
 
 
 def _load_environment(env_file: Path | None) -> None:
@@ -43,6 +55,28 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _write_json_fsync(path: Path, value: dict) -> None:
+    raw = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    if len(raw.encode("utf-8")) > MAX_MANIFEST_BYTES:
+        raise ValueError("backup manifest is unexpectedly large")
+    with path.open("x", encoding="utf-8", newline="\n") as output:
+        output.write(raw)
+        output.flush()
+        os.fsync(output.fileno())
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _read_canary(data_dir: Path) -> bytes:
@@ -80,9 +114,36 @@ def _read_canary(data_dir: Path) -> bytes:
     return raw
 
 
-def create_backup(data_dir: Path, output_dir: Path) -> Path:
-    data_dir = data_dir.resolve()
-    output_dir = output_dir.resolve()
+def _canonical_media_id(value: object) -> str:
+    raw = str(value or "")
+    try:
+        parsed = uuid.UUID(raw)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("S3 media ID is not a canonical UUID") from exc
+    canonical = str(parsed)
+    if raw != canonical:
+        raise ValueError("S3 media ID is not a canonical UUID")
+    return canonical
+
+
+def create_backup(
+    data_dir: Path, output_dir: Path, *, encryption_key_file: Path | None = None,
+    key_version: str | None = None, plaintext_tmp_dir: Path | None = None,
+    allow_plaintext_dev: bool = False, allow_unverified_temp_dev: bool = False,
+    allow_s3_dev: bool = False,
+) -> Path:
+    if allow_plaintext_dev:
+        require_explicit_dev_environment("plaintext backup compatibility")
+    if allow_unverified_temp_dev:
+        require_explicit_dev_environment("unverified plaintext scratch")
+    if allow_s3_dev:
+        require_explicit_dev_environment("S3 backup compatibility")
+    raw_data_dir = data_dir.expanduser()
+    raw_output_dir = output_dir.expanduser()
+    if raw_data_dir.is_symlink() or raw_output_dir.is_symlink():
+        raise ValueError("backup data/output directories must not be symbolic links")
+    data_dir = raw_data_dir.resolve()
+    output_dir = raw_output_dir.resolve()
     if output_dir == data_dir or output_dir.is_relative_to(data_dir):
         raise ValueError("Output directory must not be inside the data directory")
 
@@ -96,11 +157,43 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     destination = output_dir / stamp
-    staging = output_dir / f".{stamp}.{uuid.uuid4().hex}.tmp"
+    publish_staging = output_dir / f".{stamp}.{uuid.uuid4().hex}.tmp"
+    if encryption_key_file is not None:
+        if plaintext_tmp_dir is None:
+            raise RuntimeError("memory-backed plaintext scratch directory is required")
+        if allow_unverified_temp_dev:
+            scratch_root = plaintext_tmp_dir.expanduser().resolve()
+            if not scratch_root.is_dir() or scratch_root.is_symlink():
+                raise ValueError("dev plaintext scratch directory is unsafe")
+        else:
+            scratch_root = require_memory_backed_temp(plaintext_tmp_dir)
+    elif allow_plaintext_dev:
+        scratch_root = plaintext_tmp_dir.expanduser().resolve() if plaintext_tmp_dir else None
+    else:
+        scratch_root = None
+    publish_staging.mkdir(mode=0o700, exist_ok=False)
+    temporary_root = Path(tempfile.mkdtemp(
+        prefix="bibitasks-backup-", dir=str(scratch_root) if scratch_root else None,
+    ))
+    if os.name != "nt":
+        temporary_root.chmod(0o700)
+    staging = temporary_root / "bundle"
     staging.mkdir(mode=0o700, exist_ok=False)
     database_copy = staging / "bibitasks.db"
 
     try:
+        if encryption_key_file is None and not allow_plaintext_dev:
+            raise RuntimeError(
+                "backup encryption key file is required outside explicit dev/test mode"
+            )
+        if encryption_key_file is not None and allow_plaintext_dev:
+            raise ValueError("encrypted and plaintext backup modes are mutually exclusive")
+        encryption_key = None
+        resolved_key_version = None
+        if encryption_key_file is not None:
+            encryption_key, resolved_key_version = load_backup_key(
+                encryption_key_file, expected_version=key_version,
+            )
         source_uri = f"{database.as_uri()}?mode=ro"
         with (
             closing(sqlite3.connect(source_uri, uri=True)) as source,
@@ -207,6 +300,21 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
             if item["backend"] == "s3" and item["state"] == "ready"
         ]
         if s3_ready:
+            if not allow_s3_dev:
+                raise RuntimeError(
+                    "S3 backup is disabled for the network-isolated pilot"
+                )
+            for item in s3_ready:
+                item["id"] = _canonical_media_id(item.get("id"))
+                object_key = str(item.get("object_key") or "")
+                if Path(object_key).name != object_key or not object_key:
+                    raise ValueError("S3 media object key is unsafe")
+                if (
+                    type(item.get("bytes")) is not int or item["bytes"] < 0
+                    or not isinstance(item.get("sha256"), str)
+                    or len(item["sha256"]) != 64
+                ):
+                    raise ValueError("S3 media size/digest contract is invalid")
             import boto3
             from botocore.config import Config
 
@@ -232,18 +340,32 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
                 if item["version_id"]:
                     request["VersionId"] = item["version_id"]
                 response = s3.get_object(**request)
+                media_copy = staging / "s3_media" / f"{item['id']}.jpg"
+                media_copy.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                total = 0
                 try:
-                    content = response["Body"].read()
+                    with media_copy.open("xb") as output:
+                        while total <= item["bytes"]:
+                            limit = min(1024 * 1024, item["bytes"] - total + 1)
+                            chunk = response["Body"].read(limit)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > item["bytes"]:
+                                raise RuntimeError(
+                                    f"Ready S3 media exceeds expected size: {item['id']}"
+                                )
+                            output.write(chunk)
+                            digest.update(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
                 finally:
                     response["Body"].close()
                 if (
-                    len(content) != item["bytes"]
-                    or hashlib.sha256(content).hexdigest() != item["sha256"]
+                    total != item["bytes"] or digest.hexdigest() != item["sha256"]
                 ):
                     raise RuntimeError(f"Ready S3 media missing or corrupt: {item['id']}")
-                media_copy = staging / "s3_media" / f"{item['id']}.jpg"
-                media_copy.parent.mkdir(parents=True, exist_ok=True)
-                media_copy.write_bytes(content)
                 if os.name != "nt":
                     media_copy.chmod(0o600)
                 item["backup_path"] = media_copy.relative_to(staging).as_posix()
@@ -268,15 +390,48 @@ def create_backup(data_dir: Path, output_dir: Path) -> Path:
             "media_objects": media_objects,
         }
         manifest_path = staging / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        _write_json_fsync(manifest_path, manifest)
+        if encryption_key is not None:
+            inner_manifest_raw = manifest_path.read_bytes()
+            protected_digest = sha256_bytes(inner_manifest_raw)
+            encryption = encrypt_directory(
+                staging, publish_staging / PAYLOAD_NAME,
+                key=encryption_key, key_version=resolved_key_version,
+                protected_manifest_sha256=protected_digest,
+            )
+            outer_manifest = {**manifest, "encryption": encryption}
+            outer_manifest_path = publish_staging / "manifest.json"
+            _write_json_fsync(outer_manifest_path, outer_manifest)
+        else:
+            for source in staging.iterdir():
+                target = publish_staging / source.name
+                if source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    shutil.copy2(source, target)
+        cleanup_private_tree(
+            temporary_root, scratch_root or temporary_root.parent,
+            "plaintext backup scratch",
         )
-        if os.name != "nt":
-            manifest_path.chmod(0o600)
-        staging.replace(destination)
+        temporary_root = None
+        _fsync_directory(publish_staging)
+        publish_staging.replace(destination)
+        _fsync_directory(output_dir)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        cleanup_failures = []
+        for path, parent, label in (
+            (temporary_root, scratch_root or temporary_root.parent,
+             "plaintext backup scratch") if temporary_root is not None else (None, None, None),
+            (publish_staging, output_dir, "partial encrypted backup"),
+        ):
+            if path is None:
+                continue
+            try:
+                cleanup_private_tree(path, parent, label)
+            except Exception as cleanup_error:
+                cleanup_failures.append(cleanup_error)
+        if cleanup_failures:
+            raise RuntimeError("backup failed and secure cleanup was incomplete") from cleanup_failures[0]
         raise
     return destination
 
@@ -289,12 +444,45 @@ def main() -> None:
         "--env-file", type=Path,
         help="Optional explicit .env file; existing process variables win",
     )
+    parser.add_argument(
+        "--encryption-key-file", type=Path,
+        help="Root-managed versioned 256-bit backup key file",
+    )
+    parser.add_argument("--key-version")
+    parser.add_argument(
+        "--plaintext-tmp-dir", type=Path,
+        help="Dedicated tmpfs/ramfs mount used only for transient plaintext",
+    )
+    parser.add_argument(
+        "--allow-plaintext-dev", action="store_true",
+        help="Explicit legacy compatibility for non-production dev/tests only",
+    )
+    parser.add_argument("--allow-s3-dev", action="store_true")
     args = parser.parse_args()
     if args.env_file:
         if not args.env_file.is_file():
             parser.error(f"Environment file not found: {args.env_file}")
     _load_environment(args.env_file)
-    destination = create_backup(args.data_dir.resolve(), args.output_dir.resolve())
+    key_file_value = args.encryption_key_file or (
+        Path(os.environ["BACKUP_ENCRYPTION_KEY_FILE"])
+        if os.environ.get("BACKUP_ENCRYPTION_KEY_FILE") else None
+    )
+    key_version = args.key_version or os.environ.get("BACKUP_ENCRYPTION_KEY_VERSION")
+    if args.allow_plaintext_dev and (
+        os.environ.get("BIBITASKS_ENVIRONMENT", "").strip().lower()
+        in {"production", "pilot"}
+    ):
+        parser.error("--allow-plaintext-dev is forbidden in production/pilot")
+    destination = create_backup(
+        args.data_dir.resolve(), args.output_dir.resolve(),
+        encryption_key_file=key_file_value, key_version=key_version,
+        plaintext_tmp_dir=args.plaintext_tmp_dir or (
+            Path(os.environ["BACKUP_PLAINTEXT_TMP_DIR"])
+            if os.environ.get("BACKUP_PLAINTEXT_TMP_DIR") else None
+        ),
+        allow_plaintext_dev=args.allow_plaintext_dev,
+        allow_s3_dev=args.allow_s3_dev,
+    )
     print(destination)
 
 

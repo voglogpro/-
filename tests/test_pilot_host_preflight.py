@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.pilot_host_preflight import parse_deploy_env, run_preflight
+from scripts.backup_crypto import key_document
 
 
 COMMIT = "a" * 40
@@ -35,6 +36,25 @@ class FakeProbe:
             stdout = "?? unexpected.txt\n" if self.dirty else ""
         elif args[:3] == ["docker", "image", "inspect"]:
             stdout = f"linux/amd64 {IMAGE}\n"
+        elif "compose" in args and "config" in args and "json" in args:
+            stdout = json.dumps({
+                "services": {"backup": {
+                    "user": "0:0", "network_mode": "none", "read_only": True,
+                    "ulimits": {"core": 0},
+                    "environment": {
+                        "BACKUP_ENCRYPTION_KEY_FILE": "/run/secrets/backup_encryption_key",
+                        "BACKUP_ENCRYPTION_KEY_VERSION": "pilot-2026-07",
+                        "BACKUP_PLAINTEXT_TMP_DIR": "/run/bibitasks-backup-plaintext",
+                    },
+                    "tmpfs": [
+                        "/run/bibitasks-backup-plaintext:size=512m,mode=0700,noexec,nosuid,nodev",
+                    ],
+                    "secrets": [{
+                        "source": "backup_encryption_key",
+                        "target": "backup_encryption_key",
+                    }],
+                }},
+            })
         return subprocess.CompletedProcess(args, returncode, stdout, "")
 
     def machine(self):
@@ -72,11 +92,14 @@ class PilotHostPreflightTests(unittest.TestCase):
         self.monitor_health = self.root / "monitor-health-token"
         self.monitor_alert.write_text("not-read-by-preflight\n", encoding="utf-8")
         self.monitor_health.write_text("not-read-by-preflight\n", encoding="utf-8")
+        self.backup_key = self.root / "backup-encryption.key"
+        self.backup_key.write_bytes(key_document(b"k" * 32, "pilot-2026-07"))
         self.deploy = self.root / "deploy.env"
         self._write_deploy()
         os.chmod(self.production, 0o600)
         os.chmod(self.monitor_alert, 0o600)
         os.chmod(self.monitor_health, 0o600)
+        os.chmod(self.backup_key, 0o600)
         os.chmod(self.deploy, 0o640)
         self.owner = self.deploy.stat().st_uid if hasattr(self.deploy.stat(), "st_uid") else None
 
@@ -94,6 +117,8 @@ class PilotHostPreflightTests(unittest.TestCase):
                 f"BACKUP_SENTINEL={self.sentinel}",
                 "BACKUP_SENTINEL_VALUE=bibitasks-offhost-v1",
                 "BACKUP_EXPECTED_SOURCE=backup.example:/bibitasks",
+                f"BACKUP_ENCRYPTION_KEY_FILE={self.backup_key}",
+                "BACKUP_ENCRYPTION_KEY_VERSION=pilot-2026-07",
                 "BIBITASKS_DATA_VOLUME=bibitasks_data",
                 f"MONITOR_ALERT_BOT_TOKEN_FILE={self.monitor_alert}",
                 f"MONITOR_HEALTH_TOKEN_FILE={self.monitor_health}",
@@ -161,6 +186,18 @@ class PilotHostPreflightTests(unittest.TestCase):
         os.chmod(self.monitor_alert, 0o644)
         report = self._run()
         self.assertEqual(self._status(report, "monitor alert token permissions"), "fail")
+
+    def test_rejects_missing_or_wrong_backup_encryption_attestation(self):
+        self.backup_key.write_bytes(key_document(b"k" * 32, "wrong-version"))
+        if os.name != "nt":
+            self.backup_key.chmod(0o600)
+        report = self._run()
+        self.assertEqual(
+            self._status(report, "backup encryption key contract"), "fail",
+        )
+        rendered = json.dumps(report)
+        self.assertNotIn(str(self.backup_key), rendered)
+        self.assertNotIn("a2tra2tra2s", rendered)
 
     def test_rejects_root_filesystem_as_backup(self):
         report = self._run(FakeProbe(mount_target=Path("/")))
