@@ -207,7 +207,7 @@ DEFAULT_PUBLIC_BASE_URL = (
     "https://bot-1785403482-2082-kponamarev.bothost.tech"
 )
 MINI_APP_URL_RAW = (
-    os.getenv("MINI_APP_URL", f"{DEFAULT_PUBLIC_BASE_URL}/") or ""
+    os.getenv("MINI_APP_URL") or f"{DEFAULT_PUBLIC_BASE_URL}/"
 ).strip()
 WEBAPP_PORT = int(os.getenv("PORT") or os.getenv("WEB_PORT") or 3000)
 TELEGRAM_UPDATE_MODE = (os.getenv("TELEGRAM_UPDATE_MODE", "polling") or "polling").strip().lower()
@@ -219,7 +219,7 @@ PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED = _truthy_env(
     "PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED", "false"
 )
 PRIVACY_URL_RAW = (
-    os.getenv("PRIVACY_URL", f"{DEFAULT_PUBLIC_BASE_URL}/privacy") or ""
+    os.getenv("PRIVACY_URL") or f"{DEFAULT_PUBLIC_BASE_URL}/privacy"
 ).strip()
 PRIVACY_CONTROLLER_NAME_RAW = os.getenv("PRIVACY_CONTROLLER_NAME", "") or ""
 PRIVACY_CONTACT_RAW = os.getenv("PRIVACY_CONTACT", "") or ""
@@ -277,7 +277,7 @@ TELEGRAM_HANDLER_TIMEOUT_SEC = _bounded_int_env(
     "TELEGRAM_HANDLER_TIMEOUT_SEC", 120, 10, 300,
 )
 PUBLIC_BASE_URL = (
-    os.getenv("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL) or ""
+    os.getenv("PUBLIC_BASE_URL") or DEFAULT_PUBLIC_BASE_URL
 ).strip().rstrip("/")
 WEBHOOK_ROUTE_ID = (os.getenv("WEBHOOK_ROUTE_ID", "") or "").strip()
 WEBHOOK_PATH = f"/telegram/webhook/{WEBHOOK_ROUTE_ID}" if WEBHOOK_ROUTE_ID else ""
