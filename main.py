@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.10.0"
-BUILD_VERSION = "2026-07-28 · БибиЗадачи v2.10.0 (release gate)"
+APP_VERSION = "v2.11.0"
+BUILD_VERSION = "2026-07-30 · БибиЗадачи v2.11.0"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
@@ -157,8 +157,9 @@ TOPIC_CONFIG_EXPLICIT = {
     for name in ("TOPIC_NEWS", "TOPIC_CHAT", "TOPIC_WORK", "TOPIC_FRANCHISE")
 }
 
-# Приватная рабочая supergroup. Точные адреса и фотографии заданий никогда не
-# публикуются в публичный community chat.
+# Приватная рабочая supergroup остаётся частью production-контура для
+# операторских процессов. Пользовательский анонс задания идёт в TOPIC_WORK,
+# а точный адрес и фотография доступны только внутри Mini App.
 OPS_GROUP_USERNAME = _clean_username(os.getenv("OPS_GROUP_USERNAME", ""))
 OPS_GROUP_ID = _as_int_env("OPS_GROUP_ID")
 OPS_TOPIC_TASKS = _as_int_env("OPS_TOPIC_TASKS", 1)
@@ -1034,6 +1035,8 @@ async def init_db():
                 budget_cap  INTEGER,
                 cancel_operation_id TEXT,
                 cancel_request_hash TEXT,
+                edit_operation_id TEXT,
+                edit_request_hash TEXT,
                 cancelled_at TEXT,
                 cancelled_by INTEGER,
                 cancel_reason TEXT,
@@ -2054,6 +2057,8 @@ async def init_db():
             ("budget_cap", "INTEGER"),
             ("cancel_operation_id", "TEXT"),
             ("cancel_request_hash", "TEXT"),
+            ("edit_operation_id", "TEXT"),
+            ("edit_request_hash", "TEXT"),
             ("cancelled_at", "TEXT"),
             ("cancelled_by", "INTEGER"),
             ("cancel_reason", "TEXT"),
@@ -3194,7 +3199,7 @@ ANALYTICS_EVENTS = {
     "bot_started", "referral_bound", "referral_link_invalid",
     "miniapp_authenticated", "application_submitted", "application_resubmitted",
     "application_decided",
-    "task_catalog_served", "task_created", "task_published",
+    "task_catalog_served", "task_created", "task_edited", "task_published",
     "task_announcement_retried", "task_claimed",
     "task_released", "task_cancelled", "task_expired", "proof_submitted",
     "task_reviewed", "task_reward_credited", "task_dispute_opened",
@@ -3607,6 +3612,7 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
             return False
         domain_locations = {
             "task_create": ("tasks", "operation_id"),
+            "task_edit": ("tasks", "edit_operation_id"),
             "task_review": ("task_review_commands", "operation_id"),
             "task_dispute_open": ("task_disputes", "open_operation_id"),
             "task_dispute_decide": ("task_disputes", "decision_operation_id"),
@@ -3646,6 +3652,7 @@ async def _claim_operation_in_tx(db, operation_id, command_type, request_hash, a
         return True
     legacy_checks = (
         ("tasks", "operation_id", "task_create"),
+        ("tasks", "edit_operation_id", "task_edit"),
         ("task_review_commands", "operation_id", "task_review"),
         ("task_disputes", "open_operation_id", "task_dispute_open"),
         ("task_disputes", "decision_operation_id", "task_dispute_decide"),
@@ -4777,6 +4784,23 @@ async def _enqueue_capability_holders_in_tx(
         )
 
 
+async def _enqueue_city_workers_in_tx(db, event_key, city, text, task_id):
+    """Notify approved workers in the task city without relying on topic alerts."""
+    rows = await (await db.execute(
+        "SELECT user_id,city FROM members WHERE status='approved' "
+        "AND role IN ('helper','employee')",
+    )).fetchall()
+    city_key = _city_key(city)
+    for row in rows:
+        if _city_key(row["city"]) != city_key:
+            continue
+        await _enqueue_outbox_in_tx(
+            db, f"{event_key}:user:{int(row['user_id'])}", "direct",
+            {"text": text, "start": f"task_{int(task_id)}"},
+            recipient_id=int(row["user_id"]),
+        )
+
+
 async def _queue_join_request_decision_in_tx(db, request_key, decision):
     """Durably queue one approve/decline without calling Telegram in a DB tx."""
     if decision not in {"approve", "decline"}:
@@ -4887,6 +4911,14 @@ async def _deliver_outbox_item(item):
     if item["event_type"] == "join_request_decision":
         return await _join_request_delivery(item, payload)
     if item["event_type"] == "group_task":
+        task_id = _as_int(payload.get("task_id"))
+        if task_id:
+            async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+                task_status = await (await db.execute(
+                    "SELECT status FROM tasks WHERE id=?", (task_id,),
+                )).fetchone()
+            if not task_status or task_status[0] != "open":
+                return None
         chat_id = item["chat_id"]
         if str(chat_id).lstrip("-").isdigit():
             chat_id = int(chat_id)
@@ -4905,6 +4937,17 @@ async def _deliver_outbox_item(item):
             chat_id, payload["text"], item["topic_id"],
             disable_web_page_preview=True, **kwargs,
         )
+    if item["event_type"] == "group_task_delete":
+        chat_id = item["chat_id"]
+        if str(chat_id).lstrip("-").isdigit():
+            chat_id = int(chat_id)
+        try:
+            await bot.delete_message(chat_id, int(payload["message_id"]))
+        except TelegramBadRequest:
+            # Telegram may already have removed the message or it may be too old
+            # to delete. The task itself is still safely hidden in the app.
+            return None
+        return None
     if item["event_type"] == "group_publication":
         operation_id = item["event_key"]
         existing = await _get_published(payload["kind"])
@@ -6144,7 +6187,7 @@ def _task_public(t):
             t.get("announcement_chat_id"),
             t.get("announcement_message_id"),
             t.get("announcement_thread_id"),
-            OPS_GROUP_USERNAME,
+            GROUP_USERNAME,
         )
     return {
         "id": t["id"],
@@ -6748,6 +6791,24 @@ async def api_admin_task_cancel(request):
                     f"Задание #{tid} «{task['title']}» отменено.\nПричина: {reason}"
                 ), "start": None},
                 recipient_id=user_id,
+            )
+        announcement = await (await db.execute(
+            "SELECT status,chat_id,telegram_message_id FROM task_outbox "
+            "WHERE event_key=? AND event_type='group_task'",
+            (f"task:{tid}:announcement",),
+        )).fetchone()
+        if announcement:
+            if announcement["telegram_message_id"] and announcement["chat_id"]:
+                await _enqueue_outbox_in_tx(
+                    db, f"task:{tid}:announcement:delete:{operation_id}",
+                    "group_task_delete",
+                    {"message_id": int(announcement["telegram_message_id"])},
+                    chat_id=announcement["chat_id"],
+                )
+            await db.execute(
+                "UPDATE task_outbox SET status='cancelled',payload_json=?,media_id=NULL,"
+                "last_error=NULL WHERE event_key=? AND event_type='group_task'",
+                ('{"cancelled":true}', f"task:{tid}:announcement"),
             )
         await db.commit()
     return _json({
@@ -7937,7 +7998,7 @@ async def api_admin_queue(request):
 
 
 async def api_admin_task_announcement_retry(request):
-    """Повторяет только окончательно упавшую доставку задания в private OPS."""
+    """Повторяет только окончательно упавшую доставку задания в тему «Работа»."""
     admin_id, err = await _require_capability(request, "task.delivery.retry")
     if err is not None:
         return err
@@ -7961,7 +8022,7 @@ async def api_admin_task_announcement_retry(request):
             await db.rollback()
             return _json({
                 "error": "not_found",
-                "message": "Для задания нет объявления в приватной OPS-группе.",
+                "message": "Для задания нет объявления в теме «Работа».",
             }, status=404)
         if row["status"] == "sent":
             await db.rollback()
@@ -8107,7 +8168,7 @@ async def api_admin_task_announcement_status(request):
         if item["status"] == "sent":
             announcement_url = _telegram_message_url(
                 item.get("chat_id"), item.get("telegram_message_id"),
-                item.get("telegram_thread_id"), OPS_GROUP_USERNAME,
+                item.get("telegram_thread_id"), GROUP_USERNAME,
             )
         items.append({
             "task_id": task_id,
@@ -9125,6 +9186,24 @@ async def api_admin_task_template_status(request):
     return _json(result)
 
 
+def _work_task_announcement(task):
+    """Public task notice: enough to alert workers, without exposing an address."""
+    task_type = TASK_TYPES.get(task.get("type"), {})
+    task_kind = "Для каждого участника" if task.get("repeatable") else "Забирает первый"
+    lines = [
+        "📌 <b>Новое задание</b>",
+        f"<b>{_html(task.get('title') or '')}</b>",
+        f"{_html(task_type.get('title', 'Задание'))} · {_html(task_kind)}",
+        f"📍 {_html(task.get('city') or '')}",
+    ]
+    if task.get("slot_start"):
+        lines.append(
+            f"🕒 {_html(slot_text(task.get('slot_start'), task.get('slot_end')))}"
+        )
+    lines.append(f"⚡ Награда: <b>{int(task.get('reward') or 0)} бибибонусов</b>")
+    return "\n".join(lines)
+
+
 async def api_admin_task_create(request):
     admin_id, err = await _require_capability(request, "task.create")
     if err is not None:
@@ -9169,15 +9248,6 @@ async def api_admin_task_create(request):
             )).fetchone()
         if not template_row:
             return _json({"error": "template_not_found"}, status=404)
-        body = dict(body)
-        body.update({
-            "type": template_row["task_type"], "title": template_row["task_title"],
-            "details": template_row["details"], "reward": template_row["reward"],
-            "repeatable": template_row["mode"] == "all",
-            "evidence_policy": template_row["evidence_policy"],
-            "max_participants": template_row["max_participants"],
-            "budget_cap": template_row["budget_cap"],
-        })
     ttype = body.get("type")
     if ttype not in TASK_TYPES:
         return _json({"error": "type"}, status=400)
@@ -9209,11 +9279,6 @@ async def api_admin_task_create(request):
             assigned_to = int(assigned_to)
         except (TypeError, ValueError):
             return _json({"error": "assignee"}, status=400)
-    if template_row and template_row["mode"] == "personal" and assigned_to is None:
-        return _json({
-            "error": "assignee",
-            "message": "Персональный шаблон требует исполнителя.",
-        }, status=400)
     repeatable = bool(body.get("repeatable"))
     if repeatable and assigned_to is not None:
         return _json({
@@ -9579,37 +9644,37 @@ async def api_admin_task_create(request):
                     recipient_id=assigned_to,
                 )
             elif announce:
-                target = OPS_GROUP_ID or (
-                    f"@{OPS_GROUP_USERNAME}" if OPS_GROUP_USERNAME else None
+                target = GROUP_ID or (
+                    f"@{GROUP_USERNAME}" if GROUP_USERNAME else None
                 )
                 if target:
-                    task_kind = "Для каждого участника" if repeatable else "Забирает первый"
-                    lines = [
-                        "📌 <b>Новое задание</b>", f"<b>{_html(title)}</b>",
-                        f"{_html(TASK_TYPES[ttype]['title'])} · {_html(task_kind)}",
-                    ]
-                    if details:
-                        lines.append(_html(details))
-                    lines.append(f"📍 {_html(city)} · {_html(address)}")
-                    if slot_start:
-                        lines.append(f"🕒 {_html(slot_text(slot_start, slot_end))}")
-                    lines.append(f"⚡ Награда: <b>{reward} бибибонусов</b>")
+                    announcement_text = _work_task_announcement({
+                        "type": ttype, "title": title, "city": city,
+                        "reward": reward, "repeatable": repeatable,
+                        "slot_start": slot_start, "slot_end": slot_end,
+                    })
                     await _enqueue_outbox_in_tx(
                         db, f"task:{tid}:announcement", "group_task",
                         {
-                            "text": "\n".join(lines), "start": f"task_{tid}",
-                            "photo_file": photo_file,
-                            "media_id": brief_image["media_id"] if brief_image else None,
+                            "text": announcement_text, "start": f"task_{tid}",
+                            "photo_file": None,
+                            "media_id": None,
                             "task_id": tid,
                             "admin_id": admin_id, "operation_id": operation_id,
                         },
-                        chat_id=target, topic_id=OPS_TOPIC_TASKS,
-                        media_id=brief_image["media_id"] if brief_image else None,
+                        chat_id=target, topic_id=TOPIC_WORK,
+                        media_id=None,
                     )
                     announcement_status = "queued"
                 else:
                     announcement_status = "not_configured"
-                    announce_error = "Приватная OPS-группа не настроена"
+                    announce_error = "Группа или тема «Работа» не настроена"
+                await _enqueue_city_workers_in_tx(
+                    db, f"task:{tid}:available", city,
+                    f"🔔 Новое задание в городе {city}\n{title}\n"
+                    f"Награда: {reward} бибибонусов",
+                    tid,
+                )
             await db.commit()
     except Exception:
         await _remove_saved_images(
@@ -9632,6 +9697,326 @@ async def api_admin_task_create(request):
         "announce_error": announce_error,
         "template_id": template_id,
         "template_version_id": template_version_id,
+    })
+
+
+async def api_admin_task_update(request):
+    """Edit an unclaimed task and republish its card in the Work topic."""
+    admin_id, err = await _require_capability(request, "task.create")
+    if err is not None:
+        return err
+    body = await _body(request)
+    tid = _as_int(body.get("task_id"))
+    operation_id = _operation_uuid(body.get("operation_id"))
+    if tid is None or tid <= 0 or not operation_id:
+        return _json({
+            "error": "bad_request",
+            "message": "Не удалось определить задание для редактирования.",
+        }, status=400)
+    ttype = body.get("type")
+    if ttype not in TASK_TYPES:
+        return _json({"error": "type", "message": "Выбери тип задания."}, status=400)
+    title = str(body.get("title") or "").strip()[:120]
+    details = str(body.get("details") or "").strip()[:500]
+    address = str(body.get("address") or "").strip()[:200]
+    city = _city_display(body.get("city"))
+    if len(title) < 3:
+        return _json({"error": "title", "message": "Укажи понятный заголовок задания."}, status=400)
+    if len(city) < 2:
+        return _json({"error": "city", "message": "Укажи город задания."}, status=400)
+    if len(address) < 3:
+        return _json({"error": "address", "message": "Укажи адрес или ориентир."}, status=400)
+    try:
+        reward = int(body.get("reward") or 0)
+    except (TypeError, ValueError):
+        reward = 0
+    if not 1 <= reward <= 300:
+        return _json({
+            "error": "reward",
+            "message": "Награда за задание должна быть от 1 до 300 бибибонусов.",
+        }, status=400)
+    assigned_to = body.get("assigned_to")
+    if assigned_to in ("", None):
+        assigned_to = None
+    else:
+        assigned_to = _as_int(assigned_to)
+        if assigned_to is None:
+            return _json({"error": "assignee", "message": "Выбери сотрудника."}, status=400)
+    repeatable = bool(body.get("repeatable"))
+    if repeatable and assigned_to is not None:
+        return _json({"error": "mode", "message": "Выбери один режим выполнения."}, status=400)
+    evidence_policy = _evidence_policy(body.get("evidence_policy"))
+    if evidence_policy is None:
+        return _json({"error": "evidence_policy", "message": "Выбери способ подтверждения."}, status=400)
+    if repeatable:
+        max_participants = _as_int(body.get("max_participants"))
+        budget_cap = _as_int(body.get("budget_cap"))
+        if max_participants is None or not 1 <= max_participants <= 500:
+            return _json({"error": "max_participants", "message": "Укажи от 1 до 500 исполнителей."}, status=400)
+        if budget_cap is None or budget_cap < reward * max_participants or budget_cap > 150000:
+            return _json({"error": "budget_cap", "message": "Лимита бюджета должно хватать на всех исполнителей."}, status=400)
+    else:
+        max_participants, budget_cap = 1, reward
+    try:
+        slot_start = parse_slot_iso(body.get("slot_start"))
+        slot_end = parse_slot_iso(body.get("slot_end"))
+    except ValueError as exc:
+        return _json({"error": "slot", "message": str(exc)}, status=400)
+    if bool(slot_start) != bool(slot_end):
+        return _json({"error": "slot", "message": "Укажи начало и окончание срока."}, status=400)
+    if slot_start and datetime.fromisoformat(slot_end) <= datetime.fromisoformat(slot_start):
+        return _json({"error": "slot", "message": "Окончание должно быть позже начала."}, status=400)
+    if slot_end and datetime.fromisoformat(slot_end) <= datetime.now(timezone.utc):
+        return _json({"error": "slot_expired", "message": "Окончание задания должно быть в будущем."}, status=400)
+    announce = body.get("announce") is True and assigned_to is None
+    photo_action = str(body.get("photo_action") or "keep").strip().lower()
+    if photo_action not in {"keep", "replace", "remove"}:
+        return _json({"error": "photo_action"}, status=400)
+    photo_data = body.get("photo_data") or ""
+    if (photo_action == "replace") != bool(photo_data):
+        return _json({"error": "photo", "message": "Выбери фотографию ещё раз."}, status=400)
+    request_hash = _request_fingerprint({
+        "task_id": tid, "type": ttype, "title": title, "details": details,
+        "address": address, "city": city, "reward": reward,
+        "assigned_to": assigned_to, "repeatable": repeatable,
+        "evidence_policy": _public_evidence_policy(evidence_policy),
+        "max_participants": max_participants, "budget_cap": budget_cap,
+        "slot_start": slot_start, "slot_end": slot_end, "announce": announce,
+        "photo_action": photo_action,
+        "photo_sha256": hashlib.sha256(str(photo_data).encode("utf-8")).hexdigest() if photo_data else "",
+    })
+
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        task = await (await db.execute("SELECT * FROM tasks WHERE id=?", (tid,))).fetchone()
+        if not task:
+            return _json({"error": "not_found", "message": "Задание не найдено."}, status=404)
+        if task["edit_operation_id"] == operation_id:
+            if task["edit_request_hash"] != request_hash:
+                return _json({"error": "operation_conflict"}, status=409)
+            delivery = await (await db.execute(
+                "SELECT status FROM task_outbox WHERE event_key=?",
+                (f"task:{tid}:announcement",),
+            )).fetchone()
+            return _json({
+                "ok": True, "task_id": tid, "idempotent": True,
+                "announcement_status": delivery[0] if delivery else "not_requested",
+            })
+        if task["status"] != "open":
+            return _json({
+                "error": "not_editable",
+                "message": "Задание уже взяли или закрыли. Его можно удалить и создать заново.",
+            }, status=409)
+        active = await (await db.execute(
+            "SELECT 1 FROM task_assignments WHERE task_id=? "
+            "AND status IN ('claimed','review','done') LIMIT 1", (tid,),
+        )).fetchone()
+        if active:
+            return _json({
+                "error": "already_claimed",
+                "message": "Задание уже видел исполнитель. Удали его и создай новое с правильными условиями.",
+            }, status=409)
+        delivery = await (await db.execute(
+            "SELECT status FROM task_outbox WHERE event_key=?",
+            (f"task:{tid}:announcement",),
+        )).fetchone()
+        if delivery and delivery[0] == "sending":
+            return _json({
+                "error": "delivery_busy",
+                "message": "Карточка ещё отправляется в Telegram. Подожди несколько секунд и повтори.",
+            }, status=409)
+        has_existing_photo = bool(task["photo_media_id"] or task["photo_file"])
+    if evidence_policy == "before_after" and (
+        photo_action == "remove" or (photo_action == "keep" and not has_existing_photo)
+    ):
+        return _json({
+            "error": "brief_required",
+            "message": "Для отчёта «до и после» нужна исходная фотография.",
+        }, status=400)
+    if assigned_to is not None:
+        assignee = await get_member(assigned_to)
+        if not assignee or assignee["status"] != "approved" or assignee["role"] not in (
+            "helper", "employee", "admin",
+        ):
+            return _json({"error": "assignee", "message": "Сотрудник сейчас недоступен."}, status=400)
+        if _city_key(assignee.get("city")) != _city_key(city):
+            return _json({"error": "assignee_city", "message": "Город сотрудника не совпадает с заданием."}, status=400)
+
+    new_image = None
+    old_local_image = None
+    if photo_action == "replace":
+        try:
+            new_image = await _save_image(
+                photo_data, purpose="task_brief",
+                upload_operation_id=f"task-edit:{operation_id}:brief",
+                request_hash=request_hash, admin_id=admin_id,
+                required_capability="task.create",
+            )
+        except PermissionError:
+            return _json({"error": "admin_revoked"}, status=403)
+        except ValueError as exc:
+            return _json({"error": "photo", "message": str(exc)}, status=400)
+
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if not await _has_capability_in_tx(db, admin_id, "task.create"):
+                await db.rollback()
+                if new_image:
+                    await _remove_saved_images([new_image])
+                return _json({"error": "admin_revoked"}, status=403)
+            task = await (await db.execute("SELECT * FROM tasks WHERE id=?", (tid,))).fetchone()
+            if not task or task["status"] != "open":
+                await db.rollback()
+                if new_image:
+                    await _remove_saved_images([new_image])
+                return _json({"error": "not_editable", "message": "Задание уже изменило состояние."}, status=409)
+            if task["edit_operation_id"] == operation_id:
+                exact = task["edit_request_hash"] == request_hash
+                await db.rollback()
+                if new_image:
+                    await _remove_saved_images([new_image])
+                return _json({"ok": True, "task_id": tid, "idempotent": True}) if exact else _json({"error": "operation_conflict"}, status=409)
+            active = await (await db.execute(
+                "SELECT 1 FROM task_assignments WHERE task_id=? "
+                "AND status IN ('claimed','review','done') LIMIT 1", (tid,),
+            )).fetchone()
+            if active or not await _claim_operation_in_tx(
+                db, operation_id, "task_edit", request_hash, admin_id,
+            ):
+                await db.rollback()
+                if new_image:
+                    await _remove_saved_images([new_image])
+                return _json({"error": "transition_conflict", "message": "Задание уже взяли или изменили. Обнови список."}, status=409)
+
+            old_media_id = task["photo_media_id"]
+            old_photo_file = task["photo_file"]
+            photo_file = task["photo_file"]
+            photo_media_id = old_media_id
+            if new_image:
+                claimed = await db.execute(
+                    "UPDATE media_objects SET delete_after=NULL WHERE id=? AND state='ready'",
+                    (new_image["media_id"],),
+                )
+                if claimed.rowcount != 1:
+                    await db.rollback()
+                    await _remove_saved_images([new_image])
+                    return _json({"error": "media_not_ready"}, status=409)
+                photo_file, photo_media_id = new_image["photo_file"], new_image["media_id"]
+            elif photo_action == "remove":
+                photo_file, photo_media_id = None, None
+
+            await db.execute(
+                "UPDATE tasks SET type=?,title=?,details=?,address=?,city=?,reward=?,"
+                "assigned_to=?,slot_start=?,slot_end=?,repeatable=?,evidence_policy=?,"
+                "max_participants=?,budget_cap=?,photo_file=?,photo_media_id=?,"
+                "edit_operation_id=?,edit_request_hash=?,version=version+1 WHERE id=?",
+                (
+                    ttype, title, details, address, city, reward, assigned_to,
+                    slot_start, slot_end, int(repeatable), evidence_policy,
+                    max_participants, budget_cap, photo_file, photo_media_id,
+                    operation_id, request_hash, tid,
+                ),
+            )
+            if photo_action in {"replace", "remove"}:
+                await db.execute(
+                    "DELETE FROM task_evidence WHERE task_id=? AND kind='brief'", (tid,),
+                )
+                if new_image:
+                    await db.execute(
+                        "INSERT INTO task_evidence "
+                        "(assignment_id,task_id,user_id,kind,photo_file,media_id,sha256,created_at) "
+                        "VALUES (NULL,?,?,'brief',?,?,?,?)",
+                        (
+                            tid, admin_id, new_image["photo_file"], new_image["media_id"],
+                            new_image["sha256"], now_iso(),
+                        ),
+                    )
+                if old_media_id and old_media_id != photo_media_id:
+                    await db.execute(
+                        "UPDATE media_objects SET delete_after=COALESCE(delete_after,?) WHERE id=?",
+                        ((datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(), old_media_id),
+                    )
+                elif old_photo_file and not old_media_id and old_photo_file != photo_file:
+                    old_local_image = old_photo_file
+
+            announcement = await (await db.execute(
+                "SELECT * FROM task_outbox WHERE event_key=? AND event_type='group_task'",
+                (f"task:{tid}:announcement",),
+            )).fetchone()
+            if announcement and announcement["telegram_message_id"] and announcement["chat_id"]:
+                await _enqueue_outbox_in_tx(
+                    db, f"task:{tid}:announcement:delete:{operation_id}",
+                    "group_task_delete",
+                    {"message_id": int(announcement["telegram_message_id"])},
+                    chat_id=announcement["chat_id"],
+                )
+            target = GROUP_ID or (f"@{GROUP_USERNAME}" if GROUP_USERNAME else None)
+            announcement_status = "not_requested"
+            if announce and target:
+                payload = {
+                    "text": _work_task_announcement({
+                        "type": ttype, "title": title, "city": city, "reward": reward,
+                        "repeatable": repeatable, "slot_start": slot_start, "slot_end": slot_end,
+                    }),
+                    "start": f"task_{tid}", "photo_file": None, "media_id": None,
+                    "task_id": tid, "admin_id": admin_id, "operation_id": operation_id,
+                }
+                if announcement:
+                    await db.execute(
+                        "UPDATE task_outbox SET chat_id=?,topic_id=?,media_id=NULL,payload_json=?,"
+                        "status='pending',attempts=0,available_at=?,sent_at=NULL,"
+                        "telegram_message_id=NULL,telegram_thread_id=NULL,last_error=NULL "
+                        "WHERE id=?",
+                        (
+                            str(target), TOPIC_WORK,
+                            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                            now_iso(), announcement["id"],
+                        ),
+                    )
+                else:
+                    await _enqueue_outbox_in_tx(
+                        db, f"task:{tid}:announcement", "group_task", payload,
+                        chat_id=target, topic_id=TOPIC_WORK,
+                    )
+                announcement_status = "queued"
+            elif announce:
+                announcement_status = "not_configured"
+            elif announcement:
+                await db.execute(
+                    "UPDATE task_outbox SET status='cancelled',payload_json=?,media_id=NULL,"
+                    "telegram_message_id=NULL,telegram_thread_id=NULL,last_error=NULL WHERE id=?",
+                    ('{"cancelled":true}', announcement["id"]),
+                )
+            if announce:
+                await _enqueue_city_workers_in_tx(
+                    db, f"task:{tid}:edited:{operation_id}", city,
+                    f"✏️ Задание в городе {city} обновлено\n{title}\n"
+                    f"Награда: {reward} бибибонусов",
+                    tid,
+                )
+            if assigned_to is not None:
+                await _enqueue_outbox_in_tx(
+                    db, f"task:{tid}:edited:user:{assigned_to}:{operation_id}", "direct",
+                    {"text": f"Задание #{tid} обновлено: {title}", "start": f"task_{tid}"},
+                    recipient_id=assigned_to,
+                )
+            await _track_event_in_tx(
+                db, "task_edited", "backend", user_id=admin_id, task_id=tid,
+                properties={"task_type": ttype, "repeatable": repeatable},
+                dedupe_key=f"task_edit:{operation_id}",
+            )
+            await db.commit()
+    except Exception:
+        if new_image:
+            await _remove_saved_images([new_image])
+        raise
+    if old_local_image:
+        await _remove_saved_images([old_local_image])
+    return _json({
+        "ok": True, "task_id": tid, "idempotent": False,
+        "announcement_status": announcement_status,
     })
 
 
@@ -13386,6 +13771,7 @@ async def rate_limit_middleware(request, handler):
 _HEAVY_API_PATHS = frozenset({
     "/api/tasks/complete",
     "/api/admin/task/create",
+    "/api/admin/task/update",
     "/api/admin/task-templates",
 })
 _TASK_TEMPLATE_VERSION_WRITE_RE = re.compile(
@@ -13475,6 +13861,7 @@ async def start_api_server():
         )
         app.router.add_post("/api/admin/decide", api_admin_decide)
         app.router.add_post("/api/admin/task/create", api_admin_task_create)
+        app.router.add_post("/api/admin/task/update", api_admin_task_update)
         app.router.add_get(
             "/api/admin/task-templates", api_admin_task_templates_list,
         )

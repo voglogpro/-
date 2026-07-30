@@ -29,9 +29,7 @@ RUN pip install --no-cache-dir --require-hashes --requirement requirements.lock
 COPY main.py index.html privacy.html logo.jpg ./
 COPY scripts/backup.py scripts/backup_crypto.py scripts/backup_scheduler.py scripts/deployment_guard.py scripts/pilot_monitor.py \
     scripts/pilot_monitor_launcher.py scripts/restore.py scripts/secret_recovery_evidence.py \
-    scripts/recovery_key_canary.py \
-    scripts/bootstrap_loadtest_env.py scripts/bootstrap_production_env.py \
-    scripts/loadtest_host_preflight.py scripts/pilot_load_test.py \
+    scripts/recovery_key_canary.py scripts/bootstrap_production_env.py \
     scripts/telegram_inventory.py \
     scripts/telegram_join_request_link.py scripts/telegram_preflight.py \
     scripts/telegram_staging_cleanup.py \

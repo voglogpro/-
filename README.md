@@ -3,13 +3,11 @@
 Один документ про компанию, про автора и про всё, что мы собрали:
 Telegram-бота, Mini App и группу с подтемами.
 
-Обновлено: 28 июля 2026 · текущий кандидат **v2.10.0** · последний проверенный
+Обновлено: 30 июля 2026 · текущая версия **v2.11.0** · последний проверенный
 release image **v2.9.1**
 
 Технический запуск, переменные окружения и release-процесс описаны в
 [`docs/TECHNICAL-README.md`](docs/TECHNICAL-README.md).
-Пороговый staging-тест наплыва пользователей и его критерии — в
-[`docs/PILOT-CAPACITY.md`](docs/PILOT-CAPACITY.md).
 
 Пошаговый production-запуск для владельца: от VPS и домена до Telegram и
 результата LIVE PASS/FAIL и terminal deployment NO-GO — в
@@ -264,8 +262,8 @@ Telegram-бот @BbGalterbot
 - Экранирование всего пользовательского ввода на фронтенде и в HTML
   сообщений бота
 - Уведомления уходят в фоне и не задерживают ответ
-- Приватная OPS-группа отделена от публичного сообщества: адреса и фотографии
-  заданий не публикуются наружу
+- В теме «Работа» публикуется безопасный анонс без точного адреса и фотографии;
+  полная карточка доступна только одобренному участнику в Mini App
 - Зашифрованные Telegram inbox и платёжные реквизиты, durable outbox, audit trail
 - Резервное копирование с [AES-256-GCM и versioned key](docs/BACKUP-ENCRYPTION.md), restore rehearsal и immutable release images
 - Двухфазный [release candidate / final gate](docs/RELEASE-GATE-V3.md) связывает
@@ -274,14 +272,11 @@ Telegram-бот @BbGalterbot
   пока нет реального custodian quorum, single-use challenge ledger и
   проверяющего подпись deployment controller.
 
-### Тесты
+### Быстрая проверка
 
-**282 автоматические проверки** в локальном прогоне: 272 PASS и 10 ожидаемых
-environment-specific SKIP (POSIX/Docker/PostgreSQL интеграции выполняет CI):
-
-- **235** — backend, bootstrap/preflight, безопасность, идемпотентность, backup/restore
-- **7** — точность PostgreSQL migration harness
-- **40** — интерфейс Mini App в Playwright
+GitHub проверяет синтаксис Python за несколько секунд. Тяжёлые тестовые стенды
+и браузерная обвязка удалены из рабочей ветки, чтобы не мешать ежедневной
+разработке и публикации на BotHost.
 
 ---
 
@@ -327,6 +322,7 @@ production `python scripts/telegram_preflight.py` и
 | v2.9.0 | профессиональный pilot-контур: приватный OPS, фото и шаблоны, поиск и теги, payout lease, durable Telegram ingress/outbox, backup/restore, CI и миграционный harness PostgreSQL |
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
 | v2.10.0 candidate | анкета без телефона, capability RBAC с preset-ролями и maker-checker, versioned task templates и двухэтапные отмены наград с immutable audit, управляемые Telegram join requests, bounded API/media/Telegram admission, автоматизированный staging load gate, обязательная privacy policy, schema 300, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
+| v2.11.0 | публикация заданий в теме «Работа», личные уведомления по городу, редактирование и удаление открытых заданий, свободно изменяемые поля после применения шаблона, облегчённый GitHub |
 
 ---
 

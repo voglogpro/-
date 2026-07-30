@@ -831,7 +831,12 @@ select.tinput{appearance:none;background-image:
         <button data-taskmode="taskTemplateMode" data-cap-any="task.template.manage" aria-pressed="false">Шаблоны</button>
       </div>
       <div id="taskCreateMode">
-      <div class="eyebrow"><b></b>Новое задание · <span id="ntStepLabel">шаг 1 из 3</span></div>
+      <div class="eyebrow"><b></b><span id="ntFormKind">Новое задание</span> · <span id="ntStepLabel">шаг 1 из 3</span></div>
+      <div class="notice hidden" id="ntEditBanner" role="status">
+        <b id="ntEditTitle">Редактирование задания</b><br>
+        Изменять можно только открытое задание, которое ещё никто не взял.
+        <div class="acts"><button class="mini" id="ntEditCancel" type="button">Отменить редактирование</button></div>
+      </div>
       <div class="wizard-progress" aria-hidden="true"><i class="on"></i><i></i><i></i></div>
 
       <div class="wizard-step" data-wstep="1">
@@ -840,7 +845,7 @@ select.tinput{appearance:none;background-image:
         <div class="field"><label for="ntTemplate">Шаблон задания</label>
           <select class="tinput" id="ntTemplate"></select></div>
         <div class="notice hidden" id="ntTemplateLockHint" role="status">
-          Тип, текст, награда и правила отчёта заданы версией шаблона. Чтобы изменить их, выбери «Без шаблона».
+          Шаблон заполнил поля. Любое значение ниже можно изменить для этого задания.
         </div>
         <div class="notice hidden" id="ntTemplateRecovery" role="alert" tabindex="-1">
           <div id="ntTemplateRecoveryText"></div>
@@ -2800,9 +2805,9 @@ async function loadAdmin(){
     const op = d.open_tasks || [];
     const announcementState=t=>{
       const s=t.announcement_status;
-      if(s==='sent') return '<span class="pill on">OPS: доставлено</span>';
-      if(s==='pending'||s==='sending') return '<span class="pill hot">OPS: в очереди</span>';
-      if(s==='dead') return '<span class="pill warn">OPS: ошибка доставки</span>';
+      if(s==='sent') return '<span class="pill on">Работа: опубликовано</span>';
+      if(s==='pending'||s==='sending') return '<span class="pill hot">Работа: отправляется</span>';
+      if(s==='dead') return '<span class="pill warn">Работа: ошибка доставки</span>';
       return '';
     };
     $('adOpenCnt').textContent = op.length || '';
@@ -2811,9 +2816,10 @@ async function loadAdmin(){
       '<div class="meta"><span class="pill '+(t.status==='claimed'?'hot':'on')+'">'+
       (t.status==='claimed'?'Взято':'Открыто')+'</span>'+
       (t.assigned_name?'<span class="pill">'+esc(t.assigned_name)+'</span>':'')+announcementState(t)+
-      '</div><div class="acts">'+(t.announcement_url&&hasCap('task.delivery.view')?'<button class="mini" data-topen="'+esc(t.announcement_url)+'">Открыть сообщение в OPS</button>':'')+
-      (t.announcement_status==='dead'&&hasCap('telegram.publication.manage')?'<button class="mini" data-tretry="'+t.id+'">Повторить доставку в OPS</button>':'')+
-      (hasCap('task.cancel')?'<button class="mini warn" data-tcancel="'+t.id+'">Отменить задание</button>':'')+'</div></div>').join('')
+      '</div><div class="acts">'+(t.announcement_url&&hasCap('task.delivery.view')?'<button class="mini" data-topen="'+esc(t.announcement_url)+'">Открыть в теме «Работа»</button>':'')+
+      (t.announcement_status==='dead'&&hasCap('task.delivery.retry')?'<button class="mini" data-tretry="'+t.id+'">Повторить публикацию</button>':'')+
+      (hasCap('task.create')&&t.task_status==='open'?'<button class="mini" data-tedit="'+t.id+'">Редактировать</button>':'')+
+      (hasCap('task.cancel')?'<button class="mini warn" data-tcancel="'+t.id+'">Удалить задание</button>':'')+'</div></div>').join('')
       : '<div class="empty">Активных заданий нет. Создай первое на вкладке «Задание».</div>';
 
     const decisions=d.recent_decisions||[];
@@ -3042,17 +3048,17 @@ function bindAdmin(){
   document.querySelectorAll('[data-topen]').forEach(b=>{
     b.onclick=()=>{
       const url=b.dataset.topen;
-      if(!/^https:\/\/t\.me\//.test(url||'')){ toast('Ссылка OPS недоступна.'); return; }
+      if(!/^https:\/\/t\.me\//.test(url||'')){ toast('Ссылка на тему «Работа» недоступна.'); return; }
       buzz('tap');
       try{ tg&&tg.openTelegramLink?tg.openTelegramLink(url):window.open(url,'_blank','noopener'); }
-      catch(e){ toast('Не удалось открыть сообщение OPS.'); }
+      catch(e){ toast('Не удалось открыть сообщение в теме «Работа».'); }
     };
   });
   document.querySelectorAll('[data-tretry]').forEach(b=>{
     b.onclick=()=>press(b,'…',async()=>{
       await api('/api/admin/task/announcement/retry',{method:'POST',body:JSON.stringify({
         task_id:Number(b.dataset.tretry),operation_id:newOperationId()})});
-      toast('Объявление возвращено в очередь OPS.'); await loadAdmin();
+      toast('Объявление снова отправляется в тему «Работа».'); await loadAdmin();
     });
   });
   document.querySelectorAll('[data-whandoff]').forEach(b=>{
@@ -3165,21 +3171,25 @@ function bindAdmin(){
     b.onclick=async()=>{
       const taskId=Number(b.dataset.tcancel), previous=CANCEL_OPERATIONS.get(taskId);
       const reason=await askText({
-        title:'Отменить задание?',
-        lead:'Новые участники не смогут его взять, а исполнители получат уведомление.',
+        title:'Удалить задание?',
+        lead:'Задание исчезнет из списка, а его карточка будет удалена из темы «Работа». Исполнители получат уведомление.',
         placeholder:'Например: парковка уже исправлена',
-        value:previous?previous.reason:'', okLabel:'Отменить задание'});
+        value:previous?previous.reason:'Удалено ответственным', required:true,
+        okLabel:'Удалить задание'});
       if(reason===null) return;
       const operation=previous&&previous.reason===reason
         ? previous : {id:newOperationId(),reason:reason};
       CANCEL_OPERATIONS.set(taskId,operation);
-      press(b,'Отменяю…',async()=>{
+      press(b,'Удаляю…',async()=>{
         await api('/api/admin/task/cancel',{method:'POST',body:JSON.stringify({
           task_id:taskId,reason:reason,operation_id:operation.id})});
-        CANCEL_OPERATIONS.delete(taskId); buzz('ok'); toast('Задание отменено.');
+        CANCEL_OPERATIONS.delete(taskId); buzz('ok'); toast('Задание удалено.');
         await loadAdmin();
       });
     };
+  });
+  document.querySelectorAll('[data-tedit]').forEach(b=>{
+    b.onclick=()=>startTaskEdit(Number(b.dataset.tedit));
   });
   document.querySelectorAll('[data-wok]').forEach(b=>{
     b.onclick = async ()=>{
@@ -3646,6 +3656,7 @@ $('tplSearch').oninput=renderTemplateLibrary;
 /* ── применение шаблона и фотография задания ─────────────── */
 let TASK_PHOTO_DATA = '';
 let TASK_TEMPLATE_CONTEXT={id:null,versionId:null,photoAction:'remove',photoUrl:''};
+let TASK_EDIT_ID=null, TASK_EDIT_PHOTO_ACTION='keep', TASK_EDIT_EXISTING_PHOTO_URL='';
 let TASK_TEMPLATE_APPLY_SEQUENCE=0, TASK_TEMPLATE_RECOVERY_ID=null, TASK_TEMPLATE_RECOVERY_CODE='';
 const TASK_TEMPLATE_AUTHORITATIVE_FIELDS=[
   'ntType','ntTitle','ntDetails','ntReward','ntMode','ntEvidence','ntMaxParticipants','ntBudgetCap'
@@ -3653,7 +3664,7 @@ const TASK_TEMPLATE_AUTHORITATIVE_FIELDS=[
 function setTaskTemplateLocked(locked){
   TASK_TEMPLATE_AUTHORITATIVE_FIELDS.forEach(id=>{
     const field=$(id); if(!field) return;
-    field.disabled=Boolean(locked);
+    field.disabled=false;
     const described=new Set((field.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
     if(locked) described.add('ntTemplateLockHint'); else described.delete('ntTemplateLockHint');
     if(described.size) field.setAttribute('aria-describedby',Array.from(described).join(' '));
@@ -3725,9 +3736,9 @@ async function applyTaskTemplateItem(source,quiet,options){
   $('ntTemplate').value=templateIdentity(source); $('ntTemplate').dataset.lastValue=templateIdentity(source);
   updateTaskMode();
   updateEvidenceUI();
-  setTaskTemplateLocked(true); hideTaskTemplateRecovery();
+  setTaskTemplateLocked(false); hideTaskTemplateRecovery();
   $('ntReward').dispatchEvent(new Event('input'));
-  if(!quiet){ buzz('ok'); toast('Шаблон применён. Основные поля защищены версией шаблона.'); }
+  if(!quiet){ buzz('ok'); toast('Шаблон применён. Все поля можно изменить перед публикацией.'); }
   return true;
 }
 async function applyTaskTemplate(quiet){
@@ -3755,6 +3766,7 @@ $('ntTemplateReapply').onclick=async()=>{
 
 function clearTaskPhoto(){
   TASK_PHOTO_DATA='';
+  if(TASK_EDIT_ID){ TASK_EDIT_PHOTO_ACTION='remove'; TASK_EDIT_EXISTING_PHOTO_URL=''; }
   if(TASK_TEMPLATE_CONTEXT.id){ TASK_TEMPLATE_CONTEXT.photoAction='remove'; TASK_TEMPLATE_CONTEXT.photoUrl=''; }
   resetTaskPhotoView();
 }
@@ -3767,6 +3779,7 @@ $('ntPhoto').onchange = async ()=>{
   $('ntPhotoText').textContent = 'Обрабатываю фотографию…';
   try{
     TASK_PHOTO_DATA = await compressTaskPhoto(file);
+    if(TASK_EDIT_ID) TASK_EDIT_PHOTO_ACTION='replace';
     if(TASK_TEMPLATE_CONTEXT.id) TASK_TEMPLATE_CONTEXT.photoAction='replace';
     $('ntPhotoPreview').src = TASK_PHOTO_DATA;
     $('ntPhotoPreview').classList.remove('hidden');
@@ -3802,6 +3815,62 @@ function persistedTaskCreateOperation(body){
 function clearTaskCreateOperation(){
   try{ sessionStorage.removeItem(TASK_CREATE_STORAGE_KEY); }catch(e){}
 }
+function taskDateInput(value){
+  if(!value) return '';
+  const date=new Date(value);
+  if(Number.isNaN(date.getTime())) return '';
+  return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+}
+function resetTaskEditState(clearValues){
+  TASK_EDIT_ID=null; TASK_EDIT_PHOTO_ACTION='keep'; TASK_EDIT_EXISTING_PHOTO_URL='';
+  $('ntEditBanner').classList.add('hidden'); $('ntFormKind').textContent='Новое задание';
+  $('ntTemplate').disabled=false; $('ntPhoto').disabled=false;
+  if(clearValues){
+    ['ntTitle','ntDetails','ntAddr','ntReward','ntBudgetCap','ntSlotStart','ntSlotEnd']
+      .forEach(id=>$(id).value='');
+    $('ntMode').value='open'; $('ntMaxParticipants').value='1';
+    TASK_PHOTO_DATA=''; resetTaskPhotoView(); updateTaskMode();
+  }
+}
+async function startTaskEdit(taskId){
+  const task=((ADMIN&&ADMIN.open_tasks)||[]).find(item=>Number(item.id)===Number(taskId));
+  if(!task){ toast('Задание не найдено. Обнови список.'); return; }
+  if(task.task_status!=='open'||['claimed','review','done'].includes(task.assignment_status||'')){
+    toast('Редактировать можно только задание, которое ещё никто не взял.'); return;
+  }
+  detachTaskTemplate(); resetTaskEditState(true);
+  TASK_EDIT_ID=Number(task.id); TASK_EDIT_PHOTO_ACTION='keep';
+  TASK_EDIT_EXISTING_PHOTO_URL=task.photo_url||'';
+  $('ntFormKind').textContent='Редактирование';
+  $('ntEditTitle').textContent='Задание #'+task.id+' — '+(task.title||'без названия');
+  $('ntEditBanner').classList.remove('hidden'); $('ntTemplate').disabled=true;
+  $('ntType').value=task.type||'fix_zone'; $('ntTitle').value=task.title||'';
+  $('ntDetails').value=task.details||''; $('ntCity').value=task.city||'';
+  $('ntAddr').value=task.address||''; $('ntReward').value=task.reward||'';
+  $('ntMode').value=task.assigned_to?'personal':(task.repeatable?'all':'open');
+  updateTaskMode();
+  $('ntEvidence').value=task.evidence_policy||'after_required';
+  $('ntMaxParticipants').value=task.max_participants||1;
+  $('ntBudgetCap').value=task.budget_cap||task.reward||'';
+  $('ntSlotStart').value=taskDateInput(task.slot_start);
+  $('ntSlotEnd').value=taskDateInput(task.slot_end);
+  if(task.assigned_to){
+    await loadAssigneeOptions('');
+    $('ntAssignee').value=String(task.assigned_to);
+  }
+  TASK_PHOTO_DATA=''; resetTaskPhotoView();
+  if(TASK_EDIT_EXISTING_PHOTO_URL){
+    $('ntPhotoPreview').src=TASK_EDIT_EXISTING_PHOTO_URL;
+    $('ntPhotoPreview').classList.remove('hidden'); $('ntPhotoClear').classList.remove('hidden');
+    $('ntPhotoText').innerHTML='<b>Текущее фото</b><br>Нажми, чтобы заменить для этого задания';
+  }
+  $('ntAnnounce').classList.add('on'); $('ntAnnounce').setAttribute('aria-checked','true');
+  updateEvidenceUI(); $('ntReward').dispatchEvent(new Event('input'));
+  activateAdminSubsection(document.querySelector('[data-asub="adSubCreate"]'),false);
+  activateTaskMode(document.querySelector('[data-taskmode="taskCreateMode"]'),false);
+  setWizardStep(1,false); window.scrollTo(0,0); $('ntTitle').focus();
+}
+$('ntEditCancel').onclick=()=>{ resetTaskEditState(true); setWizardStep(1,false); toast('Редактирование отменено.'); };
 function setWizardStep(step,focusHeading){
   TASK_WIZARD_STEP=Math.max(1,Math.min(3,Number(step)||1));
   document.querySelectorAll('.wizard-step').forEach(x=>x.classList.toggle('hidden',Number(x.dataset.wstep)!==TASK_WIZARD_STEP));
@@ -3835,6 +3904,7 @@ function collectTaskBody(){
     : 1;
   const reward=Number(($('ntReward').value||'').replace(/\D/g,''))||0;
   return {
+    task_id: TASK_EDIT_ID || undefined,
     type: $('ntType').value,
     title: $('ntTitle').value.trim(),
     details: $('ntDetails').value.trim(),
@@ -3845,6 +3915,7 @@ function collectTaskBody(){
     announce: mode!=='personal' && $('ntAnnounce').classList.contains('on'),
     assigned_to: mode==='personal' ? ($('ntAssignee').value||null) : null,
     photo_data: TASK_PHOTO_DATA || null,
+    photo_action: TASK_EDIT_ID ? TASK_EDIT_PHOTO_ACTION : undefined,
     template_id: TASK_TEMPLATE_CONTEXT.id,
     template_version_id: TASK_TEMPLATE_CONTEXT.versionId,
     template_photo_action: TASK_TEMPLATE_CONTEXT.id
@@ -3863,7 +3934,9 @@ function taskValidation(body,step){
   if(step>=2&&body.city.length<2) return {field:'ntCity',message:'Укажи город задания.'};
   if(step>=2&&body.address.length<3) return {field:'ntAddr',message:'Укажи адрес или ориентир.'};
   if(step>=2&&$('ntMode').value==='personal'&&!body.assigned_to) return {field:'ntAssignee',message:'Выбери сотрудника.'};
-  const hasBriefPhoto=Boolean(body.photo_data||(TASK_TEMPLATE_CONTEXT.photoAction==='inherit'&&TASK_TEMPLATE_CONTEXT.photoUrl));
+  const hasBriefPhoto=Boolean(body.photo_data||
+    (TASK_EDIT_ID&&TASK_EDIT_PHOTO_ACTION==='keep'&&TASK_EDIT_EXISTING_PHOTO_URL)||
+    (TASK_TEMPLATE_CONTEXT.photoAction==='inherit'&&TASK_TEMPLATE_CONTEXT.photoUrl));
   if(step>=2&&body.evidence_policy==='before_and_after_required'&&!hasBriefPhoto){
     return {field:'ntPhoto',message:'Для отчёта «до и после» добавь исходную фотографию.'};
   }
@@ -3882,14 +3955,14 @@ function openTaskPreview(body){
     ($('ntMode').value==='all'?'Каждый участник':'Первый свободный участник');
   $('taskPreviewBody').innerHTML=
     '<div class="preview-block"><b>'+esc(body.title)+'</b><span class="ty">'+esc(body.details||'Без дополнительного описания')+'</span></div>'+
-    ((body.photo_data||TASK_TEMPLATE_CONTEXT.photoUrl)?'<img class="task-photo" src="'+esc(body.photo_data||TASK_TEMPLATE_CONTEXT.photoUrl)+'" alt="Исходное фото задания">':'')+
+    ((body.photo_data||TASK_EDIT_EXISTING_PHOTO_URL||TASK_TEMPLATE_CONTEXT.photoUrl)?'<img class="task-photo" src="'+esc(body.photo_data||TASK_EDIT_EXISTING_PHOTO_URL||TASK_TEMPLATE_CONTEXT.photoUrl)+'" alt="Исходное фото задания">':'')+
     '<div class="preview-block"><b>📍 '+esc(body.city)+' · '+esc(body.address)+'</b><span class="ty">'+esc(assignee)+'</span></div>'+
     '<div class="preview-block"><b>+'+body.reward+'⚡ одному · лимит '+body.budget_cap+'⚡</b><span class="ty">'+
       body.max_participants+' '+plural(body.max_participants,'исполнитель','исполнителя','исполнителей')+' · '+esc(evidence)+'</span></div>'+
-    '<div class="notice"><b>'+(body.announce?'Будет поставлено в очередь приватной OPS-группы':'Только в приложении')+'</b><br>'+
+    '<div class="notice"><b>'+(body.announce?'Будет опубликовано в теме «Работа»':'Только в приложении')+'</b><br>'+
       (body.slot_start?esc(fmtSlot(body.slot_start,body.slot_end)):'Без ограничения по времени')+'</div>';
   TASK_PREVIEW_BODY=body; TASK_DRAFT_OPERATION_ID=persistedTaskCreateOperation(body);
-  $('ntPublish').textContent=$('ntMode').value==='personal'?'Назначить':'Опубликовать';
+  $('ntPublish').textContent=TASK_EDIT_ID?'Сохранить изменения':($('ntMode').value==='personal'?'Назначить':'Опубликовать');
   $('taskPreviewSheet').classList.remove('hidden');
 }
 $('ntBack').onclick=()=>setWizardStep(TASK_WIZARD_STEP-1);
@@ -3939,9 +4012,10 @@ $('ntPublish').onclick=()=>{
   if(!TASK_PREVIEW_BODY) return;
   const body=Object.assign({},TASK_PREVIEW_BODY,{operation_id:TASK_DRAFT_OPERATION_ID||newOperationId()});
   const mode=$('ntMode').value;
-  press($('ntPublish'),mode==='personal'?'Назначаю…':'Публикую…', async ()=>{
+  const editing=Boolean(TASK_EDIT_ID);
+  press($('ntPublish'),editing?'Сохраняю…':(mode==='personal'?'Назначаю…':'Публикую…'), async ()=>{
     let d;
-    try{ d=await api('/api/admin/task/create',{method:'POST',body:JSON.stringify(body)}); }
+    try{ d=await api(editing?'/api/admin/task/update':'/api/admin/task/create',{method:'POST',body:JSON.stringify(body)}); }
     catch(e){
       const code=e.data&&e.data.error;
       if(e.status===409&&['template_archived','template_version_stale','template_state_changed'].includes(code)){
@@ -3958,15 +4032,20 @@ $('ntPublish').onclick=()=>{
     TASK_TEMPLATE_CONTEXT={id:null,versionId:null,photoAction:'remove',photoUrl:''};
     $('ntTemplate').value=''; $('ntTemplate').dataset.lastValue='';
     setTaskTemplateLocked(false); hideTaskTemplateRecovery();
+    resetTaskEditState(false);
     clearTaskCreateOperation();
     TASK_PREVIEW_BODY=null; TASK_DRAFT_OPERATION_ID=null;
     $('taskPreviewSheet').classList.add('hidden'); setWizardStep(1,false);
     $('ntRewardHint').textContent = 'Укажи награду — покажем эквивалент в минутах.';
     if(body.announce && d.announcement_status==='not_configured'){
-      toast('Задание создано, но приватная OPS-группа не настроена.');
+      toast((editing?'Изменения сохранены':'Задание создано')+', но группа или тема «Работа» не настроена.');
+    }else if(editing){
+      toast(d.announcement_status==='queued'
+        ? 'Изменения сохранены. Карточка в теме «Работа» обновляется.'
+        : 'Изменения задания сохранены.');
     }else{
       toast(mode==='personal' ? 'Задание назначено и отправлено сотруднику.' :
-        (d.announcement_status==='queued' ? 'Задание создано. Объявление поставлено в очередь OPS.' : 'Задание опубликовано.'));
+        (d.announcement_status==='queued' ? 'Задание создано. Объявление отправляется в тему «Работа».' : 'Задание опубликовано.'));
     }
     document.querySelector('[data-asub="adSubQueue"]').click();
     await loadAdmin();

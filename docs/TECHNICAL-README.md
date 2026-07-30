@@ -19,12 +19,13 @@ backup, реальные Telegram group/topic ID, профиль бота и liv
 - фото задачи и фотоотчёт исполнителя;
 - отказ исполнителя, отмена ответственным и автоматическое истечение срока;
 - проверка результата ответственным;
-- ссылка из карточки скаута на фактически доставленное OPS-объявление;
+- ссылка из карточки скаута на фактически доставленное объявление в теме «Работа»;
 - журнал начислений и зашифрованные заявки на перевод бонусов;
 - кассир выплаты, серверный lease countdown и безопасная передача следующей смене;
 - долговечная очередь Telegram-уведомлений и обезличенная продуктовая воронка;
-- связь с публичной группой `@bbbikefan`, ботом `@BbGalterbot`, Mini App
-  `bibibike` и отдельной приватной OPS-supergroup для адресов и фотографий;
+- связь с публичной группой `@bbbikefan`, ботом `@BbGalterbot` и Mini App
+  `bibibike`; точный адрес и фотография задания показываются только одобренным
+  участникам внутри Mini App;
 - светлая, тёмная и системная тема Telegram.
 
 ## Локальный запуск
@@ -150,5 +151,5 @@ Webhook сначала сохраняет update в `telegram_update_inbox`, о�
 Целевая production-архитектура и план миграции описаны в [ADR-001](ADR-001-professional-architecture.md). Telegram-настройка — в [чек-листе интеграции](TELEGRAM-INTEGRATION.md), а безопасное создание и проверка ссылки на вступление — в [операторском регламенте](JOIN-REQUEST-OPERATIONS.md).
 План безопасного удаления профиля находится в [IDENTITY-ERASURE-MIGRATION.md](IDENTITY-ERASURE-MIGRATION.md); self-service erasure пока не реализован и остаётся блокирующим gate.
 Ежедневные действия и правила пилота — в [операционном регламенте](PILOT-OPERATIONS.md).
-Изолированная репетиция PostgreSQL — в [migration harness](POSTGRES-MIGRATION-HARNESS.md); рабочий `main.py` пока остаётся SQLite-only.
+Рабочий `main.py` сейчас использует SQLite; файлы будущей PostgreSQL-миграции сохранены отдельно в `migrations/`.
 Immutable image, backup cadence и безопасный rollback пилота — в [release/recovery runbook](RELEASE-AND-RECOVERY.md).
