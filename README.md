@@ -244,6 +244,7 @@ Telegram-бот @BbGalterbot
 | Контур роста | строгий SQLite → PostgreSQL migration/reconciliation harness |
 | Фронтенд | один HTML-файл: чистый JS и CSS, без сборки и зависимостей |
 | Доставка | Docker, HTTPS reverse proxy, production webhook (polling только для staging/development/test), GitHub Actions |
+| Mini App | `https://bot-1785403482-2082-kponamarev.bothost.tech/` |
 | Репозиторий | `github.com/voglogpro/-` |
 
 Основная логика остаётся в `main.py` и `index.html`; инфраструктура, миграции,

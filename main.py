@@ -203,6 +203,12 @@ def _required_chat_url():
     return None
 # Короткое имя Mini App: https://t.me/BbGalterbot/bibibike
 WEBAPP_SHORTNAME = os.getenv("WEBAPP_SHORTNAME", "bibibike")
+DEFAULT_PUBLIC_BASE_URL = (
+    "https://bot-1785403482-2082-kponamarev.bothost.tech"
+)
+MINI_APP_URL_RAW = (
+    os.getenv("MINI_APP_URL", f"{DEFAULT_PUBLIC_BASE_URL}/") or ""
+).strip()
 WEBAPP_PORT = int(os.getenv("PORT") or os.getenv("WEB_PORT") or 3000)
 TELEGRAM_UPDATE_MODE = (os.getenv("TELEGRAM_UPDATE_MODE", "polling") or "polling").strip().lower()
 BIBITASKS_ENVIRONMENT = (
@@ -212,7 +218,9 @@ PILOT_LOAD_TEST_ENABLED = _truthy_env("PILOT_LOAD_TEST_ENABLED", "false")
 PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED = _truthy_env(
     "PILOT_LOAD_TEST_TELEGRAM_STUB_ENABLED", "false"
 )
-PRIVACY_URL_RAW = (os.getenv("PRIVACY_URL", "") or "").strip()
+PRIVACY_URL_RAW = (
+    os.getenv("PRIVACY_URL", f"{DEFAULT_PUBLIC_BASE_URL}/privacy") or ""
+).strip()
 PRIVACY_CONTROLLER_NAME_RAW = os.getenv("PRIVACY_CONTROLLER_NAME", "") or ""
 PRIVACY_CONTACT_RAW = os.getenv("PRIVACY_CONTACT", "") or ""
 PRIVACY_CONTROLLER_NAME = " ".join(PRIVACY_CONTROLLER_NAME_RAW.split())[:160]
@@ -248,6 +256,7 @@ def _safe_https_url(raw):
 
 
 PRIVACY_URL = _safe_https_url(PRIVACY_URL_RAW)
+MINI_APP_URL = _safe_https_url(MINI_APP_URL_RAW)
 EVIDENCE_RETENTION_DAYS = _bounded_int_env(
     "EVIDENCE_RETENTION_DAYS", 90, 30, 365,
 )
@@ -267,7 +276,9 @@ TELEGRAM_RETRY_MAX_ATTEMPTS = max(
 TELEGRAM_HANDLER_TIMEOUT_SEC = _bounded_int_env(
     "TELEGRAM_HANDLER_TIMEOUT_SEC", 120, 10, 300,
 )
-PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+PUBLIC_BASE_URL = (
+    os.getenv("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL) or ""
+).strip().rstrip("/")
 WEBHOOK_ROUTE_ID = (os.getenv("WEBHOOK_ROUTE_ID", "") or "").strip()
 WEBHOOK_PATH = f"/telegram/webhook/{WEBHOOK_ROUTE_ID}" if WEBHOOK_ROUTE_ID else ""
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET", "") or "").strip()
@@ -13569,7 +13580,10 @@ def _app_url(start_param=None):
             if safe:
                 url += f"?startapp={safe}"
         return url
-    return None
+    # Direct HTTPS fallback keeps the app reachable if a deployment has not
+    # yet published the named Mini App link in BotFather. Named links remain
+    # preferred because Telegram forwards their ``startapp`` parameter.
+    return MINI_APP_URL
 
 
 def _open_app_kb(start_param=None):
