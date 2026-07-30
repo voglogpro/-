@@ -34,6 +34,8 @@ class BackupEncryptionTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.data = self.root / "data"
         self.data.mkdir()
+        if os.name != "nt":
+            self.data.chmod(0o700)
         ensure_recovery_key_canary(
             self.data, Fernet(Fernet.generate_key()), Fernet(Fernet.generate_key()),
             production=True,
