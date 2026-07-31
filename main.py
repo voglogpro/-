@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.11.0"
-BUILD_VERSION = "2026-07-30 · БибиЗадачи v2.11.0"
+APP_VERSION = "v2.11.1"
+BUILD_VERSION = "2026-07-30 · БибиЗадачи v2.11.1"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
@@ -202,7 +202,9 @@ def _required_chat_url():
     if isinstance(chat, str) and chat.startswith("@"):
         return f"https://t.me/{chat[1:]}"
     return None
-# Короткое имя Mini App: https://t.me/BbGalterbot/bibibike
+# Старое короткое имя Mini App оставляем для совместимости конфигурации.
+# Кнопки используют Main Mini App бота: его домен меняется в BotFather без
+# необходимости заново править все Telegram-ссылки в коде.
 WEBAPP_SHORTNAME = os.getenv("WEBAPP_SHORTNAME", "bibibike")
 DEFAULT_PUBLIC_BASE_URL = (
     "https://bot-1785403482-2082-kponamarev.bothost.tech"
@@ -13957,19 +13959,24 @@ async def telegram_update_context(handler, event, data):
 
 
 def _app_url(start_param=None):
+    """Универсальная Telegram-ссылка на Main Mini App.
+
+    Именная ссылка ``/<WEBAPP_SHORTNAME>`` перестаёт открываться, если после
+    смены домена в BotFather обновили только Main Mini App. Ссылка
+    ``?startapp`` работает и в группе, и в личке и всегда открывает текущий
+    URL Main Mini App, настроенный у бота.
+    """
     if BOT_USERNAME:
-        url = f"https://t.me/{BOT_USERNAME}/{WEBAPP_SHORTNAME}"
+        url = f"https://t.me/{BOT_USERNAME}?startapp"
         if start_param:
             safe = "".join(
                 char for char in str(start_param)
                 if char.isalnum() or char in "_-"
             )[:64]
             if safe:
-                url += f"?startapp={safe}"
+                url += f"={safe}"
         return url
-    # Direct HTTPS fallback keeps the app reachable if a deployment has not
-    # yet published the named Mini App link in BotFather. Named links remain
-    # preferred because Telegram forwards their ``startapp`` parameter.
+    # Прямой HTTPS-адрес остаётся запасным вариантом для локальной настройки.
     return MINI_APP_URL
 
 
@@ -14413,6 +14420,57 @@ def _post_kb(kind):
         if app:
             rows.append([InlineKeyboardButton(text="🚲 Открыть приложение", url=app)])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+async def _refresh_group_app_buttons():
+    """Обновляет ссылки под уже опубликованными постами после смены домена."""
+    targets = []
+    async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+        db.row_factory = aiosqlite.Row
+        publications = await (await db.execute(
+            "SELECT kind,chat_id,message_ids FROM published_posts"
+        )).fetchall()
+        announcements = await (await db.execute(
+            "SELECT chat_id,telegram_message_id,payload_json FROM task_outbox "
+            "WHERE event_type='group_task' AND status='sent' "
+            "AND telegram_message_id IS NOT NULL"
+        )).fetchall()
+    for row in publications:
+        try:
+            message_ids = json.loads(row["message_ids"] or "[]")
+            if message_ids:
+                targets.append((
+                    row["chat_id"], int(message_ids[-1]), _post_kb(row["kind"]),
+                ))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Не удалось прочитать кнопки публикации %s", row["kind"])
+    for row in announcements:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+            targets.append((
+                row["chat_id"], int(row["telegram_message_id"]),
+                _open_app_kb(payload.get("start")),
+            ))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Не удалось прочитать кнопку опубликованного задания")
+    refreshed = 0
+    for chat_id, message_id, reply_markup in targets:
+        target = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=target, message_id=message_id, reply_markup=reply_markup,
+            )
+            refreshed += 1
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.warning(
+                    "Не удалось обновить кнопку сообщения %s: %s", message_id, exc,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Не удалось обновить кнопку сообщения %s: %s", message_id, exc,
+            )
+    logger.info("Обновлены кнопки Mini App в сообщениях группы: %s", refreshed)
 
 
 # У General-подтемы форума thread_id = 1, но Telegram не принимает его
@@ -15595,6 +15653,7 @@ async def main():
         logger.info("Telegram update mode: %s", TELEGRAM_UPDATE_MODE)
         logger.info("=" * 50)
         await _configure_update_receiver()
+        await _refresh_group_app_buttons()
         if TELEGRAM_UPDATE_MODE == "webhook":
             service = _wait_for_shutdown_signal()
         else:

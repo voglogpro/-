@@ -3,7 +3,7 @@
 Один документ про компанию, про автора и про всё, что мы собрали:
 Telegram-бота, Mini App и группу с подтемами.
 
-Обновлено: 30 июля 2026 · текущая версия **v2.11.0** · последний проверенный
+Обновлено: 30 июля 2026 · текущая версия **v2.11.1** · последний проверенный
 release image **v2.9.1**
 
 Технический запуск, переменные окружения и release-процесс описаны в
@@ -323,6 +323,7 @@ production `python scripts/telegram_preflight.py` и
 | v2.9.1 | повторный командный аудит: безопасная смена города, причины доработки и deep-link, полноэкранные доказательства, maker-checker для решений и сторно, независимый rate-limit и fail-closed host preflight |
 | v2.10.0 candidate | анкета без телефона, capability RBAC с preset-ролями и maker-checker, versioned task templates и двухэтапные отмены наград с immutable audit, управляемые Telegram join requests, bounded API/media/Telegram admission, автоматизированный staging load gate, обязательная privacy policy, schema 300, recovery-key enrollment, monitor/rollback evidence и terminal fail-closed release gate; production пока NO-GO |
 | v2.11.0 | публикация заданий в теме «Работа», личные уведомления по городу, редактирование и удаление открытых заданий, свободно изменяемые поля после применения шаблона, облегчённый GitHub |
+| v2.11.1 | рабочая универсальная кнопка запуска Main Mini App в группах и личных сообщениях после смены домена |
 
 ---
 
