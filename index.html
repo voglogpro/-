@@ -979,8 +979,8 @@ select.tinput{appearance:none;background-image:
     <div id="adSubTeam" class="card hidden">
       <div class="eyebrow"><b></b>Люди<span class="cnt" id="adTeamCnt"></span></div>
       <div class="card lit" data-cap-any="access.view" style="margin-bottom:12px">
-        <div class="eyebrow"><b></b>Изменения роли ответственного<span class="cnt" id="adRoleChangeCnt"></span></div>
-        <p class="sub" style="margin-bottom:10px">Выдачу или снятие доступа всегда подтверждает второй ответственный.</p>
+        <div class="eyebrow"><b></b>Изменения защищённого доступа<span class="cnt" id="adRoleChangeCnt"></span></div>
+        <p class="sub" style="margin-bottom:10px">Ответственного владелец назначает сразу. Изменение владельца и снятие защищённого доступа проверяет второй владелец.</p>
         <div id="adRoleChanges" aria-live="polite"><div class="empty">Ожидающих запросов нет.</div></div>
       </div>
       <div class="searchtools">
@@ -1003,7 +1003,7 @@ select.tinput{appearance:none;background-image:
       <div class="card warm">
         <div class="eyebrow"><b></b>Доступ сотрудников</div>
         <h2>Роли без общего пароля</h2>
-        <p class="sub">Приложение показывает права, выданные сервером. Изменение создаёт один ответственный, а подтверждает другой.</p>
+        <p class="sub">Здесь владелец управляет отдельными служебными доступами. Защищённое изменение создаёт один владелец, а подтверждает другой.</p>
       </div>
       <div class="card" id="staffAccessRequestCard" data-cap-any="access.request">
         <div class="eyebrow"><b></b>Запросить изменение</div>
@@ -1017,7 +1017,7 @@ select.tinput{appearance:none;background-image:
         <button class="btn btn-volt" id="staffAccessRequest" type="button">Создать запрос</button>
       </div>
       <div class="card">
-        <div class="eyebrow"><b></b>Ожидают второго ответственного<span class="cnt" id="staffAccessPendingCnt"></span></div>
+        <div class="eyebrow"><b></b>Ожидают второго владельца<span class="cnt" id="staffAccessPendingCnt"></span></div>
         <div id="staffAccessPending" aria-live="polite"><div class="empty">Загружаю…</div></div>
       </div>
       <div class="card">
@@ -1264,7 +1264,7 @@ select.tinput{appearance:none;background-image:
 <div id="roleSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="roleTitle"><div class="inner">
   <div class="grab"></div>
   <h3 id="roleTitle">Роль участника</h3>
-  <p class="lead">Обычная роль меняется сразу. Доступ ответственного выдаёт или снимает только второй ответственный после независимой проверки.</p>
+  <p class="lead">Владелец назначает ответственного сразу. Ответственный работает с заявками, заданиями, наградами и выплатами, но не управляет владельцами.</p>
   <button class="pick" data-role="helper"><span class="em">🌿</span>
     <span class="tx">Помощник<small>Берёт задания и получает бибибонусы</small></span>
     <span class="mark">✓</span></button>
@@ -1814,6 +1814,7 @@ function setBonus(v){
 }
 
 function roleLabel(me){
+  if(STAFF_PRESETS.includes('owner')) return '👑 Владелец';
   if(me.role==='admin') return '🛡️ Ответственный';
   if(me.status==='approved') return me.trust_emoji + ' ' + me.trust_name;
   if(me.status==='blocked') return 'Доступ закрыт';
@@ -2738,7 +2739,7 @@ async function loadAdmin(){
     $('adRoleChanges').innerHTML=roleChanges.length?roleChanges.map(change=>{
       const actions=change.can_decide&&hasCap('access.decide')
         ? '<div class="acts"><button class="btn btn-volt sm" data-role-change="'+change.id+'" data-role-decision="approve">Подтвердить</button><button class="mini warn" data-role-change="'+change.id+'" data-role-decision="reject">Отклонить</button></div>'
-        : '<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Ожидается второй ответственный')+'</button></div>';
+        : '<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Ожидается второй владелец')+'</button></div>';
       return '<div class="task"><div class="tt">'+esc(change.user_name||('ID '+change.user_id))+'</div>'+
         '<div class="dt">'+esc(roleTitle(change.from_role))+' → <b>'+esc(roleTitle(change.to_role))+'</b></div>'+
         '<div class="dt">Причина: '+esc(change.reason)+'</div>'+
@@ -3378,10 +3379,12 @@ document.querySelectorAll('#roleSheet .pick').forEach(p=>{
     let reason='';
     if(requestedRole==='admin'||roleCurrent==='admin'){
       reason=await askText({
-        title:requestedRole==='admin'?'Запросить доступ ответственного':'Запросить снятие доступа',
-        lead:'Изменение не произойдёт сразу: причину и объём доступа независимо проверит второй ответственный.',
+        title:requestedRole==='admin'?'Назначить ответственного':'Запросить снятие доступа',
+        lead:requestedRole==='admin'
+          ? 'Как владелец, ты назначишь ответственного сразу. Он не получит право управлять владельцами.'
+          : 'У ответственного рабочие права снимутся сразу. Для владельца потребуется подтверждение второго владельца.',
         placeholder:requestedRole==='admin'?'За что нужен доступ к выплатам и ролям':'Почему доступ больше не нужен',
-        required:true,okLabel:'Поставить на проверку'});
+        required:true,okLabel:requestedRole==='admin'?'Назначить':'Поставить на проверку'});
       if(reason===null) return;
     }
     const picks = document.querySelectorAll('#roleSheet .pick');
@@ -3394,7 +3397,7 @@ document.querySelectorAll('#roleSheet .pick').forEach(p=>{
         })});
       buzz('ok');
       $('roleSheet').classList.add('hidden');
-      toast(d.already?'Роль уже такая.':(d.queued?'Изменение роли ждёт второго ответственного.':'Роль изменена: '+roleTitle(requestedRole)));
+      toast(d.already?'Роль уже такая.':(d.direct?(d.revoked_by_owner?'Роль ответственного снята.':'Ответственный назначен.'):(d.queued?'Изменение роли ждёт второго владельца.':'Роль изменена: '+roleTitle(requestedRole))));
       await loadAdmin();
     }catch(e){
       buzz('no'); toast(e.message);
@@ -4287,7 +4290,7 @@ function accessChangeRow(change,allowDecision){
   const pending=String(change.status||'pending')==='pending';
   const actions=pending&&canDecide
     ? '<div class="acts"><button class="btn btn-volt sm" data-access-decide="'+id+'" data-access-decision="approve">Подтвердить</button><button class="mini warn" data-access-decide="'+id+'" data-access-decision="reject">Отклонить</button></div>'
-    : pending?'<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Нужен второй ответственный')+'</button></div>':'';
+    : pending?'<div class="acts"><button class="mini" type="button" disabled>'+esc(change.wait_reason||'Нужен второй владелец')+'</button></div>':'';
   return '<div class="task"><div class="tt">'+esc(accessUserName(change))+'</div><div class="dt">'+esc(title)+'</div>'+
     (change.reason?'<div class="dt">Причина: '+esc(change.reason)+'</div>':'')+
     '<div class="ty">Запросил: '+esc(change.requested_by_name||'ответственный')+(change.requested_at?' · '+fmtDate(change.requested_at):'')+'</div>'+actions+'</div>';
@@ -4372,7 +4375,7 @@ $('staffAccessRequest').onclick=()=>{
       expected_generation:generation,reason:reason,operation_id:operation.id
     })});
     clearAccessOperation(operation); $('staffAccessReason').value='';
-    toast('Запрос создан. Его должен подтвердить другой ответственный.'); await loadAccessManagement();
+    toast('Запрос создан. Его должен подтвердить другой владелец.'); await loadAccessManagement();
   });
 };
 

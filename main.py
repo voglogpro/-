@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.11.1"
-BUILD_VERSION = "2026-07-30 · БибиЗадачи v2.11.1"
+APP_VERSION = "v2.12.0"
+BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.0"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
@@ -720,6 +720,7 @@ CAPABILITY_PRESETS["owner"] = frozenset().union(
         "operations.health.view",
     },
 )
+RESPONSIBLE_PRESETS = ("scout", "reviewer", "cashier")
 ALL_STAFF_CAPABILITIES = frozenset().union(*CAPABILITY_PRESETS.values())
 
 # Fast manual thanks are intentionally small and positive-only.  Larger or
@@ -3465,7 +3466,8 @@ async def _reconcile_legacy_owner_grants_in_tx(db):
     authorities = await (await db.execute(
         "SELECT aa.user_id,aa.origin,aa.granted_operation_id "
         "FROM admin_authorities aa JOIN members m ON m.user_id=aa.user_id "
-        "WHERE m.status='approved' AND m.role='admin'"
+        "WHERE m.status='approved' AND m.role='admin' "
+        "AND NOT (aa.origin='manual' AND aa.granted_operation_id LIKE 'responsible:%')"
     )).fetchall()
     authority_keys = {(int(row[0]), str(row[1])) for row in authorities}
     for user_id, origin, granted_operation_id in authorities:
@@ -3491,6 +3493,20 @@ async def _reconcile_legacy_owner_grants_in_tx(db):
         )
 
 
+async def _active_owner_ids_in_tx(db):
+    """Owners remain authoritative when an older snapshot lacks a new capability."""
+    rows = await (await db.execute(
+        "SELECT DISTINCT g.user_id FROM staff_access_grants g "
+        "JOIN members m ON m.user_id=g.user_id "
+        "WHERE g.preset='owner' AND g.status='active' "
+        "AND m.status='approved' AND m.role='admin' "
+        "AND EXISTS (SELECT 1 FROM admin_authorities aa "
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin "
+        "AND NOT (aa.origin='manual' AND aa.granted_operation_id LIKE 'responsible:%'))"
+    )).fetchall()
+    return {int(row[0]) for row in rows}
+
+
 async def _effective_staff_access_in_tx(db, user_id):
     rows = await (await db.execute(
         "SELECT DISTINCT g.preset,c.capability FROM staff_access_grants g "
@@ -3498,10 +3514,15 @@ async def _effective_staff_access_in_tx(db, user_id):
         "JOIN members m ON m.user_id=g.user_id "
         "WHERE g.user_id=? AND g.status='active' AND m.status='approved' "
         "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
-        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin "
+        "AND NOT (aa.origin='manual' AND aa.granted_operation_id LIKE 'responsible:%'))))",
         (int(user_id),),
     )).fetchall()
+    presets = {str(row[0]) for row in rows}
     capabilities = {str(row[1]) for row in rows}
+    if int(user_id) in await _active_owner_ids_in_tx(db):
+        presets.add("owner")
+        capabilities.update(CAPABILITY_PRESETS["owner"])
     # Policy-v1 snapshots only knew the coarse award.revoke capability.  Keep
     # them effective while all newly issued reviewer grants contain the split
     # request/decision capabilities explicitly.
@@ -3509,7 +3530,7 @@ async def _effective_staff_access_in_tx(db, user_id):
         capabilities.update({"award.reversal.request", "award.reversal.decide"})
     return {
         "policy_version": RBAC_POLICY_VERSION,
-        "presets": sorted({str(row[0]) for row in rows}),
+        "presets": sorted(presets),
         "capabilities": sorted(capabilities),
     }
 
@@ -3522,6 +3543,11 @@ async def _effective_staff_access(user_id):
 async def _has_capability_in_tx(db, user_id, capability):
     if capability not in ALL_STAFF_CAPABILITIES:
         return False
+    if (
+        capability in CAPABILITY_PRESETS["owner"]
+        and int(user_id) in await _active_owner_ids_in_tx(db)
+    ):
+        return True
     accepted = [capability]
     if capability in {"award.reversal.request", "award.reversal.decide"}:
         accepted.append("award.revoke")
@@ -3533,7 +3559,8 @@ async def _has_capability_in_tx(db, user_id, capability):
         "WHERE g.user_id=? AND g.status='active' AND m.status='approved' "
         f"AND c.capability IN ({placeholders}) AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS "
         "(SELECT 1 FROM admin_authorities aa WHERE aa.user_id=g.user_id "
-        "AND aa.origin=g.origin))) LIMIT 1",
+        "AND aa.origin=g.origin AND NOT (aa.origin='manual' "
+        "AND aa.granted_operation_id LIKE 'responsible:%')))) LIMIT 1",
         (int(user_id), *accepted),
     )).fetchone()
     return bool(row)
@@ -3557,10 +3584,14 @@ async def _active_capability_holder_ids_in_tx(db, capability):
         "JOIN members m ON m.user_id=g.user_id "
         f"WHERE g.status='active' AND m.status='approved' AND c.capability IN ({placeholders}) "
         "AND (g.preset<>'owner' OR (m.role='admin' AND EXISTS (SELECT 1 FROM admin_authorities aa "
-        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin)))",
+        "WHERE aa.user_id=g.user_id AND aa.origin=g.origin "
+        "AND NOT (aa.origin='manual' AND aa.granted_operation_id LIKE 'responsible:%'))))",
         accepted,
     )).fetchall()
-    return {int(row[0]) for row in rows}
+    holders = {int(row[0]) for row in rows}
+    if capability in CAPABILITY_PRESETS["owner"]:
+        holders.update(await _active_owner_ids_in_tx(db))
+    return holders
 
 
 async def _admin_active_in_tx(db, admin_id):
@@ -7905,7 +7936,7 @@ async def api_admin_overview(request):
                 and int(r["user_id"]) != int(uid)
             ),
             "wait_reason": (
-                "Ожидается другой ответственный."
+                "Ожидается другой владелец."
                 if int(r["requested_by"]) == int(uid) else
                 "Нельзя подтверждать изменение собственной роли."
                 if int(r["user_id"]) == int(uid) else ""
@@ -11878,6 +11909,106 @@ async def _active_access_grant_in_tx(db, user_id, preset, origin="manual"):
     )).fetchone()
 
 
+async def _assign_responsible_in_tx(db, owner_id, target_id, operation_id):
+    """Owner appoints an operational responsible without owner-management rights."""
+    before = await _effective_staff_access_in_tx(db, target_id)
+    authority_operation = f"responsible:{operation_id}"
+    await db.execute(
+        "INSERT INTO admin_authorities "
+        "(user_id,origin,granted_operation_id,granted_at) "
+        "VALUES (?,'manual',?,?) ON CONFLICT(user_id,origin) DO UPDATE SET "
+        "granted_operation_id=excluded.granted_operation_id,"
+        "granted_at=excluded.granted_at",
+        (int(target_id), authority_operation, now_iso()),
+    )
+    for preset in RESPONSIBLE_PRESETS:
+        await _insert_access_grant_snapshot_in_tx(
+            db, target_id, preset, "manual",
+            operation_id=f"{authority_operation}:{preset}",
+            granted_by=owner_id,
+        )
+    updated = await db.execute(
+        "UPDATE members SET role='admin',status='approved' "
+        "WHERE user_id=? AND status='approved' AND role<>'admin'",
+        (int(target_id),),
+    )
+    if updated.rowcount != 1:
+        raise ValueError("transition_conflict")
+    after = await _effective_staff_access_in_tx(db, target_id)
+    for preset in RESPONSIBLE_PRESETS:
+        await db.execute(
+            "INSERT INTO staff_access_events "
+            "(target_user_id,preset,event_type,actor_id,operation_id,"
+            "policy_version,before_json,after_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                int(target_id), preset, "owner_direct_assign", int(owner_id),
+                f"{authority_operation}:{preset}:event", RBAC_POLICY_VERSION,
+                _canonical_json(before), _canonical_json(after), now_iso(),
+            ),
+        )
+    return after
+
+
+async def _responsible_authority_in_tx(db, target_id):
+    return bool(await (await db.execute(
+        "SELECT 1 FROM admin_authorities WHERE user_id=? AND origin='manual' "
+        "AND granted_operation_id LIKE 'responsible:%'",
+        (int(target_id),),
+    )).fetchone())
+
+
+async def _revoke_responsible_in_tx(
+    db, owner_id, target_id, next_role, operation_id,
+):
+    """Owner removes an operational responsible without touching owner accounts."""
+    if next_role not in {"helper", "employee"}:
+        raise ValueError("invalid_role")
+    if not await _responsible_authority_in_tx(db, target_id):
+        raise ValueError("not_responsible")
+    before = await _effective_staff_access_in_tx(db, target_id)
+    grants = await (await db.execute(
+        "SELECT id,preset FROM staff_access_grants WHERE user_id=? "
+        "AND origin='manual' AND status='active'",
+        (int(target_id),),
+    )).fetchall()
+    for grant in grants:
+        await db.execute(
+            "UPDATE staff_access_grants SET status='revoked',revoked_by=?,"
+            "revoke_operation_id=?,revoked_at=? WHERE id=? AND status='active'",
+            (
+                int(owner_id),
+                f"responsible-revoke:{operation_id}:{grant['preset']}",
+                now_iso(), grant["id"],
+            ),
+        )
+    await db.execute(
+        "DELETE FROM admin_authorities WHERE user_id=? AND origin='manual'",
+        (int(target_id),),
+    )
+    updated = await db.execute(
+        "UPDATE members SET role=? WHERE user_id=? AND status='approved' AND role='admin'",
+        (next_role, int(target_id)),
+    )
+    if updated.rowcount != 1:
+        raise ValueError("transition_conflict")
+    after = await _effective_staff_access_in_tx(db, target_id)
+    for preset in RESPONSIBLE_PRESETS:
+        await db.execute(
+            "INSERT INTO staff_access_events "
+            "(target_user_id,preset,event_type,actor_id,operation_id,"
+            "policy_version,before_json,after_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                int(target_id), preset, "owner_direct_revoke", int(owner_id),
+                f"responsible-revoke:{operation_id}:{preset}:event",
+                RBAC_POLICY_VERSION, _canonical_json(before),
+                _canonical_json(after), now_iso(),
+            ),
+        )
+    return after
+
+
 async def _access_generation_in_tx(db, user_id, preset, origin="manual"):
     return int((await (await db.execute(
         "SELECT COALESCE(MAX(generation),0) FROM staff_access_grants "
@@ -12234,7 +12365,7 @@ async def api_admin_set_role(request):
                 await db.rollback()
                 return _json({
                     "error": "two_person_rule",
-                    "message": "Запрос должен проверить другой ответственный.",
+                    "message": "Запрос должен проверить другой владелец.",
                 }, status=403)
             if int(change["user_id"]) == int(admin_id):
                 await db.rollback()
@@ -12276,12 +12407,20 @@ async def api_admin_set_role(request):
                         granted_by=change["requested_by"], approved_by=admin_id,
                     )
                 elif change["from_role"] == "admin":
-                    await db.execute(
-                        "UPDATE staff_access_grants SET status='revoked',revoked_by=?,"
-                        "revoke_operation_id=?,revoked_at=? WHERE user_id=? "
-                        "AND preset='owner' AND origin='manual' AND status='active'",
-                        (admin_id, operation_id, now_iso(), change["user_id"]),
-                    )
+                    manual_grants = await (await db.execute(
+                        "SELECT id,preset FROM staff_access_grants WHERE user_id=? "
+                        "AND origin='manual' AND status='active'",
+                        (change["user_id"],),
+                    )).fetchall()
+                    for grant in manual_grants:
+                        await db.execute(
+                            "UPDATE staff_access_grants SET status='revoked',revoked_by=?,"
+                            "revoke_operation_id=?,revoked_at=? WHERE id=? AND status='active'",
+                            (
+                                admin_id, f"{operation_id}:{grant['preset']}",
+                                now_iso(), grant["id"],
+                            ),
+                        )
                     await db.execute(
                         "DELETE FROM admin_authorities WHERE user_id=? AND origin='manual'",
                         (change["user_id"],),
@@ -12321,7 +12460,7 @@ async def api_admin_set_role(request):
             )
             await _enqueue_admins_in_tx(
                 db, f"admin_role_change:{change_id}:resolved",
-                f"Изменение роли #{change_id}: {status_value}. Проверил второй ответственный.",
+                f"Изменение роли #{change_id}: {status_value}. Проверил второй владелец.",
             )
             await db.commit()
         return _json({
@@ -12411,6 +12550,106 @@ async def api_admin_set_role(request):
                     "error": "role_change_identity",
                     "message": "Для роли ответственного нужны причина и operation_id UUID.",
                 }, status=400)
+            owner_access = await _effective_staff_access_in_tx(db, admin_id)
+            if (
+                role == "admin" and row["role"] != "admin"
+                and "owner" in owner_access["presets"]
+            ):
+                request_hash = _request_fingerprint({
+                    "user_id": int(uid), "from_role": row["role"],
+                    "to_role": role, "reason": reason,
+                    "owner_id": int(admin_id), "mode": "responsible_direct",
+                })
+                if not await _claim_operation_in_tx(
+                    db, operation_id, "responsible_role_assign",
+                    request_hash, admin_id,
+                ):
+                    await db.rollback()
+                    return _json({"error": "operation_conflict"}, status=409)
+                try:
+                    await _assign_responsible_in_tx(
+                        db, admin_id, uid, operation_id,
+                    )
+                except ValueError:
+                    await db.rollback()
+                    return _json({"error": "transition_conflict"}, status=409)
+                await db.execute(
+                    "UPDATE admin_role_changes SET status='rejected',decided_at=?,"
+                    "decision_note='Заменено прямым решением владельца.' "
+                    "WHERE user_id=? AND status='pending'",
+                    (now_iso(), uid),
+                )
+                await _track_event_in_tx(
+                    db, "responsible_assigned", "backend", user_id=uid,
+                    outcome="approved",
+                    dedupe_key=f"responsible_assign:{operation_id}",
+                )
+                await _enqueue_outbox_in_tx(
+                    db, f"responsible:{uid}:{operation_id}", "direct",
+                    {
+                        "text": (
+                            "🛡️ Владелец назначил тебя ответственным. "
+                            "Теперь доступны заявки, задания, проверки, награды и выплаты."
+                        ),
+                        "start": None,
+                    },
+                    recipient_id=uid,
+                )
+                await db.commit()
+                return _json({
+                    "ok": True, "role": "admin", "direct": True,
+                    "assigned_by_owner": True,
+                })
+            if (
+                row["role"] == "admin" and role in {"helper", "employee"}
+                and "owner" in owner_access["presets"]
+                and await _responsible_authority_in_tx(db, uid)
+            ):
+                request_hash = _request_fingerprint({
+                    "user_id": int(uid), "from_role": row["role"],
+                    "to_role": role, "reason": reason,
+                    "owner_id": int(admin_id), "mode": "responsible_revoke",
+                })
+                if not await _claim_operation_in_tx(
+                    db, operation_id, "responsible_role_revoke",
+                    request_hash, admin_id,
+                ):
+                    await db.rollback()
+                    return _json({"error": "operation_conflict"}, status=409)
+                try:
+                    await _revoke_responsible_in_tx(
+                        db, admin_id, uid, role, operation_id,
+                    )
+                except ValueError:
+                    await db.rollback()
+                    return _json({"error": "transition_conflict"}, status=409)
+                await db.execute(
+                    "UPDATE admin_role_changes SET status='rejected',decided_at=?,"
+                    "decision_note='Заменено прямым решением владельца.' "
+                    "WHERE user_id=? AND status='pending'",
+                    (now_iso(), uid),
+                )
+                await _track_event_in_tx(
+                    db, "responsible_revoked", "backend", user_id=uid,
+                    outcome=role,
+                    dedupe_key=f"responsible_revoke:{operation_id}",
+                )
+                await _enqueue_outbox_in_tx(
+                    db, f"responsible:{uid}:revoked:{operation_id}", "direct",
+                    {
+                        "text": (
+                            "Владелец снял роль ответственного. "
+                            f"Текущая роль: {ROLE_TITLES[role]}."
+                        ),
+                        "start": None,
+                    },
+                    recipient_id=uid,
+                )
+                await db.commit()
+                return _json({
+                    "ok": True, "role": role, "direct": True,
+                    "revoked_by_owner": True,
+                })
             request_hash = _request_fingerprint({
                 "user_id": int(uid), "from_role": row["role"], "to_role": role,
                 "reason": reason, "maker_id": int(admin_id),
@@ -12435,7 +12674,7 @@ async def api_admin_set_role(request):
                 await db.rollback()
                 return _json({
                     "error": "no_independent_checker",
-                    "message": "Нет второго независимого ответственного для проверки роли.",
+                    "message": "Нет второго независимого владельца для проверки роли.",
                 }, status=409)
             if row["role"] == "admin":
                 block = await _admin_demotion_block_in_tx(db, uid)
