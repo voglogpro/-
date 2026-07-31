@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.12.0"
-BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.0"
+APP_VERSION = "v2.12.1"
+BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.1"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 
@@ -785,6 +785,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR") or os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "bibitasks.db")
+DATABASE_REQUIRE_EXISTING = _truthy_env(
+    "DATABASE_REQUIRE_EXISTING", "false"
+)
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 PRIVACY_TEMPLATE_PATH = os.path.join(BASE_DIR, "privacy.html")
 LOGO_PATH = os.path.join(BASE_DIR, "logo.jpg")
@@ -810,6 +813,29 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
+
+
+def _validate_persistent_database():
+    """Fail closed when an operator expects an already populated database.
+
+    This guard does not replace a persistent disk. It prevents a hosting update
+    from silently starting a new empty application when that disk was detached.
+    Enable it only after the first successful launch with real data.
+    """
+    if not DATABASE_REQUIRE_EXISTING:
+        return
+    try:
+        valid_database = os.path.isfile(DB_PATH) and os.path.getsize(DB_PATH) >= 4096
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot verify the persistent database at {DB_PATH}"
+        ) from exc
+    if not valid_database:
+        raise RuntimeError(
+            "Persistent database is missing or empty. Check that the BotHost "
+            "persistent volume is mounted at /app/data; startup was stopped "
+            "to avoid creating a new empty database."
+        )
 
 # ── Каталог типов заданий (можно расширять) ───────────────────
 TASK_TYPES = {
@@ -15872,6 +15898,7 @@ async def main():
     _shutdown_event.clear()
     try:
         _validate_update_receiver_config()
+        _validate_persistent_database()
         me = await bot.get_me()
         _validate_bot_identity(me)
         ensure_recovery_key_canary(
