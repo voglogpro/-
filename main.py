@@ -47,10 +47,11 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.12.1"
-BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.1"
+APP_VERSION = "v2.12.2"
+BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.2"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
+WELCOME_DELETE_DELAY_SEC = 5 * 60
 
 # Local development follows the documented `.env` workflow. Existing process
 # environment variables keep precedence, as required in containers.
@@ -4807,7 +4808,7 @@ def _notify_admins(text):
 
 async def _enqueue_outbox_in_tx(
     db, event_key, event_type, payload, *, recipient_id=None,
-    chat_id=None, topic_id=None, media_id=None,
+    chat_id=None, topic_id=None, media_id=None, available_at=None,
 ):
     """Добавляет доставку в той же транзакции, что бизнес-переход."""
     await db.execute(
@@ -4819,7 +4820,7 @@ async def _enqueue_outbox_in_tx(
             event_key, event_type, recipient_id,
             str(chat_id) if chat_id is not None else None, topic_id, media_id,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            now_iso(), now_iso(),
+            available_at or now_iso(), now_iso(),
         ),
     )
 
@@ -4996,7 +4997,7 @@ async def _deliver_outbox_item(item):
             chat_id, payload["text"], item["topic_id"],
             disable_web_page_preview=True, **kwargs,
         )
-    if item["event_type"] == "group_task_delete":
+    if item["event_type"] in {"group_task_delete", "group_message_delete"}:
         chat_id = item["chat_id"]
         if str(chat_id).lstrip("-").isdigit():
             chat_id = int(chat_id)
@@ -5004,7 +5005,8 @@ async def _deliver_outbox_item(item):
             await bot.delete_message(chat_id, int(payload["message_id"]))
         except TelegramBadRequest:
             # Telegram may already have removed the message or it may be too old
-            # to delete. The task itself is still safely hidden in the app.
+            # to delete. For task deletion, the task itself is still safely
+            # hidden in the app.
             return None
         return None
     if item["event_type"] == "group_publication":
@@ -15269,11 +15271,27 @@ async def greet_newcomers(message: Message):
         for u in newcomers)
     text = WELCOME_JOIN.format(name=names)
     try:
-        await _send_to_topic(
+        sent = await _send_to_topic(
             message.chat.id, text, TOPIC_CHAT,
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=_post_kb("chat"))
+        if sent is not None and getattr(sent, "message_id", None):
+            delete_at = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=WELCOME_DELETE_DELAY_SEC)
+            ).isoformat()
+            async with aiosqlite.connect(DB_PATH, timeout=15) as db:
+                await _enqueue_outbox_in_tx(
+                    db,
+                    f"welcome_cleanup:{message.chat.id}:{sent.message_id}",
+                    "group_message_delete",
+                    {"message_id": int(sent.message_id)},
+                    chat_id=message.chat.id,
+                    topic_id=TOPIC_CHAT,
+                    available_at=delete_at,
+                )
+                await db.commit()
     except Exception as e:
         logger.info("Не смог поздороваться с новичком: %s", e)
 
