@@ -39,27 +39,29 @@ try{
 :root{
   color-scheme:light;
 
-  /* поверхности */
-  --bg:#F3F5EF;
-  --glow:rgba(53,211,58,.13);
-  --surface:#FFFFFF;       /* карточка */
-  --surface-2:#E7ECE1;     /* вложенное, дорожки прогресса */
-  --surface-3:#FAFBF7;     /* мягкая подложка */
-  --line:#DEE5DB;          /* волосяная рамка */
-  --line-strong:#C7D2C2;
+  /* поверхности: страница → секция → плитка */
+  --bg:#F7F8F6;
+  --glow:rgba(23,196,82,.10);
+  --surface:#F0F3EF;       /* секция-карточка */
+  --tile:#FFFFFF;          /* вложенная плитка: задание, человек, KPI */
+  --surface-2:#E4E9E2;     /* дорожки прогресса, сегменты */
+  --surface-3:#FAFBF9;     /* мягкая подложка */
+  --line:#E1E6DF;          /* волосяная рамка */
+  --line-strong:#C9D2C6;
 
   /* текст */
-  --ink:#102017;
-  --ink-2:#5E6D63;         /* второстепенный, WCAG AA */
-  --detail:#33423A;
-  --placeholder:#6B7A70;
+  --ink:#0F1512;
+  --ink-2:#5F6963;         /* второстепенный, WCAG AA */
+  --detail:#3F4642;
+  --placeholder:#66706A;
 
   /* бренд */
-  --brand:#35D33A;
-  --brand-ink:#16872A;     /* зелёный текст на светлом, AA */
-  --brand-tint:#EAF8E9;
-  --brand-line:rgba(22,135,42,.30);
-  --on-brand:#071B10;      /* текст на заливке бренда */
+  --brand:#17C452;         /* заливки, прогресс, точки */
+  --brand-ink:#07742F;     /* зелёный текст на светлом, AA */
+  --brand-btn:#087A35;     /* белый текст: AA и для 14px */
+  --brand-tint:#EDF9F1;
+  --brand-line:rgba(7,116,47,.26);
+  --on-brand:#FFFFFF;      /* текст на заливке кнопки */
 
   /* статусы */
   --danger:#C0333C;
@@ -71,14 +73,7 @@ try{
   --blue-tint:#EAF2FF;
   --notice-ink:#22422F;
 
-  /* фирменная тёмная плашка: герой, нижняя панель, тост */
-  --deep:#071B10;
-  --deep-2:#0C2A17;
-  --deep-ink:#F1F7F2;
-  --deep-ink-2:#9BB0A2;
-  --money:#39E653;
-
-  --overlay:rgba(7,27,16,.46);
+  --overlay:rgba(15,21,18,.42);
   --safe-top:max(env(safe-area-inset-top, 0px),var(--tg-content-safe-area-inset-top, 0px));
   --safe-bottom:max(env(safe-area-inset-bottom, 0px),var(--tg-content-safe-area-inset-bottom, 0px));
   --r:20px;
@@ -88,22 +83,24 @@ try{
 }
 [data-theme="dark"]{
   color-scheme:dark;
-  --bg:#090F0B;
-  --glow:rgba(49,216,67,.15);
-  --surface:#111814;
-  --surface-2:#1B231E;
-  --surface-3:#0E1511;
-  --line:rgba(255,255,255,.10);
-  --line-strong:rgba(255,255,255,.18);
+  --bg:#080C09;
+  --glow:rgba(37,211,102,.13);
+  --surface:#0F1512;
+  --tile:#171F1A;
+  --surface-2:#1E2721;
+  --surface-3:#131A16;
+  --line:rgba(255,255,255,.09);
+  --line-strong:rgba(255,255,255,.17);
   --ink:#F2F7F3;
   --ink-2:#93A199;
   --detail:#CBD6CF;
   --placeholder:#7A877F;
-  --brand:#31D843;
-  --brand-ink:#4FE162;
-  --brand-tint:#102B18;
-  --brand-line:rgba(49,216,67,.32);
-  --on-brand:#06130A;
+  --brand:#25D366;
+  --brand-ink:#5FE58C;
+  --brand-btn:#087A35;
+  --brand-tint:#11261A;
+  --brand-line:rgba(37,211,102,.28);
+  --on-brand:#FFFFFF;
   --danger:#FF7A82;
   --danger-tint:#2A1518;
   --danger-ink:#FFB0B6;
@@ -112,8 +109,6 @@ try{
   --blue:#72AAFF;
   --blue-tint:#10213A;
   --notice-ink:#C6F5D7;
-  --deep:#0A1710;
-  --deep-2:#0D2C18;
   --overlay:rgba(0,0,0,.70);
 }
 
@@ -164,7 +159,7 @@ button{cursor:pointer;font-family:var(--disp)}
 .theme-toggle{
   width:44px;height:44px;flex:none;border:1px solid var(--line);border-radius:13px;
   display:flex;align-items:center;justify-content:center;
-  background:var(--surface);color:var(--ink);font-size:18px;padding:0;
+  background:var(--tile);color:var(--ink);font-size:18px;padding:0;
   transition:transform .09s,background .2s;
 }
 .theme-toggle:active{transform:scale(.94)}
@@ -173,18 +168,14 @@ button{cursor:pointer;font-family:var(--disp)}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .who .rl{font-size:12px;color:var(--ink-2);font-weight:700;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-/* Баланс в шапке — компактный фишкой, чтобы имя и роль не обрезались.
-   Полная сумма живёт на вкладке «Бонусы». */
-.wallet-mini{flex:none;display:flex;align-items:center;gap:2px;
-  padding:8px 12px;border-radius:99px;
-  background:var(--brand-tint);border:1px solid var(--brand-line)}
+.wallet-mini{text-align:right;flex:none}
 .wallet-mini .v{
-  font-weight:800;font-size:16px;line-height:1;letter-spacing:-.03em;
-  color:var(--brand-ink);display:flex;align-items:center;gap:1px;
+  font-weight:800;font-size:26px;line-height:1;letter-spacing:-.045em;
+  color:var(--brand-ink);display:flex;align-items:center;gap:1px;justify-content:flex-end;
   font-variant-numeric:tabular-nums;
 }
-.wallet-mini .l{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
-  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.wallet-mini .l{font-size:10.5px;letter-spacing:.06em;color:var(--ink-2);
+  text-transform:uppercase;margin-top:4px;font-weight:800}
 .wallet-mini.pop .v{animation:pop .5s ease-out}
 
 /* ── страницы и карточки ──────────────────────────────────── */
@@ -205,29 +196,6 @@ button{cursor:pointer;font-family:var(--disp)}
 .card .card{border-radius:16px}
 
 /* герой: тёмная фирменная плашка со штриховкой в обеих темах */
-.card.hero{
-  background:linear-gradient(152deg,var(--deep-2),var(--deep));
-  border-color:var(--brand-line);color:var(--deep-ink);
-}
-.card.hero::after{
-  content:"";position:absolute;right:-40px;top:-52px;width:196px;height:196px;
-  border-radius:50%;pointer-events:none;
-  background:repeating-linear-gradient(128deg,rgba(57,230,83,.14) 0 3px,transparent 3px 12px);
-}
-.card.hero>*{position:relative;z-index:1}
-.card.hero .eyebrow{color:var(--deep-ink-2)}
-.card.hero .eyebrow b{background:var(--money)}
-.card.hero .eyebrow .cnt{color:var(--money)}
-.card.hero p.sub,.card.hero .hint,.card.hero .ty{color:var(--deep-ink-2)}
-.card.hero .field label{color:var(--deep-ink-2)}
-.card.hero .field-error{color:#FFB0B6}
-.card.hero .tinput{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.16);
-  color:var(--deep-ink)}
-.card.hero .tinput::placeholder{color:#7E9184}
-.card.hero .tinput:focus{border-color:var(--money);box-shadow:0 0 0 3px rgba(57,230,83,.16)}
-.card.hero .charge{background:rgba(255,255,255,.11)}
-.card.hero .charge::after{background:repeating-linear-gradient(90deg,
-  transparent 0 15px,rgba(8,20,13,.62) 15px 17px)}
 
 .eyebrow{
   display:flex;align-items:center;gap:8px;margin-bottom:12px;
@@ -281,24 +249,20 @@ p.sub{margin:0;color:var(--ink-2);font-size:14px}
 }
 .btn:active{transform:scale(.975)}
 .btn:disabled{opacity:.42;cursor:not-allowed}
-.btn-volt{background:var(--brand);color:var(--on-brand);
-  box-shadow:0 8px 20px -10px rgba(22,135,42,.75)}
-.btn-dark{background:var(--deep);color:var(--deep-ink);border-color:var(--deep)}
-[data-theme="dark"] .btn-dark{background:var(--surface-2);border-color:var(--line-strong);color:var(--ink)}
-.btn-ghost{background:var(--surface);color:var(--ink);border-color:var(--line)}
-.btn-amber{background:var(--deep);color:var(--deep-ink);border-color:var(--deep)}
-[data-theme="dark"] .btn-amber{background:var(--surface-2);border-color:var(--line-strong);color:var(--ink)}
+.btn-volt{background:var(--brand-btn);color:var(--on-brand)}
+.btn-dark{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn-ghost{background:var(--tile);color:var(--ink);border-color:var(--line)}
+.btn-amber{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .btn.sm{padding:12px 14px;font-size:14px;border-radius:12px;width:auto;
   flex:1 1 150px;min-width:0;min-height:46px}
 .mini{
-  background:var(--surface);border:1px solid var(--line);
+  background:var(--tile);border:1px solid var(--line);
   min-height:44px;color:var(--ink);border-radius:12px;padding:11px 13px;
   font-weight:700;font-size:14px;transition:transform .09s,border-color .18s;
 }
 .mini:active{transform:scale(.97)}
 .mini.warn{color:var(--danger);border-color:var(--danger)}
 .acts{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
-.card.hero .mini{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18);color:var(--deep-ink)}
 
 /* ── поля ─────────────────────────────────────────────────── */
 .field{margin-bottom:12px}
@@ -307,11 +271,10 @@ p.sub{margin:0;color:var(--ink-2);font-size:14px}
   text-transform:uppercase;color:var(--ink-2);margin-bottom:7px;
 }
 .tinput{
-  width:100%;background:var(--surface);border:1px solid var(--line);
+  width:100%;background:var(--tile);border:1px solid var(--line);
   border-radius:13px;padding:13px 14px;font-size:15px;font-weight:600;min-height:48px;
   transition:border-color .16s,box-shadow .16s;
 }
-[data-theme="dark"] .tinput{background:var(--surface-3)}
 .tinput::placeholder{color:var(--placeholder);font-weight:500}
 .tinput:focus{outline:none;border-color:var(--brand);
   box-shadow:0 0 0 3px rgba(53,211,58,.16)}
@@ -333,8 +296,7 @@ select.tinput{appearance:none;background-image:
 .seg button{flex:1;min-height:42px;background:transparent;border:0;border-radius:10px;
   padding:10px 8px;font-weight:800;font-size:13.5px;color:var(--ink-2);
   transition:background .18s,color .18s}
-.seg button.on{background:var(--brand);color:var(--on-brand);
-  box-shadow:0 2px 8px -3px rgba(22,135,42,.6)}
+.seg button.on{background:var(--brand-btn);color:#fff}
 .seg.scroll{overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;
   margin-bottom:0}
 .seg.scroll::-webkit-scrollbar{display:none}
@@ -349,11 +311,10 @@ select.tinput{appearance:none;background-image:
 /* ── карточка задания ─────────────────────────────────────── */
 .task{
   position:relative;overflow:hidden;
-  background:var(--surface);border:1px solid var(--line);
+  background:var(--tile);border:1px solid var(--line);
   border-radius:17px;padding:14px;margin-bottom:10px;
 }
-[data-theme="dark"] .card .task{background:var(--surface-3)}
-.card.warm .task,.card.lit .task,.card.hero .task{background:var(--surface)}
+.card.warm .task,.card.lit .task{background:var(--tile)}
 .task:last-child{margin-bottom:0}
 .task.flash::after{
   content:"";position:absolute;inset:0;pointer-events:none;
@@ -362,20 +323,19 @@ select.tinput{appearance:none;background-image:
 }
 /* Сетка вместо флекса: значок держит квадрат, заголовок получает всю
    ширину, награда переезжает на свою строку и не сжимает текст. */
-.row1{display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px 12px;align-items:start}
+.row1{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:10px 12px;align-items:start}
 .tico{
   width:42px;height:42px;border-radius:13px;
-  background:var(--brand-tint);border:1px solid var(--brand-line);
+  background:var(--surface-2);
   display:flex;align-items:center;justify-content:center;font-size:20px;
 }
-.row1>div:not(.tico){grid-column:2;min-width:0}
+.row1>div:not(.tico){grid-column:2;grid-row:1;min-width:0}
 .tt{font-weight:800;font-size:15px;letter-spacing:-.02em;line-height:1.3}
 .ty{font-size:13.5px;color:var(--ink-2);margin-top:2px}
 .rw{
-  grid-column:2;justify-self:start;
-  font-weight:800;font-size:14px;color:var(--brand-ink);
-  background:var(--brand-tint);border:1px solid var(--brand-line);
-  border-radius:99px;padding:6px 11px;white-space:nowrap;
+  grid-column:3;grid-row:1;
+  font-weight:800;font-size:14.5px;color:var(--brand-ink);
+  background:var(--brand-tint);border-radius:99px;padding:7px 12px;white-space:nowrap;
   font-variant-numeric:tabular-nums;
 }
 .dt{margin-top:10px;font-size:14px;color:var(--detail);line-height:1.5}
@@ -406,7 +366,7 @@ select.tinput{appearance:none;background-image:
 .shelf::-webkit-scrollbar{display:none}
 .medal{
   flex:none;width:98px;padding:14px 8px;border-radius:17px;text-align:center;
-  background:var(--surface);border:1px solid var(--line);
+  background:var(--tile);border:1px solid var(--line);
   color:var(--ink);font:inherit;appearance:none;
 }
 .medal .em{font-size:27px;line-height:1;display:block;animation:spark 3.4s ease-in-out infinite}
@@ -416,9 +376,8 @@ select.tinput{appearance:none;background-image:
 .medal .bn{font-size:12px;color:var(--brand-ink);font-weight:800;margin-top:4px}
 .award{
   display:flex;align-items:flex-start;gap:12px;padding:14px;margin-bottom:9px;
-  background:var(--surface);border:1px solid var(--line);border-radius:17px;
+  background:var(--tile);border:1px solid var(--line);border-radius:17px;
 }
-[data-theme="dark"] .card .award{background:var(--surface-3)}
 .award.off{opacity:.55}
 .award .em{font-size:25px;flex:none;width:34px;text-align:center}
 .award>div{flex:1;min-width:0}
@@ -431,7 +390,7 @@ select.tinput{appearance:none;background-image:
   background:var(--surface-2);border:0;
 }
 .step.done .dot{background:var(--brand)}
-.step.next .dot{background:var(--surface);box-shadow:inset 0 0 0 2px var(--brand);
+.step.next .dot{background:var(--tile);box-shadow:inset 0 0 0 2px var(--brand);
   animation:beat 1.9s ease-in-out infinite}
 .step b{display:block;font-size:13px;font-weight:800;font-variant-numeric:tabular-nums}
 .step span{display:block;font-size:12px;color:var(--brand-ink);font-weight:800}
@@ -442,7 +401,6 @@ select.tinput{appearance:none;background-image:
   color:var(--brand-ink);display:flex;align-items:center;gap:4px;
   font-variant-numeric:tabular-nums;
 }
-.card.hero .bigmoney{color:var(--money)}
 .bigmoney small{font-size:24px}
 .ledger{display:flex;align-items:center;gap:12px;padding:12px 0;
   border-bottom:1px solid var(--line)}
@@ -484,29 +442,23 @@ select.tinput{appearance:none;background-image:
 
 /* ── нижняя навигация: тёмная плашка bb. в обеих темах ────── */
 .tabbar{
-  position:fixed;left:50%;transform:translateX(-50%);bottom:0;z-index:40;
-  width:100%;max-width:520px;display:grid;
+  position:fixed;left:0;right:0;bottom:0;z-index:40;display:grid;
   grid-template-columns:repeat(3,1fr);
-  padding:7px 6px calc(7px + var(--safe-bottom));
-  background:rgba(7,27,16,.97);
-  border:1px solid rgba(255,255,255,.08);border-bottom:0;
-  border-radius:18px 18px 0 0;
-  box-shadow:0 -14px 38px rgba(4,14,8,.30);
-  backdrop-filter:blur(14px);
+  padding:8px 4px calc(8px + var(--safe-bottom));
+  background:var(--bg);border-top:1px solid var(--line);
 }
-[data-theme="dark"] .tabbar{background:rgba(8,16,11,.97)}
 .tabbar.has-admin{grid-template-columns:repeat(4,1fr)}
 .tab{
-  min-height:52px;background:none;border:0;padding:7px 2px;color:#9FB1A4;
-  font-size:11px;font-weight:800;letter-spacing:.01em;border-radius:12px;
+  min-height:52px;background:none;border:0;padding:7px 2px;color:var(--ink-2);
+  font-size:11.5px;font-weight:800;letter-spacing:.01em;
   display:flex;flex-direction:column;align-items:center;gap:4px;
-  position:relative;transition:color .18s,background .18s;
+  position:relative;transition:color .18s;
 }
 .tab .i{font-size:20px;line-height:1;transition:transform .22s}
-.tab.on{color:#FFFFFF;background:#143A22}
+.tab.on{color:var(--brand-ink)}
 .tab.on .i{transform:translateY(-2px)}
 .tab.on::before{
-  content:"";position:absolute;top:0;width:22px;height:3px;border-radius:0 0 3px 3px;
+  content:"";position:absolute;top:-1px;width:24px;height:3px;border-radius:0 0 3px 3px;
   background:var(--brand);
 }
 
@@ -528,13 +480,13 @@ select.tinput{appearance:none;background-image:
 .emojirow{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
 .emojirow button{
   width:44px;height:44px;font-size:21px;border-radius:12px;
-  background:var(--surface);border:1px solid var(--line);
+  background:var(--tile);border:1px solid var(--line);
 }
 .emojirow button.on{border-color:var(--brand);background:var(--brand-tint)}
 .check{display:flex;align-items:center;gap:12px;padding:14px;border-radius:14px;
-  background:var(--surface);border:1px solid var(--line);margin-bottom:9px}
+  background:var(--tile);border:1px solid var(--line);margin-bottom:9px}
 .check .bx{width:23px;height:23px;flex:none;border-radius:7px;
-  background:var(--surface);border:1.5px solid var(--line-strong);
+  background:var(--tile);border:1.5px solid var(--line-strong);
   display:flex;align-items:center;justify-content:center;
   font-size:13px;color:transparent}
 .check.on .bx{background:var(--brand);border-color:var(--brand);color:var(--on-brand)}
@@ -545,9 +497,8 @@ select.tinput{appearance:none;background-image:
 .member{
   width:100%;text-align:left;display:flex;align-items:center;gap:12px;
   padding:11px 12px;margin-bottom:8px;border:1px solid var(--line);border-radius:15px;
-  background:var(--surface);transition:transform .09s,border-color .18s;
+  background:var(--tile);transition:transform .09s,border-color .18s;
 }
-[data-theme="dark"] .card .member{background:var(--surface-3)}
 .member:last-child{margin-bottom:0}
 .member:active{transform:scale(.985)}
 .member:hover{border-color:var(--brand-line)}
@@ -565,7 +516,7 @@ select.tinput{appearance:none;background-image:
   background:var(--brand-tint);border:1px solid var(--brand-line);
   border-radius:99px;padding:5px 10px;font-variant-numeric:tabular-nums}
 .mshead{display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:14px;
-  border-radius:15px;background:var(--surface);border:1px solid var(--line)}
+  border-radius:15px;background:var(--tile);border:1px solid var(--line)}
 .mgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .mgrid .mini{padding:14px 10px}
 .tagbar{display:flex;gap:7px;overflow-x:auto;padding:0 0 11px;
@@ -581,7 +532,7 @@ select.tinput{appearance:none;background-image:
 
 /* ── выбор фото ───────────────────────────────────────────── */
 .photo-pick{display:flex;align-items:center;gap:12px;padding:12px;border-radius:14px;
-  background:var(--surface);border:1px dashed var(--line-strong);cursor:pointer}
+  background:var(--tile);border:1px dashed var(--line-strong);cursor:pointer}
 .photo-pick img{width:72px;height:72px;object-fit:cover;border-radius:12px;background:var(--surface-2)}
 .photo-pick .tx{flex:1;min-width:0;font-size:13.5px;color:var(--ink-2);line-height:1.45}
 .photo-pick .tx b{color:var(--ink);font-size:14px}
@@ -591,7 +542,7 @@ select.tinput{appearance:none;background-image:
 
 /* ── выбор варианта (роль, тема) ──────────────────────────── */
 .pick{width:100%;text-align:left;display:flex;align-items:center;gap:12px;
-  padding:14px;border-radius:15px;background:var(--surface);
+  padding:14px;border-radius:15px;background:var(--tile);
   border:1px solid var(--line);margin-bottom:9px;transition:transform .09s,border-color .18s}
 .pick:active{transform:scale(.985)}
 .pick.on{border-color:var(--brand);background:var(--brand-tint)}
@@ -606,12 +557,11 @@ select.tinput{appearance:none;background-image:
   position:fixed;left:50%;bottom:calc(94px + env(safe-area-inset-bottom));
   transform:translate3d(-50%,16px,0);opacity:0;pointer-events:none;z-index:80;
   max-width:86%;padding:13px 18px;border-radius:14px;
-  background:var(--deep);border:1px solid rgba(255,255,255,.12);color:#F1F7F2;
+  background:var(--ink);border:0;color:var(--bg);
   font-size:14px;font-weight:700;text-align:center;
-  box-shadow:0 16px 40px rgba(4,14,8,.38);
+  box-shadow:0 16px 40px rgba(4,14,8,.28);
   transition:transform .26s,opacity .26s;
 }
-[data-theme="dark"] .toast{background:#EFF4F0;color:#08130B;border-color:transparent}
 .toast.show{transform:translate3d(-50%,0,0);opacity:1}
 
 /* ── список ценностей на регистрации ──────────────────────── */
@@ -622,10 +572,34 @@ select.tinput{appearance:none;background-image:
   color:var(--brand-ink);display:flex;align-items:center;justify-content:center;
   font-weight:800;font-size:13px}
 
+/* ── путь задания: от «взял» до начисления (макет 2b) ─────── */
+.tl{list-style:none;margin:13px 0 0;padding:0 0 0 24px;position:relative}
+.tl-i{position:relative;padding-bottom:15px}
+.tl-i:last-child{padding-bottom:0}
+.tl-i::before{content:"";position:absolute;left:-24px;top:3px;width:13px;height:13px;
+  border-radius:50%;background:var(--surface-2)}
+.tl-i::after{content:"";position:absolute;left:-18.5px;top:18px;bottom:-2px;width:2px;
+  background:var(--surface-2)}
+.tl-i:last-child::after{display:none}
+.tl-i.done::before{background:var(--brand)}
+.tl-i.done::after{background:var(--brand)}
+.tl-i.now::before{background:var(--tile);box-shadow:inset 0 0 0 3px var(--brand)}
+.tl-i b{display:block;font-size:14px;font-weight:800;letter-spacing:-.015em}
+.tl-i.now b{color:var(--brand-ink)}
+.tl-i.wait b{color:var(--ink-2)}
+.tl-i span{display:block;font-size:13px;color:var(--ink-2);margin-top:2px;line-height:1.4}
+
+/* ── что это даст: баланс до и после проверки ─────────────── */
+.pv{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px}
+.pv .a{text-align:right}
+.pv .ar{color:var(--ink-2);font-size:19px;font-weight:800}
+.valnum{font-size:27px;font-weight:800;letter-spacing:-.045em;color:var(--brand-ink);
+  font-variant-numeric:tabular-nums;margin-top:3px;line-height:1.05}
+
 /* ── KPI-плитки скаута ────────────────────────────────────── */
 .statgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
 .stat{position:relative;overflow:hidden;min-height:96px;padding:15px 15px 14px;
-  border-radius:17px;background:var(--surface);border:1px solid var(--line);
+  border-radius:17px;background:var(--tile);border:1px solid var(--line);
   display:flex;flex-direction:column;justify-content:space-between}
 .stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--brand)}
 .stat b{display:block;font-size:29px;line-height:1;font-weight:800;letter-spacing:-.045em;
@@ -656,8 +630,7 @@ select.tinput{appearance:none;background-image:
 .template-toolbar h2{margin:0;font-size:20px;font-weight:800;letter-spacing:-.035em}
 .template-list{display:grid;gap:10px}
 .template-card{display:grid;grid-template-columns:84px minmax(0,1fr);gap:12px;padding:12px;
-  border-radius:17px;background:var(--surface);border:1px solid var(--line)}
-[data-theme="dark"] .card .template-card{background:var(--surface-3)}
+  border-radius:17px;background:var(--tile);border:1px solid var(--line)}
 .template-card.no-photo{grid-template-columns:1fr}
 .template-card img{width:84px;height:84px;object-fit:cover;border-radius:12px;background:var(--surface-2)}
 .template-card .acts{grid-column:1/-1;margin-top:0}
@@ -760,8 +733,8 @@ select.tinput{appearance:none;background-image:
   .logo-wrap,.logo{width:42px;height:42px}
   .theme-toggle{width:44px;height:44px}
   .who .nm{font-size:15px}
-  .wallet-mini{padding:7px 10px}
-  .wallet-mini .v{font-size:15px}
+  .wallet-mini .v{font-size:21px}
+  .wallet-mini .l{display:none}
   .bigmoney{font-size:44px}
   .evidence-grid{grid-template-columns:1fr 1fr}
 }
@@ -864,6 +837,18 @@ select.tinput{appearance:none;background-image:
 
     <!-- рабочее -->
     <div id="worksBox" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+      <div class="card warm hidden" id="pendingValueCard">
+        <div class="eyebrow"><b></b>Что это даст</div>
+        <div class="pv">
+          <div><div class="ty">Сейчас на балансе</div>
+            <div class="valnum"><span class="num" id="pvNow">0</span>⚡</div></div>
+          <div class="ar" aria-hidden="true">→</div>
+          <div class="a"><div class="ty">После проверки</div>
+            <div class="valnum"><span class="num" id="pvAfter">0</span>⚡</div></div>
+        </div>
+        <div class="charge" style="margin-top:13px"><i id="pvBar" style="width:0%"></i></div>
+        <div class="hint" id="pvHint"></div>
+      </div>
       <div class="card" id="mineWrap">
         <div class="eyebrow"><b></b>В работе<span class="cnt" id="mineCnt"></span></div>
         <div id="mineList"></div>
@@ -881,7 +866,7 @@ select.tinput{appearance:none;background-image:
 
   <!-- ═══════════ КОШЕЛЁК ═══════════ -->
   <div id="tab-wallet" class="page tabview hidden">
-    <div class="card solid hero">
+    <div class="card warm">
       <div class="eyebrow"><b></b>Баланс</div>
       <div class="bigmoney"><span class="num" id="wBonus">0</span><small>⚡</small></div>
       <p class="sub" style="margin-top:9px;font-weight:700" id="wRate">1⚡ = 1 ₽ · минута — 8,5 ₽</p>
@@ -1503,7 +1488,7 @@ select.tinput{appearance:none;background-image:
 
 <div id="nav" class="tabbar hidden" aria-label="Основная навигация">
   <button class="tab on" data-tab="tab-tasks" aria-current="page"><span class="i">🚲</span>Задания</button>
-  <button class="tab" data-tab="tab-wallet"><span class="i">⚡</span>Бонусы</button>
+  <button class="tab" data-tab="tab-wallet"><span class="i">⚡</span>Кошелёк</button>
   <button class="tab" data-tab="tab-profile"><span class="i">🌿</span>Профиль</button>
   <button class="tab admin-only" data-tab="tab-admin"><span class="i">🛡️</span>Скаут</button>
 </div>
@@ -2257,6 +2242,7 @@ async function loadTasks(){
     const personal = open.filter(t=>t.is_personal);
     const free = open.filter(t=>!t.is_personal);
 
+    renderPendingValue(mine);
     $('mineWrap').classList.toggle('hidden', !mine.length);
     $('mineCnt').textContent = mine.length || '';
     $('mineList').innerHTML = mine.map(taskCardMine).join('');
@@ -2316,8 +2302,6 @@ async function loadTasks(){
 function taskBody(t){
   const slot = fmtSlot(t.slot_start, t.slot_end);
   const pills = [];
-  const rate = Number((STATE && STATE.ride_rub_per_min) || 8.5);
-  const minutes = Math.max(0,Math.round(Number(t.reward||0)/rate));
   if(t.is_personal) pills.push('<span class="pill on">Только для тебя</span>');
   if(t.repeatable)  pills.push('<span class="pill on">Для всех</span>');
   if(slot)          pills.push('<span class="pill">🕒 '+esc(slot)+'</span>');
@@ -2331,7 +2315,7 @@ function taskBody(t){
   return '<div class="row1"><div class="tico">'+esc(t.emoji||'📍')+'</div>'+
     '<div><div class="tt">'+esc(t.title)+'</div>'+
     '<div class="ty">'+esc(t.type_title)+'</div></div>'+
-    '<span class="rw">+'+Number(t.reward||0)+'⚡ · ≈'+minutes+' мин</span></div>'+
+    '<span class="rw">'+Number(t.reward||0)+'⚡</span></div>'+
     (t.details?'<div class="dt">'+esc(t.details)+'</div>':'')+
     ((t.city||t.address)?'<div class="addr">📍 '+
       esc([t.city,t.address].filter(Boolean).join(' · '))+'</div>':'')+
@@ -2344,13 +2328,51 @@ function taskCardOpen(t){
     '<div class="acts"><button class="btn btn-volt sm" data-claim="'+t.id+'" data-claim-policy="'+esc(normalizedEvidencePolicy(t.evidence_policy))+'">'+
     'Взять задание</button></div></div>';
 }
+/* Что сейчас происходит с заданием: путь от «взял» до начисления.
+   Точных отметок времени бэкенд не отдаёт, поэтому показываем стадии,
+   а не выдуманные часы. */
+/* Сколько бонусов ждёт решения и что это откроет — на существующих данных. */
+function renderPendingValue(mine){
+  const reviewing = (mine||[]).filter(t=>t.status==='review');
+  const card = $('pendingValueCard');
+  card.classList.toggle('hidden', !reviewing.length);
+  if(!reviewing.length) return;
+  const pending = reviewing.reduce((sum,t)=>sum+Number(t.reward||0),0);
+  const now = Number((STATE && STATE.me && STATE.me.bonus) || 0);
+  const after = now + pending;
+  const min = Number((STATE && STATE.withdraw_min) || 1000);
+  $('pvNow').textContent = now;
+  $('pvAfter').textContent = after;
+  $('pvBar').style.width = pct(after, min) + '%';
+  $('pvHint').textContent = after >= min
+    ? 'Этого хватит — откроется заявка на перевод в приложение Бибибайк.'
+    : 'До перевода останется ' + (min - after) + '⚡.';
+}
+function taskTimeline(t){
+  const review = t.status==='review';
+  const steps = review ? [
+    {t:'Взял задание', s:'done'},
+    {t:'Отправил отчёт', s:'done'},
+    {t:'Сейчас: у ответственного на проверке', s:'now',
+     d:'Ответственный сверяет фото с правилом задания'},
+    {t:'Начислим '+Number(t.reward||0)+'⚡ в кошелёк', s:'wait',
+     d:'или вернут с причиной — задание останется за тобой'},
+  ] : [
+    {t:'Взял задание', s:'done'},
+    {t:'Выполни и пришли отчёт', s:'now', d:'Кнопка ниже — приложи результат'},
+    {t:'Ответственный проверит', s:'wait'},
+    {t:'Начислим '+Number(t.reward||0)+'⚡ в кошелёк', s:'wait'},
+  ];
+  return '<ol class="tl">'+steps.map(x=>
+    '<li class="tl-i '+x.s+'"><b>'+esc(x.t)+'</b>'+
+    (x.d?'<span>'+esc(x.d)+'</span>':'')+'</li>').join('')+'</ol>';
+}
 function taskCardMine(t){
   const review = t.status==='review';
   const reportLabel = normalizedEvidencePolicy(t.evidence_policy)==='comment_only'
     ? 'Отчитаться' : 'Добавить фотоотчёт';
   return '<div class="task" data-card="'+t.id+'">'+taskBody(t)+
-    '<div class="meta"><span class="'+(review?'pill hot':'pill on')+'">'+
-    (review?'⏳ На проверке':'🔧 В работе')+'</span></div>'+
+    taskTimeline(t)+
     (!review&&t.review_note?'<div class="notice bad"><b>Вернули на доработку</b><br>'+esc(t.review_note)+'</div>':'')+
     (review ? '' :
       '<div class="acts"><button class="btn btn-volt sm" data-done="'+t.id+'">'+
