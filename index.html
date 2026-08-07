@@ -531,8 +531,10 @@ select.tinput{appearance:none;background-image:
 .member-tags .pill::before{display:none}
 
 /* ── выбор фото ───────────────────────────────────────────── */
-.photo-pick{display:flex;align-items:center;gap:12px;padding:12px;border-radius:14px;
-  background:var(--tile);border:1px dashed var(--line-strong);cursor:pointer}
+.field label.photo-pick,.photo-pick{display:flex;align-items:center;gap:12px;padding:12px;
+  border-radius:14px;background:var(--tile);border:1px dashed var(--line-strong);cursor:pointer;
+  text-transform:none;letter-spacing:normal;font-size:14px;font-weight:500;
+  color:var(--ink-2);margin-bottom:0}
 .photo-pick img{width:72px;height:72px;object-fit:cover;border-radius:12px;background:var(--surface-2)}
 .photo-pick .tx{flex:1;min-width:0;font-size:13.5px;color:var(--ink-2);line-height:1.45}
 .photo-pick .tx b{color:var(--ink);font-size:14px}
@@ -614,16 +616,56 @@ select.tinput{appearance:none;background-image:
 .stat.tone-money::before{background:var(--amber)}
 .stat.tone-money b{color:var(--amber)}
 
-/* ── мастер создания задания ──────────────────────────────── */
-.wizard-progress{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:4px 0 16px}
-.wizard-progress i{height:5px;border-radius:9px;background:var(--surface-2)}
-.wizard-progress i.on{background:var(--brand)}
+/* ── форма постановки задания ─────────────────────────────── */
 /* Кнопки мастера липнут над нижней панелью, а не под ней. */
 .wizard-actions{display:flex;gap:8px;position:sticky;
   bottom:calc(78px + var(--safe-bottom));padding-top:12px;
   background:linear-gradient(transparent,var(--surface) 12px)}
 .wizard-actions .btn{flex:1}
 .task-modebar{margin-bottom:14px}
+
+/* ── рабочая панель скаута на широком экране (макеты 3a/3b) ──
+   Тот же разметочный каркас, что и на телефоне: сегменты
+   разворачиваются в левый сайдбар, панели встают во вторую колонку. */
+@media (min-width:900px){
+  /* шапка и нижняя панель остаются узкой колонкой приложения,
+     широкой становится только рабочая панель скаута */
+  .page{max-width:780px}
+  #tab-admin{
+    max-width:1280px;display:grid;gap:20px;align-items:start;
+    grid-template-columns:236px minmax(0,1fr);
+  }
+  #tab-admin>.segwrap{grid-column:1;grid-row:1;position:sticky;
+    top:calc(78px + var(--safe-top));margin:0}
+  #tab-admin>.segwrap::after{display:none}
+  #tab-admin>.segwrap .seg.scroll{
+    flex-direction:column;gap:5px;background:transparent;border:0;padding:0;overflow:visible;
+  }
+  #tab-admin>.segwrap .seg.scroll button{
+    flex:none;width:100%;text-align:left;justify-content:flex-start;
+    padding:12px 14px;border-radius:12px;font-size:14.5px;white-space:normal;
+  }
+  #tab-admin>.segwrap .seg.scroll button.on{
+    background:var(--brand-tint);color:var(--brand-ink);
+    box-shadow:inset 3px 0 0 var(--brand);
+  }
+  /* все панели живут в одной ячейке — видима всегда одна */
+  #tab-admin>div[id^="adSub"]{grid-column:2;grid-row:1;min-width:0;max-width:1000px}
+  #tab-admin .statgrid{grid-template-columns:repeat(4,minmax(0,1fr))}
+  #taskCreateMode,#taskTemplateMode,#staffAccessRequestCard{max-width:660px}
+  /* реестр заданий и очередь читаются в две колонки */
+  #adOpen,#adReview,#adPending{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start}
+  #adOpen>.empty,#adReview>.empty,#adPending>.empty{grid-column:1/-1}
+  #adOpen .task,#adReview .task,#adPending .task{margin-bottom:0}
+}
+@media (min-width:1200px){
+  #tab-admin>.segwrap{position:sticky}
+  #adOpen,#adReview,#adPending{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+
+/* ── постановка задания одним экраном (макет 3b) ──────────── */
+.wizard-step+.wizard-step{margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}
+.wizard-step h2.big{font-size:17px}
 
 /* ── библиотека шаблонов ──────────────────────────────────── */
 .template-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
@@ -713,8 +755,9 @@ select.tinput{appearance:none;background-image:
 }
 
 @media (min-width:560px){
-  .head{max-width:520px;margin:0 auto;border-left:1px solid var(--line);
-    border-right:1px solid var(--line);border-bottom-left-radius:0}
+  .head,.tabbar{max-width:520px;margin-left:auto;margin-right:auto}
+  .head{border-left:1px solid var(--line);border-right:1px solid var(--line)}
+  .tabbar{border:1px solid var(--line);border-bottom:0;border-radius:16px 16px 0 0}
   .statgrid{grid-template-columns:repeat(4,1fr)}
 }
 @media (max-width:420px){
@@ -1016,13 +1059,12 @@ select.tinput{appearance:none;background-image:
         <button data-taskmode="taskTemplateMode" data-cap-any="task.template.manage" aria-pressed="false">Шаблоны</button>
       </div>
       <div id="taskCreateMode">
-      <div class="eyebrow"><b></b><span id="ntFormKind">Новое задание</span> · <span id="ntStepLabel">шаг 1 из 3</span></div>
+      <div class="eyebrow"><b></b><span id="ntFormKind">Новое задание</span></div>
       <div class="notice hidden" id="ntEditBanner" role="status">
         <b id="ntEditTitle">Редактирование задания</b><br>
         Изменять можно только открытое задание, которое ещё никто не взял.
         <div class="acts"><button class="mini" id="ntEditCancel" type="button">Отменить редактирование</button></div>
       </div>
-      <div class="wizard-progress" aria-hidden="true"><i class="on"></i><i></i><i></i></div>
 
       <div class="wizard-step" data-wstep="1">
         <h2 class="big">Что нужно сделать?</h2>
@@ -1109,7 +1151,6 @@ select.tinput{appearance:none;background-image:
 
       <div class="field-error" id="ntError" role="alert"></div>
       <div class="wizard-actions">
-        <button class="mini hidden" id="ntBack" type="button">Назад</button>
         <button class="btn btn-volt" id="ntCreate" data-cap-any="task.create" type="button">Продолжить</button>
       </div>
       </div>
@@ -4096,18 +4137,16 @@ async function startTaskEdit(taskId){
   setWizardStep(1,false); window.scrollTo(0,0); $('ntTitle').focus();
 }
 $('ntEditCancel').onclick=()=>{ resetTaskEditState(true); setWizardStep(1,false); toast('Редактирование отменено.'); };
+/* Постановка задания одним экраном: шаги остались секциями формы,
+   проверка идёт сразу по всем полям (макет 3b). */
 function setWizardStep(step,focusHeading){
-  TASK_WIZARD_STEP=Math.max(1,Math.min(3,Number(step)||1));
-  document.querySelectorAll('.wizard-step').forEach(x=>x.classList.toggle('hidden',Number(x.dataset.wstep)!==TASK_WIZARD_STEP));
-  document.querySelectorAll('.wizard-progress i').forEach((x,i)=>x.classList.toggle('on',i<TASK_WIZARD_STEP));
-  $('ntStepLabel').textContent='шаг '+TASK_WIZARD_STEP+' из 3';
-  $('ntBack').classList.toggle('hidden',TASK_WIZARD_STEP===1);
-  $('ntCreate').textContent=TASK_WIZARD_STEP===3?'Проверить задание':'Продолжить';
+  TASK_WIZARD_STEP=3;
+  document.querySelectorAll('.wizard-step').forEach(x=>x.classList.remove('hidden'));
+  $('ntCreate').textContent='Проверить задание';
   refreshTaskSlotMinimum();
   clearInvalid(['ntTitle','ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd','ntReward','ntBudgetCap'],'ntError');
-  window.scrollTo(0,0);
   if(focusHeading!==false){
-    const heading=document.querySelector('.wizard-step:not(.hidden) h2');
+    const heading=document.querySelector('.wizard-step h2');
     if(heading&&heading.getClientRects().length){
       heading.tabIndex=-1;
       setTimeout(()=>heading.focus({preventScroll:true}),0);
@@ -4190,16 +4229,10 @@ function openTaskPreview(body){
   $('ntPublish').textContent=TASK_EDIT_ID?'Сохранить изменения':($('ntMode').value==='personal'?'Назначить':'Опубликовать');
   $('taskPreviewSheet').classList.remove('hidden');
 }
-$('ntBack').onclick=()=>setWizardStep(TASK_WIZARD_STEP-1);
 $('ntCreate').onclick=()=>{
   clearInvalid(['ntTitle','ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd','ntReward','ntBudgetCap'],'ntError');
-  const body=collectTaskBody(), error=taskValidation(body,TASK_WIZARD_STEP);
-  if(error){
-    if(['ntCity','ntAddr','ntAssignee','ntPhoto','ntSlotStart','ntSlotEnd'].includes(error.field)
-      && TASK_WIZARD_STEP!==2) setWizardStep(2,false);
-    reportInvalid(error.field,error.message,'ntError'); buzz('no'); return;
-  }
-  if(TASK_WIZARD_STEP<3){ setWizardStep(TASK_WIZARD_STEP+1); return; }
+  const body=collectTaskBody(), error=taskValidation(body,3);
+  if(error){ reportInvalid(error.field,error.message,'ntError'); buzz('no'); return; }
   openTaskPreview(body);
 };
 $('ntPreviewBack').onclick=()=>$('taskPreviewSheet').classList.add('hidden');
