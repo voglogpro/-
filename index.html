@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" id="themeMeta" content="#F3F5EF">
+<meta name="application-version" content="v2.13.0">
 <title>БибиЗадачи</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -156,6 +157,8 @@ button{cursor:pointer;font-family:var(--disp)}
   background:repeating-linear-gradient(122deg,rgba(7,27,16,.16) 0 3px,transparent 3px 9px);
   box-shadow:inset 0 0 0 1px rgba(7,27,16,.14);
 }
+.logo .brand-mark{width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+  color:#06110a;font-size:22px;font-weight:950;letter-spacing:-.08em;line-height:1}
 .theme-toggle{
   width:44px;height:44px;flex:none;border:1px solid var(--line);border-radius:13px;
   display:flex;align-items:center;justify-content:center;
@@ -556,10 +559,10 @@ select.tinput{appearance:none;background-image:
 
 /* ── тост ─────────────────────────────────────────────────── */
 .toast{
-  position:fixed;left:50%;bottom:calc(94px + env(safe-area-inset-bottom));
-  transform:translate3d(-50%,16px,0);opacity:0;pointer-events:none;z-index:80;
-  max-width:86%;padding:13px 18px;border-radius:14px;
-  background:var(--ink);border:0;color:var(--bg);
+  position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));
+  transform:translate3d(-50%,16px,0);opacity:0;pointer-events:none;z-index:110;
+  max-width:86%;padding:13px 18px;border-radius:15px;
+  background:var(--toast-bg);border:0;color:var(--toast-ink);
   font-size:14px;font-weight:700;text-align:center;
   box-shadow:0 16px 40px rgba(4,14,8,.28);
   transition:transform .26s,opacity .26s;
@@ -761,6 +764,9 @@ select.tinput{appearance:none;background-image:
   .statgrid{grid-template-columns:repeat(4,1fr)}
 }
 @media (max-width:420px){
+  .mode-toggle{width:44px;min-width:44px;padding:0}
+  .mode-toggle span{display:none}
+  .theme-toggle{display:none}
   .two,.searchtools{grid-template-columns:1fr}
   .award-reversal-tools{grid-template-columns:1fr}
   .award-correction-card .acts{grid-template-columns:1fr}
@@ -781,6 +787,95 @@ select.tinput{appearance:none;background-image:
   .bigmoney{font-size:44px}
   .evidence-grid{grid-template-columns:1fr 1fr}
 }
+
+/* ── v2.13: вход, онбординг и отдельный CRM-режим ─────────── */
+.entry-gate{
+  position:fixed;inset:0;z-index:95;overflow-y:auto;
+  background:var(--bg);padding:calc(22px + var(--safe-top)) var(--pad)
+    calc(24px + var(--safe-bottom));
+}
+.entry-shell{width:min(100%,880px);margin:0 auto;min-height:100%;display:flex;
+  flex-direction:column;justify-content:center}
+.entry-brand{display:flex;align-items:center;gap:13px;margin-bottom:28px}
+.entry-brand .logo{width:58px;height:58px;border-radius:18px}
+.entry-brand strong{display:block;font-size:20px;letter-spacing:-.03em}
+.entry-brand span{display:block;color:var(--ink-2);font-size:14px;margin-top:2px}
+.entry-title{margin:0;font-size:clamp(32px,8vw,54px);line-height:1.02;
+  letter-spacing:-.055em;font-weight:950;max-width:700px}
+.entry-lead{margin:13px 0 25px;color:var(--ink-2);font-size:16px;max-width:620px}
+.entry-choices{display:grid;grid-template-columns:1fr;gap:12px}
+.entry-choice{appearance:none;width:100%;min-height:145px;text-align:left;padding:20px;
+  color:var(--ink);background:var(--surface);border:1px solid var(--line);
+  border-radius:22px;display:grid;grid-template-columns:52px 1fr auto;gap:14px;
+  align-items:start;transition:transform .12s,border-color .2s,background .2s}
+.entry-choice:active{transform:scale(.985)}
+.entry-choice:not(:disabled):hover{border-color:var(--brand);background:var(--brand-tint)}
+.entry-choice:disabled{opacity:.62}
+.entry-icon{width:52px;height:52px;border-radius:16px;background:var(--bg);
+  display:flex;align-items:center;justify-content:center;font-size:25px;
+  box-shadow:inset 0 0 0 1px var(--line)}
+.entry-copy b{display:block;font-size:20px;letter-spacing:-.025em;margin:1px 0 5px}
+.entry-copy small{display:block;color:var(--ink-2);font-size:14px;line-height:1.45}
+.entry-arrow{font-size:22px;color:var(--brand-ink);font-weight:900}
+.entry-lock{font-size:12px;color:var(--ink-2);font-weight:800;margin-top:7px}
+.entry-note{margin-top:15px;color:var(--ink-2);font-size:13px;text-align:center}
+
+.mode-toggle,.help-toggle{width:44px;height:44px;flex:none;border:0;border-radius:14px;
+  display:flex;align-items:center;justify-content:center;background:var(--surface);
+  color:var(--ink);box-shadow:inset 0 0 0 1px var(--line);font-weight:900}
+.mode-toggle{width:auto;min-width:44px;padding:0 12px;font-size:12px;gap:6px}
+.help-toggle{font-size:17px}
+
+.guide-hero{padding:16px;border-radius:20px;background:var(--brand-tint);margin-bottom:13px}
+.guide-hero .guide-icon{font-size:36px;margin-bottom:8px}
+.guide-steps{display:grid;gap:9px;margin:14px 0}
+.guide-step{display:grid;grid-template-columns:34px 1fr;gap:11px;align-items:start;
+  padding:13px;border-radius:16px;background:var(--surface)}
+.guide-step span{width:34px;height:34px;border-radius:11px;background:var(--brand);
+  color:#06110a;display:flex;align-items:center;justify-content:center;font-weight:950}
+.guide-step b{display:block;font-size:15px;margin:1px 0 3px}
+.guide-step small{display:block;color:var(--ink-2);font-size:13px;line-height:1.4}
+
+body.mode-admin{
+  --bg:#07110B;--surface:#101A13;--surface-2:#18241C;--line:#243229;
+  --ink:#F7FBF8;--ink-2:#9EADA3;--detail:#D2DCD5;--placeholder:#7F9085;
+  --brand:#2DDF55;--brand-ink:#58EA78;--brand-tint:#102919;
+  --danger-tint:#351919;--notice-ink:#D2F7DC;color-scheme:dark;
+  padding-bottom:calc(16px + var(--safe-bottom));
+}
+body.mode-admin .head{background:rgba(7,17,11,.96)}
+body.mode-admin .wallet-mini{display:none}
+body.mode-admin #nav{display:none!important}
+body.mode-admin #tab-admin>.segwrap{background:var(--bg);z-index:25}
+body.mode-admin #tab-admin .card{border:1px solid var(--line)}
+body.mode-admin #tab-admin .stat{min-height:104px}
+body.mode-admin #tab-admin .stat b{font-size:32px;color:var(--ink)}
+body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
+
+@media (min-width:720px){
+  .entry-choices{grid-template-columns:1fr 1fr}
+  .entry-choice{min-height:178px;grid-template-columns:58px 1fr auto;padding:24px}
+  .entry-icon{width:58px;height:58px}
+}
+@media (min-width:900px){
+  body:not(.mode-admin) .head,body:not(.mode-admin) .page{max-width:760px;margin-left:auto;margin-right:auto}
+  body.mode-admin .head{padding-left:max(28px,calc((100vw - 1480px)/2));
+    padding-right:max(28px,calc((100vw - 1480px)/2))}
+  body.mode-admin #tab-admin{width:min(1480px,100%);margin:0 auto;padding:24px 28px 40px;
+    display:grid;grid-template-columns:230px minmax(0,1fr);align-items:start;gap:22px}
+  body.mode-admin #tab-admin>.segwrap{grid-column:1;position:sticky;top:92px;padding:8px;
+    border:1px solid var(--line);border-radius:20px}
+  body.mode-admin #tab-admin>.segwrap .seg{display:flex;flex-direction:column;
+    background:transparent;margin:0;padding:0;overflow:visible}
+  body.mode-admin #tab-admin>.segwrap .seg button{width:100%;text-align:left;flex:none;
+    justify-content:flex-start;padding:13px 14px}
+  body.mode-admin #tab-admin>.segwrap::after{display:none}
+  body.mode-admin #tab-admin>[id^="adSub"]{grid-column:2;min-width:0}
+  body.mode-admin #adSubQueue .statgrid{grid-template-columns:repeat(4,1fr)}
+  body.mode-admin .sheet{align-items:center;justify-content:center;padding:24px}
+  body.mode-admin .sheet .inner{max-width:720px;max-height:90vh;border-radius:24px;
+    padding:22px;box-shadow:0 24px 80px rgba(0,0,0,.45)}
+}
 </style>
 </head>
 <body>
@@ -794,12 +889,44 @@ select.tinput{appearance:none;background-image:
   <p>Подключаем профиль Telegram…</p>
 </div>
 
+<div id="entryGate" class="entry-gate hidden" aria-labelledby="entryTitle">
+  <div class="entry-shell">
+    <div class="entry-brand">
+      <div class="logo"><span class="brand-mark" aria-hidden="true">bb.</span></div>
+      <div><strong>БибиЗадачи</strong><span>Волонтёры и команда Бибибайка</span></div>
+    </div>
+    <h1 class="entry-title" id="entryTitle">Кто вы сегодня?</h1>
+    <p class="entry-lead">Выберите рабочий режим. Права администратора проверяет сервер по вашему Telegram — одна кнопка не может открыть чужой доступ.</p>
+    <div class="entry-choices">
+      <button class="entry-choice" id="entryWorker" type="button">
+        <span class="entry-icon">🌿</span>
+        <span class="entry-copy"><b>Я волонтёр</b><small>Найти задание, приложить результат и получить бибибонусы.</small></span>
+        <span class="entry-arrow">→</span>
+      </button>
+      <button class="entry-choice" id="entryAdmin" type="button">
+        <span class="entry-icon">🛡️</span>
+        <span class="entry-copy"><b>Я администратор</b><small>Заявки, задания, команда, бонусы и доступы в рабочей CRM.</small><span class="entry-lock" id="entryAdminHint"></span></span>
+        <span class="entry-arrow">→</span>
+      </button>
+    </div>
+    <div class="entry-note">Режим можно сменить в шапке приложения.</div>
+  </div>
+</div>
+
+<div id="guideSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="guideTitle"><div class="inner">
+  <div class="grab"></div>
+  <div class="guide-hero"><div class="guide-icon" id="guideIcon">🌿</div>
+    <h3 id="guideTitle">Добро пожаловать</h3><p class="lead" id="guideLead"></p></div>
+  <div class="guide-steps" id="guideSteps"></div>
+  <button class="btn btn-volt" id="guideDone" type="button">Понятно, начать</button>
+</div></div>
+
 <div id="app" class="hidden">
 
   <!-- шапка -->
   <div class="head">
     <div class="logo-wrap">
-      <div class="logo"><img src="/logo.jpg" alt="Логотип Бибибайка"></div>
+      <div class="logo"><span class="brand-mark" aria-hidden="true">bb.</span><span class="sr-only">Бибибайк</span></div>
     </div>
     <div class="who">
       <div class="nm" id="hName">—</div>
@@ -809,6 +936,8 @@ select.tinput{appearance:none;background-image:
       <div class="v"><span class="num" id="hBonus">0</span>⚡</div>
       <div class="l">бибибонусы</div>
     </div>
+    <button class="mode-toggle" id="modeToggle" type="button" aria-label="Сменить режим">🌿 <span>Режим</span></button>
+    <button class="help-toggle" id="helpToggle" type="button" aria-label="Открыть инструкцию">?</button>
     <button class="theme-toggle" id="themeToggle" type="button"
             aria-label="Настроить тему" title="Тема оформления">◐</button>
   </div>
@@ -1011,7 +1140,7 @@ select.tinput{appearance:none;background-image:
 
   <!-- ═══════════ МОДЕРАЦИЯ ═══════════ -->
   <div id="tab-admin" class="page tabview hidden">
-    <div class="segwrap"><div class="seg scroll" role="group" aria-label="Разделы скаута">
+    <div class="segwrap"><div class="seg scroll" role="group" aria-label="Разделы CRM">
       <button data-asub="adSubQueue" data-staff-section="queue" class="on" aria-pressed="true">Сводка</button>
       <button data-asub="adSubCreate" data-staff-section="create" aria-pressed="false">Задания</button>
       <button data-asub="adSubTeam" data-staff-section="team" aria-pressed="false">Люди</button>
@@ -1021,7 +1150,7 @@ select.tinput{appearance:none;background-image:
 
     <div id="adSubQueue" style="display:flex;flex-direction:column;gap:12px">
       <div class="card warm">
-        <div class="section-title"><div><div class="eyebrow"><b></b>Режим скаута</div>
+        <div class="section-title"><div><div class="eyebrow"><b></b>Оперативная CRM</div>
           <h2>Требует внимания</h2></div><span class="role-switch">Бибибайк</span></div>
         <div class="statgrid" id="adStats" aria-live="polite">
           <div class="stat tone-apply" data-cap-any="application.queue.view,application.review"><b id="adStatPending">—</b><span>новые заявки</span></div>
@@ -1531,7 +1660,7 @@ select.tinput{appearance:none;background-image:
   <button class="tab on" data-tab="tab-tasks" aria-current="page"><span class="i">🚲</span>Задания</button>
   <button class="tab" data-tab="tab-wallet"><span class="i">⚡</span>Кошелёк</button>
   <button class="tab" data-tab="tab-profile"><span class="i">🌿</span>Профиль</button>
-  <button class="tab admin-only" data-tab="tab-admin"><span class="i">🛡️</span>Скаут</button>
+  <button class="tab admin-only" data-tab="tab-admin"><span class="i">🛡️</span>CRM</button>
 </div>
 
 <script>
@@ -1612,6 +1741,112 @@ let WITHDRAW_LEASE_TIMER=null, WITHDRAW_LEASE_REFRESHING=false;
 const START_PARAM = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
 let START_PARAM_HANDLED = false;
 const FALLBACK_BOT_URL = 'https://t.me/BbGalterbot?start=help';
+let CURRENT_MODE = null, GUIDE_MODE = null;
+
+const GUIDE_CONTENT = {
+  worker: {
+    icon:'🌿', title:'Первый день в БибиЗадачах',
+    lead:'Здесь всё устроено просто: выберите понятное задание, покажите результат и получите бибибонусы.',
+    steps:[
+      ['Выберите задание','Сначала откройте назначенное лично. Если его нет — посмотрите свободные задания своего города.'],
+      ['Выполните и покажите результат','Следуйте короткому описанию. Если требуется фото, приложение подскажет, что именно приложить.'],
+      ['Получите бибибонусы','После проверки бонусы появятся в кошельке. История всегда остаётся в профиле.']
+    ]
+  },
+  admin: {
+    icon:'🛡️', title:'Рабочая CRM Бибибайка',
+    lead:'Оперативная очередь собрана в одном месте. Каждый служебный запрос повторно проверяется сервером.',
+    steps:[
+      ['Начните со сводки','Сначала разберите новые заявки и результаты, которые ждут решения.'],
+      ['Создавайте понятные задания','Укажите исполнителя, город, срок, награду и формат результата. Для повторяемых задач используйте шаблоны.'],
+      ['Управляйте командой безопасно','Ищите людей, назначайте роли и награды. Финансовые исправления остаются в журнале и защищены независимой проверкой.']
+    ]
+  }
+};
+function modeStorageKey(){
+  const uid=STATE&&STATE.me&&STATE.me.user_id||'guest';
+  return 'bibitasks_entry_mode_v2_'+uid;
+}
+function guideStorageKey(mode){
+  const uid=STATE&&STATE.me&&STATE.me.user_id||'guest';
+  const versions=(STATE&&STATE.onboarding_versions)||{};
+  return 'bibitasks_guide_'+mode+'_v'+Number(versions[mode]||1)+'_'+uid;
+}
+function storedEntryMode(){
+  try{
+    const value=sessionStorage.getItem(modeStorageKey());
+    return value==='worker'||value==='admin'?value:null;
+  }catch(e){ return null; }
+}
+function showEntryGate(){
+  if(!STATE) return;
+  const allowed=!!(STATE.entry_modes&&STATE.entry_modes.admin&&hasStaffShell());
+  $('entryAdmin').disabled=false;
+  $('entryAdmin').classList.toggle('locked',!allowed);
+  $('entryAdminHint').textContent=allowed
+    ? (STATE.is_owner?'Полный доступ владельца подтверждён':'Служебный доступ подтверждён')
+    : 'Доступ появится после назначения владельцем';
+  $('entryGate').classList.remove('hidden');
+  setTimeout(()=>$('entryWorker').focus(),0);
+}
+function renderGuide(mode,force){
+  const content=GUIDE_CONTENT[mode]||GUIDE_CONTENT.worker;
+  if(!force){
+    try{ if(localStorage.getItem(guideStorageKey(mode))==='done') return; }catch(e){}
+  }
+  GUIDE_MODE=mode;
+  $('guideIcon').textContent=content.icon;
+  $('guideTitle').textContent=content.title;
+  $('guideLead').textContent=content.lead;
+  $('guideSteps').innerHTML=content.steps.map((step,index)=>
+    '<div class="guide-step"><span>'+(index+1)+'</span><div><b>'+esc(step[0])+'</b><small>'+esc(step[1])+'</small></div></div>'
+  ).join('');
+  $('guideSheet').classList.remove('hidden');
+}
+function activateModeTab(mode){
+  const target=mode==='admin'?'tab-admin':'tab-tasks';
+  const button=document.querySelector('#nav [data-tab="'+target+'"]');
+  if(button) button.click();
+  else{
+    document.querySelectorAll('.tabview').forEach(view=>view.classList.toggle('hidden',view.id!==target));
+    if(mode==='admin') loadAdmin();
+  }
+}
+function enterMode(mode,options={}){
+  if(!STATE) return false;
+  const adminAllowed=!!(STATE.entry_modes&&STATE.entry_modes.admin&&hasStaffShell());
+  if(mode==='admin'&&!adminAllowed){
+    toast('Служебный доступ не найден. Владелец должен назначить его вашему Telegram ID.');
+    buzz('no'); return false;
+  }
+  CURRENT_MODE=mode;
+  document.body.classList.toggle('mode-admin',mode==='admin');
+  document.body.classList.toggle('mode-worker',mode==='worker');
+  document.querySelectorAll('.admin-only').forEach(el=>{
+    el.style.display=mode==='admin'&&adminAllowed?'flex':'none';
+  });
+  const me=STATE.me||{};
+  $('hName').textContent=mode==='admin'?'BibiBike CRM':(me.name||'Гость');
+  $('hRole').textContent=mode==='admin'
+    ? (me.name||'Пользователь')+' · '+roleLabel(me)
+    : 'БибиЗадачи · '+roleLabel(me);
+  $('modeToggle').innerHTML=(mode==='admin'?'🛡️':'🌿')+' <span>'+(mode==='admin'?'CRM':'Волонтёр')+'</span>';
+  $('entryGate').classList.add('hidden');
+  try{ sessionStorage.setItem(modeStorageKey(),mode); }catch(e){}
+  activateModeTab(mode);
+  $('nav').classList.toggle('hidden',mode==='admin'||!(STATE.can_work||hasStaffShell()));
+  if(options.guide!==false) renderGuide(mode,false);
+  return true;
+}
+$('entryWorker').onclick=()=>enterMode('worker');
+$('entryAdmin').onclick=()=>enterMode('admin');
+$('modeToggle').onclick=showEntryGate;
+$('helpToggle').onclick=()=>renderGuide(CURRENT_MODE||'worker',true);
+$('guideDone').onclick=()=>{
+  if(GUIDE_MODE){ try{ localStorage.setItem(guideStorageKey(GUIDE_MODE),'done'); }catch(e){} }
+  $('guideSheet').classList.add('hidden');
+};
+$('guideSheet').onclick=e=>{ if(e.target===$('guideSheet')) $('guideDone').click(); };
 
 /* Доступные шторки: фокус внутрь, Tab по кругу, Escape и возврат фокуса. */
 const SHEET_RETURN_FOCUS = new WeakMap();
@@ -2027,6 +2262,11 @@ async function load(){
       view.classList.toggle('hidden',view.id!=='tab-tasks'));
   }
   $('nav').classList.toggle('hidden',!navigationReady);
+  const preferred=storedEntryMode();
+  if(preferred&&enterMode(preferred,{guide:true})) return;
+  CURRENT_MODE=null;
+  document.body.classList.remove('mode-admin','mode-worker');
+  showEntryGate();
 }
 
 function setBonus(v){

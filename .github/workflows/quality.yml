@@ -21,3 +21,5 @@ jobs:
           python-version: "3.12"
       - name: Быстрая проверка синтаксиса
         run: python -m compileall -q main.py scripts migrations db_migration
+      - name: Контракт входа и прав доступа
+        run: python -m unittest discover -s tests -v

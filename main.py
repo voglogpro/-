@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.12.2"
-BUILD_VERSION = "2026-07-31 · БибиЗадачи v2.12.2"
+APP_VERSION = "v2.13.0"
+BUILD_VERSION = "2026-08-08 · БибиЗадачи v2.13.0 · Волонтёр + CRM"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 WELCOME_DELETE_DELAY_SEC = 5 * 60
@@ -5663,6 +5663,7 @@ async def api_state(request):
     referral_url = await get_referral_url(uid)
     staff_access = await _effective_staff_access(uid)
     admin = bool(staff_access["capabilities"])
+    is_owner = "owner" in staff_access["presets"]
     can_work = admin or (m["status"] == "approved" and m["role"] in ("helper", "employee", "admin"))
     return _json({
         "ok": True,
@@ -5671,8 +5672,20 @@ async def api_state(request):
         "bot_username": BOT_USERNAME,
         "me": _member_public(m),
         "is_admin": admin,
+        "is_owner": is_owner,
         "staff_access": staff_access,
         "can_work": can_work,
+        # Выбор на стартовом экране только маршрутизирует интерфейс. Серверные
+        # права администратора по-прежнему определяются Telegram ID и RBAC.
+        "entry_modes": {
+            "worker": True,
+            "admin": admin,
+        },
+        "default_mode": "admin" if is_owner else "worker",
+        "onboarding_versions": {
+            "worker": 2,
+            "admin": 2,
+        },
         "task_types": [
             {"key": k, **v} for k, v in TASK_TYPES.items()
         ],
