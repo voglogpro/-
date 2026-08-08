@@ -12,14 +12,22 @@ class EntryModeContractTests(unittest.TestCase):
     def test_release_versions_match(self):
         app_version = re.search(r'^APP_VERSION = "([^"]+)"', MAIN, re.MULTILINE)
         self.assertIsNotNone(app_version)
-        self.assertEqual(app_version.group(1), "v2.13.1")
-        self.assertIn("v2.13.1", HTML)
+        self.assertEqual(app_version.group(1), "v2.14.0")
+        self.assertIn("v2.14.0", HTML)
 
     def test_role_picker_is_frontend_routing_only(self):
         self.assertIn('id="entryWorker"', HTML)
         self.assertIn('id="entryAdmin"', HTML)
+        self.assertIn('id="entryBack"', HTML)
         self.assertIn('STATE.entry_modes&&STATE.entry_modes.admin&&hasStaffShell()', HTML)
         self.assertNotIn("/api/admin/login',{method:'POST'", HTML)
+
+    def test_crm_has_adaptive_fullscreen_controls(self):
+        self.assertIn('id="fullscreenToggle"', HTML)
+        self.assertIn('requestCRMFullscreen', HTML)
+        self.assertIn('tg.requestFullscreen()', HTML)
+        self.assertIn('tg.exitFullscreen()', HTML)
+        self.assertIn('@media (max-width:899px)', HTML)
 
     def test_state_exposes_server_derived_modes(self):
         self.assertIn('is_owner = "owner" in staff_access["presets"]', MAIN)

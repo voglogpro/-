@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" id="themeMeta" content="#F3F5EF">
-<meta name="application-version" content="v2.13.1">
+<meta name="application-version" content="v2.14.0">
 <title>БибиЗадачи</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -796,6 +796,11 @@ select.tinput{appearance:none;background-image:
 }
 .entry-shell{width:min(100%,880px);margin:0 auto;min-height:100%;display:flex;
   flex-direction:column;justify-content:center}
+.entry-back{position:fixed;z-index:2;top:calc(14px + var(--safe-top));left:var(--pad);
+  min-height:44px;padding:0 15px;border:1px solid var(--line);border-radius:14px;
+  background:var(--surface);color:var(--ink);display:flex;align-items:center;gap:8px;
+  font-size:14px;font-weight:850;box-shadow:0 8px 24px rgba(7,27,16,.08)}
+.entry-back:active{transform:scale(.97)}
 .entry-brand{display:flex;align-items:center;gap:13px;margin-bottom:28px}
 .entry-brand .logo{width:58px;height:58px;border-radius:18px}
 .entry-brand strong{display:block;font-size:20px;letter-spacing:-.03em}
@@ -820,11 +825,14 @@ select.tinput{appearance:none;background-image:
 .entry-lock{font-size:12px;color:var(--ink-2);font-weight:800;margin-top:7px}
 .entry-note{margin-top:15px;color:var(--ink-2);font-size:13px;text-align:center}
 
-.mode-toggle,.help-toggle{width:44px;height:44px;flex:none;border:0;border-radius:14px;
+.mode-toggle,.help-toggle,.fullscreen-toggle{width:44px;height:44px;flex:none;border:0;border-radius:14px;
   display:flex;align-items:center;justify-content:center;background:var(--surface);
   color:var(--ink);box-shadow:inset 0 0 0 1px var(--line);font-weight:900}
 .mode-toggle{width:auto;min-width:44px;padding:0 12px;font-size:12px;gap:6px}
 .help-toggle{font-size:17px}
+.fullscreen-toggle{display:none;width:auto;min-width:44px;padding:0 12px;gap:7px;font-size:12px}
+.fullscreen-toggle .fullscreen-icon{font-size:19px;line-height:1}
+.fullscreen-toggle.on{background:var(--brand);color:#06110a;box-shadow:none}
 
 .guide-hero{padding:16px;border-radius:20px;background:var(--brand-tint);margin-bottom:13px}
 .guide-hero .guide-icon{font-size:36px;margin-bottom:8px}
@@ -841,16 +849,51 @@ body.mode-admin{
   --ink:#F7FBF8;--ink-2:#9EADA3;--detail:#D2DCD5;--placeholder:#7F9085;
   --brand:#2DDF55;--brand-ink:#58EA78;--brand-tint:#102919;
   --danger-tint:#351919;--notice-ink:#D2F7DC;color-scheme:dark;
-  padding-bottom:calc(16px + var(--safe-bottom));
+  padding-bottom:calc(16px + var(--safe-bottom));min-height:100dvh;
 }
+body.mode-admin #app{min-height:100dvh;background:var(--bg)}
 body.mode-admin .head{background:rgba(7,17,11,.96)}
 body.mode-admin .wallet-mini{display:none}
 body.mode-admin #nav{display:none!important}
+body.mode-admin .fullscreen-toggle{display:flex}
 body.mode-admin #tab-admin>.segwrap{background:var(--bg);z-index:25}
 body.mode-admin #tab-admin .card{border:1px solid var(--line)}
 body.mode-admin #tab-admin .stat{min-height:104px}
 body.mode-admin #tab-admin .stat b{font-size:32px;color:var(--ink)}
 body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
+.crm-nav-icon{font-size:17px;line-height:1;display:inline-flex;width:22px;
+  align-items:center;justify-content:center}
+
+@media (max-width:899px){
+  body.mode-admin{padding-bottom:calc(82px + var(--safe-bottom))}
+  body.mode-admin .head{padding-left:12px;padding-right:12px;gap:7px}
+  body.mode-admin .logo-wrap,body.mode-admin .logo{width:40px;height:40px;border-radius:12px}
+  body.mode-admin .who .nm{font-size:14px}
+  body.mode-admin .who .rl{font-size:10.5px}
+  body.mode-admin .mode-toggle,body.mode-admin .help-toggle,
+  body.mode-admin .theme-toggle,body.mode-admin .fullscreen-toggle{width:40px;height:40px;min-width:40px;padding:0}
+  body.mode-admin .mode-toggle span,body.mode-admin .fullscreen-label{display:none}
+  body.mode-admin #tab-admin{max-width:none;width:100%;margin:0;padding:14px 12px 26px;gap:12px}
+  body.mode-admin #tab-admin>.segwrap{position:fixed;left:0;right:0;bottom:0;top:auto;
+    margin:0;padding:8px 8px calc(8px + var(--safe-bottom));border-radius:18px 18px 0 0;
+    border:1px solid var(--line);border-bottom:0;background:rgba(7,17,11,.97);
+    box-shadow:0 -12px 34px rgba(0,0,0,.3);backdrop-filter:blur(18px)}
+  body.mode-admin #tab-admin>.segwrap::after{display:none}
+  body.mode-admin #tab-admin>.segwrap .seg{display:flex;gap:3px;margin:0;padding:0;
+    background:transparent;border:0;overflow:visible}
+  body.mode-admin #tab-admin>.segwrap .seg button{width:100%;min-width:0;min-height:54px;
+    flex:1 1 0;padding:6px 2px;border-radius:12px;display:flex;flex-direction:column;gap:4px;
+    align-items:center;justify-content:center;white-space:normal;text-align:center;
+    font-size:9.5px;line-height:1.05}
+  body.mode-admin #tab-admin>.segwrap .seg button.on{background:var(--brand-tint);
+    color:var(--brand-ink);box-shadow:inset 0 0 0 1px var(--brand-line)}
+  body.mode-admin #tab-admin>[id^="adSub"]{width:100%;min-width:0}
+  body.mode-admin #tab-admin .statgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  body.mode-admin #tab-admin .stat{min-height:96px;padding:13px}
+  body.mode-admin #tab-admin .stat b{font-size:28px}
+  body.mode-admin #adOpen,body.mode-admin #adReview,body.mode-admin #adPending{display:grid;
+    grid-template-columns:1fr;gap:9px}
+}
 
 @media (min-width:720px){
   .entry-choices{grid-template-columns:1fr 1fr}
@@ -859,19 +902,25 @@ body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
 }
 @media (min-width:900px){
   body:not(.mode-admin) .head,body:not(.mode-admin) .page{max-width:760px;margin-left:auto;margin-right:auto}
-  body.mode-admin .head{padding-left:max(28px,calc((100vw - 1480px)/2));
-    padding-right:max(28px,calc((100vw - 1480px)/2))}
-  body.mode-admin #tab-admin{width:min(1480px,100%);margin:0 auto;padding:24px 28px 40px;
-    display:grid;grid-template-columns:230px minmax(0,1fr);align-items:start;gap:22px}
+  body.mode-admin{padding-bottom:0;min-width:900px}
+  body.mode-admin #app{width:100%;min-height:100dvh}
+  body.mode-admin .head{width:100%;max-width:none;padding:calc(14px + var(--safe-top)) 28px 14px;
+    background:rgba(7,17,11,.96);backdrop-filter:blur(18px)}
+  body.mode-admin .who .nm{font-size:19px}
+  body.mode-admin .who .rl{font-size:12px}
+  body.mode-admin #tab-admin{width:100%;max-width:none;margin:0;padding:26px 30px 48px;
+    display:grid;grid-template-columns:240px minmax(0,1fr);align-items:start;gap:26px}
   body.mode-admin #tab-admin>.segwrap{grid-column:1;position:sticky;top:92px;padding:8px;
-    border:1px solid var(--line);border-radius:20px}
+    border:1px solid var(--line);border-radius:20px;background:var(--surface)}
   body.mode-admin #tab-admin>.segwrap .seg{display:flex;flex-direction:column;
     background:transparent;margin:0;padding:0;overflow:visible}
   body.mode-admin #tab-admin>.segwrap .seg button{width:100%;text-align:left;flex:none;
     justify-content:flex-start;padding:13px 14px}
   body.mode-admin #tab-admin>.segwrap::after{display:none}
-  body.mode-admin #tab-admin>[id^="adSub"]{grid-column:2;min-width:0}
+  body.mode-admin #tab-admin>[id^="adSub"]{grid-column:2;grid-row:1;min-width:0;max-width:none}
   body.mode-admin #adSubQueue .statgrid{grid-template-columns:repeat(4,1fr)}
+  body.mode-admin #adOpen,body.mode-admin #adReview,body.mode-admin #adPending{
+    grid-template-columns:repeat(2,minmax(0,1fr))}
   body.mode-admin .sheet{align-items:center;justify-content:center;padding:24px}
   body.mode-admin .sheet .inner{max-width:720px;max-height:90vh;border-radius:24px;
     padding:22px;box-shadow:0 24px 80px rgba(0,0,0,.45)}
@@ -891,6 +940,7 @@ body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
 
 <div id="entryGate" class="entry-gate hidden" aria-labelledby="entryTitle">
   <div class="entry-shell">
+    <button class="entry-back" id="entryBack" type="button" aria-label="Вернуться назад">← <span>Назад</span></button>
     <div class="entry-brand">
       <div class="logo"><span class="brand-mark" aria-hidden="true">bb.</span></div>
       <div><strong>БибиЗадачи</strong><span>Исполнители и команда Бибибайка</span></div>
@@ -937,6 +987,9 @@ body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
       <div class="l">бибибонусы</div>
     </div>
     <button class="mode-toggle" id="modeToggle" type="button" aria-label="Сменить режим">🌿 <span>Режим</span></button>
+    <button class="fullscreen-toggle" id="fullscreenToggle" type="button" aria-label="Открыть CRM во весь экран" title="Полноэкранный режим">
+      <span class="fullscreen-icon" aria-hidden="true">⛶</span><span class="fullscreen-label">Во весь экран</span>
+    </button>
     <button class="help-toggle" id="helpToggle" type="button" aria-label="Открыть инструкцию">?</button>
     <button class="theme-toggle" id="themeToggle" type="button"
             aria-label="Настроить тему" title="Тема оформления">◐</button>
@@ -1141,11 +1194,11 @@ body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
   <!-- ═══════════ МОДЕРАЦИЯ ═══════════ -->
   <div id="tab-admin" class="page tabview hidden">
     <div class="segwrap"><div class="seg scroll" role="group" aria-label="Разделы CRM">
-      <button data-asub="adSubQueue" data-staff-section="queue" class="on" aria-pressed="true">Сводка</button>
-      <button data-asub="adSubCreate" data-staff-section="create" aria-pressed="false">Задания</button>
-      <button data-asub="adSubTeam" data-staff-section="team" aria-pressed="false">Люди</button>
-      <button data-asub="adSubAwards" data-staff-section="awards" aria-pressed="false">Бонусы и выплаты</button>
-      <button data-asub="adSubAccess" data-staff-section="access" aria-pressed="false">Доступ</button>
+      <button data-asub="adSubQueue" data-staff-section="queue" class="on" aria-pressed="true"><span class="crm-nav-icon" aria-hidden="true">⌁</span><span>Сводка</span></button>
+      <button data-asub="adSubCreate" data-staff-section="create" aria-pressed="false"><span class="crm-nav-icon" aria-hidden="true">✓</span><span>Задания</span></button>
+      <button data-asub="adSubTeam" data-staff-section="team" aria-pressed="false"><span class="crm-nav-icon" aria-hidden="true">♙</span><span>Люди</span></button>
+      <button data-asub="adSubAwards" data-staff-section="awards" aria-pressed="false"><span class="crm-nav-icon" aria-hidden="true">⚡</span><span>Бонусы</span></button>
+      <button data-asub="adSubAccess" data-staff-section="access" aria-pressed="false"><span class="crm-nav-icon" aria-hidden="true">⌾</span><span>Доступ</span></button>
     </div></div>
 
     <div id="adSubQueue" style="display:flex;flex-direction:column;gap:12px">
@@ -1741,7 +1794,8 @@ let WITHDRAW_LEASE_TIMER=null, WITHDRAW_LEASE_REFRESHING=false;
 const START_PARAM = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
 let START_PARAM_HANDLED = false;
 const FALLBACK_BOT_URL = 'https://t.me/BbGalterbot?start=help';
-let CURRENT_MODE = null, GUIDE_MODE = null;
+let CURRENT_MODE = null, GUIDE_MODE = null, ENTRY_RETURN_MODE = null;
+let FULLSCREEN_USER_REQUEST = false;
 
 const GUIDE_CONTENT = {
   worker: {
@@ -1778,8 +1832,74 @@ function storedEntryMode(){
     return value==='worker'||value==='admin'?value:null;
   }catch(e){ return null; }
 }
+function setTelegramBackVisible(visible){
+  try{
+    if(!tg||!tg.BackButton) return;
+    if(visible) tg.BackButton.show(); else tg.BackButton.hide();
+  }catch(e){}
+}
+function closeEntryGate(){
+  if(ENTRY_RETURN_MODE){
+    $('entryGate').classList.add('hidden');
+    setTelegramBackVisible(false);
+    ENTRY_RETURN_MODE=null;
+    return;
+  }
+  try{
+    if(tg&&typeof tg.close==='function'){ tg.close(); return; }
+  }catch(e){}
+  if(window.history.length>1) window.history.back();
+  else window.location.href=FALLBACK_BOT_URL;
+}
+function fullscreenActive(){
+  return Boolean(document.fullscreenElement||(tg&&tg.isFullscreen));
+}
+function syncFullscreenUI(){
+  const button=$('fullscreenToggle');
+  if(!button) return;
+  const active=fullscreenActive();
+  button.classList.toggle('on',active);
+  button.setAttribute('aria-pressed',active?'true':'false');
+  button.setAttribute('aria-label',active?'Выйти из полноэкранного режима':'Открыть CRM во весь экран');
+  const icon=button.querySelector('.fullscreen-icon');
+  const label=button.querySelector('.fullscreen-label');
+  if(icon) icon.textContent=active?'↙':'⛶';
+  if(label) label.textContent=active?'Свернуть':'Во весь экран';
+}
+async function requestCRMFullscreen(options={}){
+  if(CURRENT_MODE!=='admin') return false;
+  FULLSCREEN_USER_REQUEST=options.quiet!==true;
+  try{ if(tg&&typeof tg.expand==='function') tg.expand(); }catch(e){}
+  const desktop=window.matchMedia&&window.matchMedia('(min-width:900px)').matches;
+  if(desktop&&!document.fullscreenElement&&document.documentElement.requestFullscreen){
+    try{
+      await document.documentElement.requestFullscreen({navigationUI:'hide'});
+      syncFullscreenUI(); FULLSCREEN_USER_REQUEST=false; return true;
+    }catch(e){}
+  }
+  try{
+    if(tg&&typeof tg.requestFullscreen==='function'&&!tg.isFullscreen){
+      tg.requestFullscreen(); syncFullscreenUI(); return true;
+    }
+  }catch(e){}
+  syncFullscreenUI();
+  if(FULLSCREEN_USER_REQUEST) toast('Полный экран недоступен в этой версии Telegram. CRM всё равно открыта на всю ширину окна.');
+  FULLSCREEN_USER_REQUEST=false;
+  return false;
+}
+async function exitCRMFullscreen(){
+  try{ if(document.fullscreenElement&&document.exitFullscreen) await document.exitFullscreen(); }catch(e){}
+  try{ if(tg&&tg.isFullscreen&&typeof tg.exitFullscreen==='function') tg.exitFullscreen(); }catch(e){}
+  syncFullscreenUI();
+}
+async function toggleCRMFullscreen(){
+  buzz('tap');
+  if(fullscreenActive()) await exitCRMFullscreen();
+  else await requestCRMFullscreen({quiet:false});
+}
 function showEntryGate(){
   if(!STATE) return;
+  ENTRY_RETURN_MODE=CURRENT_MODE;
   const allowed=!!(STATE.entry_modes&&STATE.entry_modes.admin&&hasStaffShell());
   $('entryAdmin').disabled=false;
   $('entryAdmin').classList.toggle('locked',!allowed);
@@ -1787,6 +1907,7 @@ function showEntryGate(){
     ? (STATE.is_owner?'Полный доступ владельца подтверждён':'Служебный доступ подтверждён')
     : 'Доступ появится после назначения владельцем';
   $('entryGate').classList.remove('hidden');
+  setTelegramBackVisible(true);
   setTimeout(()=>$('entryWorker').focus(),0);
 }
 function renderGuide(mode,force){
@@ -1832,21 +1953,44 @@ function enterMode(mode,options={}){
     : 'БибиЗадачи · '+roleLabel(me);
   $('modeToggle').innerHTML=(mode==='admin'?'🛡️':'🌿')+' <span>'+(mode==='admin'?'CRM':'Исполнитель')+'</span>';
   $('entryGate').classList.add('hidden');
+  ENTRY_RETURN_MODE=null;
+  setTelegramBackVisible(false);
   try{ sessionStorage.setItem(modeStorageKey(),mode); }catch(e){}
   activateModeTab(mode);
   $('nav').classList.toggle('hidden',mode==='admin'||!(STATE.can_work||hasStaffShell()));
+  if(mode==='admin'&&options.fullscreen!==false) requestCRMFullscreen({quiet:true});
+  if(mode!=='admin'&&fullscreenActive()) exitCRMFullscreen();
   if(options.guide!==false) renderGuide(mode,false);
   return true;
 }
 $('entryWorker').onclick=()=>enterMode('worker');
 $('entryAdmin').onclick=()=>enterMode('admin');
+$('entryBack').onclick=closeEntryGate;
 $('modeToggle').onclick=showEntryGate;
+$('fullscreenToggle').onclick=toggleCRMFullscreen;
 $('helpToggle').onclick=()=>renderGuide(CURRENT_MODE||'worker',true);
 $('guideDone').onclick=()=>{
   if(GUIDE_MODE){ try{ localStorage.setItem(guideStorageKey(GUIDE_MODE),'done'); }catch(e){} }
   $('guideSheet').classList.add('hidden');
 };
 $('guideSheet').onclick=e=>{ if(e.target===$('guideSheet')) $('guideDone').click(); };
+document.addEventListener('fullscreenchange',syncFullscreenUI);
+try{
+  if(tg&&typeof tg.onEvent==='function'){
+    tg.onEvent('fullscreenChanged',()=>{ FULLSCREEN_USER_REQUEST=false; syncFullscreenUI(); });
+    tg.onEvent('fullscreenFailed',event=>{
+      syncFullscreenUI();
+      if(FULLSCREEN_USER_REQUEST){
+        const unsupported=event&&event.error==='UNSUPPORTED';
+        toast(unsupported?'Telegram на этом устройстве не поддерживает полный экран.':'Не удалось включить полный экран. Попробуйте кнопку ещё раз.');
+      }
+      FULLSCREEN_USER_REQUEST=false;
+    });
+  }
+  if(tg&&tg.BackButton&&typeof tg.BackButton.onClick==='function') tg.BackButton.onClick(()=>{
+    if(!$('entryGate').classList.contains('hidden')) closeEntryGate();
+  });
+}catch(e){}
 
 /* Доступные шторки: фокус внутрь, Tab по кругу, Escape и возврат фокуса. */
 const SHEET_RETURN_FOCUS = new WeakMap();
