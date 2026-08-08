@@ -47,8 +47,8 @@ from aiogram.types import (
     CallbackQuery, BufferedInputFile, ChatJoinRequest, ChatMemberUpdated, Update,
 )
 
-APP_VERSION = "v2.13.0"
-BUILD_VERSION = "2026-08-08 · БибиЗадачи v2.13.0 · Волонтёр + CRM"
+APP_VERSION = "v2.13.1"
+BUILD_VERSION = "2026-08-08 · БибиЗадачи v2.13.1 · Исполнитель + CRM"
 SQLITE_SCHEMA_VERSION = 300
 PUBLICATION_CLEANUP_MAX_ATTEMPTS = 10
 WELCOME_DELETE_DELAY_SEC = 5 * 60

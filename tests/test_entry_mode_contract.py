@@ -12,8 +12,8 @@ class EntryModeContractTests(unittest.TestCase):
     def test_release_versions_match(self):
         app_version = re.search(r'^APP_VERSION = "([^"]+)"', MAIN, re.MULTILINE)
         self.assertIsNotNone(app_version)
-        self.assertEqual(app_version.group(1), "v2.13.0")
-        self.assertIn("v2.13.0", HTML)
+        self.assertEqual(app_version.group(1), "v2.13.1")
+        self.assertIn("v2.13.1", HTML)
 
     def test_role_picker_is_frontend_routing_only(self):
         self.assertIn('id="entryWorker"', HTML)

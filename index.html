@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" id="themeMeta" content="#F3F5EF">
-<meta name="application-version" content="v2.13.0">
+<meta name="application-version" content="v2.13.1">
 <title>БибиЗадачи</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -893,14 +893,14 @@ body.mode-admin #tab-admin .role-switch{color:var(--brand-ink)}
   <div class="entry-shell">
     <div class="entry-brand">
       <div class="logo"><span class="brand-mark" aria-hidden="true">bb.</span></div>
-      <div><strong>БибиЗадачи</strong><span>Волонтёры и команда Бибибайка</span></div>
+      <div><strong>БибиЗадачи</strong><span>Исполнители и команда Бибибайка</span></div>
     </div>
     <h1 class="entry-title" id="entryTitle">Кто вы сегодня?</h1>
     <p class="entry-lead">Выберите рабочий режим. Права администратора проверяет сервер по вашему Telegram — одна кнопка не может открыть чужой доступ.</p>
     <div class="entry-choices">
       <button class="entry-choice" id="entryWorker" type="button">
         <span class="entry-icon">🌿</span>
-        <span class="entry-copy"><b>Я волонтёр</b><small>Найти задание, приложить результат и получить бибибонусы.</small></span>
+        <span class="entry-copy"><b>Я исполнитель</b><small>Найти задание, приложить результат и получить бибибонусы.</small></span>
         <span class="entry-arrow">→</span>
       </button>
       <button class="entry-choice" id="entryAdmin" type="button">
@@ -1830,7 +1830,7 @@ function enterMode(mode,options={}){
   $('hRole').textContent=mode==='admin'
     ? (me.name||'Пользователь')+' · '+roleLabel(me)
     : 'БибиЗадачи · '+roleLabel(me);
-  $('modeToggle').innerHTML=(mode==='admin'?'🛡️':'🌿')+' <span>'+(mode==='admin'?'CRM':'Волонтёр')+'</span>';
+  $('modeToggle').innerHTML=(mode==='admin'?'🛡️':'🌿')+' <span>'+(mode==='admin'?'CRM':'Исполнитель')+'</span>';
   $('entryGate').classList.add('hidden');
   try{ sessionStorage.setItem(modeStorageKey(),mode); }catch(e){}
   activateModeTab(mode);
